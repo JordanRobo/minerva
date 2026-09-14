@@ -1,1 +1,0 @@
-{"nodes": [{"id": "apps_web_static_robots_allow_all", "label": "robots.txt allow-all crawling rule (User-agent: *, no Disallow)", "file_type": "code", "source_file": "apps/web/static/robots.txt", "source_location": null, "source_url": null, "captured_at": null, "author": null, "contributor": null}], "edges": [], "hyperedges": []}
