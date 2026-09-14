@@ -1,0 +1,16 @@
+[package]
+name = "interface"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "minerva-server"
+path = "src/main.rs"
+
+[dependencies]
+actix-web = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+domain = { path = "../domain" }
+application = { path = "../application" }
+infrastructure = { path = "../infrastructure" }

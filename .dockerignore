@@ -1,0 +1,7 @@
+apps/web/node_modules
+apps/web/.svelte-kit
+server/target
+**/*.log
+.git
+
+graphify-out

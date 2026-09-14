@@ -1,0 +1,9 @@
+[package]
+name = "infrastructure"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+diesel = { workspace = true }
+redis = { workspace = true }
+object_store = { workspace = true }
