@@ -1,5 +1,6 @@
 # Rust
 server/target/
+server/migrations/.diesel_lock
 
 # Node (apps/web has its own .gitignore)
 node_modules/
