@@ -11,9 +11,17 @@
 //! ambiguous pair — so joins between `task_relations` and `tasks` must
 //! always spell out their `ON` clause explicitly.
 
+pub mod goal_milestone_repository;
 pub mod goal_repository;
 pub mod mapping;
 pub mod milestone_repository;
+pub mod progress_snapshot_repository;
+pub mod task_relation_repository;
+pub mod task_repository;
 
+pub use goal_milestone_repository::PostgresGoalMilestoneRepository;
 pub use goal_repository::PostgresGoalRepository;
 pub use milestone_repository::PostgresMilestoneRepository;
+pub use progress_snapshot_repository::PostgresProgressSnapshotRepository;
+pub use task_relation_repository::PostgresTaskRelationRepository;
+pub use task_repository::PostgresTaskRepository;
