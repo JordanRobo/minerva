@@ -46,6 +46,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    task_relations (id) {
+        id -> Uuid,
+        source_task_id -> Uuid,
+        target_task_id -> Uuid,
+        relation_type -> Text,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     tasks (id) {
         id -> Uuid,
         milestone_id -> Nullable<Uuid>,
@@ -69,5 +79,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     goals,
     milestones,
     progress_snapshots,
+    task_relations,
     tasks,
 );

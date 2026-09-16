@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+application = { path = "../application" }
+async-trait = { workspace = true }
+chrono = "0.4"
 diesel = { workspace = true }
-redis = { workspace = true }
+domain = { path = "../domain" }
 object_store = { workspace = true }
+redis = { workspace = true }
+tokio = { workspace = true }
+uuid = "1"
