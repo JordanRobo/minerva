@@ -12,7 +12,7 @@ use infrastructure::repositories::PostgresGoalRepository;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{bad_request, not_found, repo_error_response};
+use crate::error::{repo_error_response, ApiError};
 
 /// JSON shape of a goal in responses.
 #[derive(Serialize)]
@@ -56,9 +56,9 @@ pub struct GoalRequest {
 pub async fn create_goal(
     goals: web::Data<PostgresGoalRepository>,
     body: web::Json<GoalRequest>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
-        return bad_request("title must not be empty");
+        return Err(ApiError::bad_request("title must not be empty"));
     }
     let now = Utc::now();
     let goal = Goal {
@@ -72,17 +72,19 @@ pub async fn create_goal(
         updated_at: now,
     };
     match goals.create(goal).await {
-        Ok(goal) => HttpResponse::Created().json(GoalResponse::from(&goal)),
-        Err(err) => repo_error_response(err),
+        Ok(goal) => Ok(HttpResponse::Created().json(GoalResponse::from(&goal))),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
 /// `GET /api/goals` — every goal.
-pub async fn list_goals(goals: web::Data<PostgresGoalRepository>) -> HttpResponse {
+pub async fn list_goals(
+    goals: web::Data<PostgresGoalRepository>,
+) -> Result<HttpResponse, ApiError> {
     match goals.list().await {
-        Ok(goals) => HttpResponse::Ok()
-            .json(goals.iter().map(GoalResponse::from).collect::<Vec<_>>()),
-        Err(err) => repo_error_response(err),
+        Ok(goals) => Ok(HttpResponse::Ok()
+            .json(goals.iter().map(GoalResponse::from).collect::<Vec<_>>())),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -90,11 +92,11 @@ pub async fn list_goals(goals: web::Data<PostgresGoalRepository>) -> HttpRespons
 pub async fn get_goal(
     goals: web::Data<PostgresGoalRepository>,
     path: web::Path<Uuid>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     match goals.find_by_id(GoalId(*path)).await {
-        Ok(Some(goal)) => HttpResponse::Ok().json(GoalResponse::from(&goal)),
-        Ok(None) => not_found(),
-        Err(err) => repo_error_response(err),
+        Ok(Some(goal)) => Ok(HttpResponse::Ok().json(GoalResponse::from(&goal))),
+        Ok(None) => Err(ApiError::not_found()),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -104,9 +106,9 @@ pub async fn update_goal(
     goals: web::Data<PostgresGoalRepository>,
     path: web::Path<Uuid>,
     body: web::Json<GoalRequest>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
-        return bad_request("title must not be empty");
+        return Err(ApiError::bad_request("title must not be empty"));
     }
     let id = GoalId(*path);
     match goals.find_by_id(id).await {
@@ -121,12 +123,12 @@ pub async fn update_goal(
                 ..existing
             };
             match goals.update(updated).await {
-                Ok(goal) => HttpResponse::Ok().json(GoalResponse::from(&goal)),
-                Err(err) => repo_error_response(err),
+                Ok(goal) => Ok(HttpResponse::Ok().json(GoalResponse::from(&goal))),
+                Err(err) => Err(repo_error_response(err)),
             }
         }
-        Ok(None) => not_found(),
-        Err(err) => repo_error_response(err),
+        Ok(None) => Err(ApiError::not_found()),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -134,9 +136,9 @@ pub async fn update_goal(
 pub async fn delete_goal(
     goals: web::Data<PostgresGoalRepository>,
     path: web::Path<Uuid>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     match goals.delete(GoalId(*path)).await {
-        Ok(()) => HttpResponse::NoContent().finish(),
-        Err(err) => repo_error_response(err),
+        Ok(()) => Ok(HttpResponse::NoContent().finish()),
+        Err(err) => Err(repo_error_response(err)),
     }
 }

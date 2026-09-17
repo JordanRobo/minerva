@@ -12,7 +12,7 @@ use infrastructure::repositories::PostgresTaskRepository;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{bad_request, not_found, repo_error_response};
+use crate::error::{repo_error_response, ApiError};
 
 /// JSON shape of a task in responses.
 #[derive(Serialize)]
@@ -70,9 +70,9 @@ pub struct TaskListQuery {
 pub async fn create_task(
     tasks: web::Data<PostgresTaskRepository>,
     body: web::Json<TaskRequest>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
-        return bad_request("title must not be empty");
+        return Err(ApiError::bad_request("title must not be empty"));
     }
     let now = Utc::now();
     let task = Task {
@@ -86,8 +86,8 @@ pub async fn create_task(
         updated_at: now,
     };
     match tasks.create(task).await {
-        Ok(task) => HttpResponse::Created().json(TaskResponse::from(&task)),
-        Err(err) => repo_error_response(err),
+        Ok(task) => Ok(HttpResponse::Created().json(TaskResponse::from(&task))),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -98,16 +98,20 @@ pub async fn create_task(
 pub async fn list_tasks(
     query: web::Query<TaskListQuery>,
     tasks: web::Data<PostgresTaskRepository>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     let listed = match (query.milestone_id, query.unassigned) {
         (Some(milestone_id), None) => tasks.list_by_milestone(MilestoneId(milestone_id)).await,
         (None, Some(true)) => tasks.list_unassigned().await,
-        _ => return bad_request("provide exactly one of milestone_id or unassigned=true"),
+        _ => {
+            return Err(ApiError::bad_request(
+                "provide exactly one of milestone_id or unassigned=true",
+            ))
+        }
     };
     match listed {
-        Ok(tasks) => HttpResponse::Ok()
-            .json(tasks.iter().map(TaskResponse::from).collect::<Vec<_>>()),
-        Err(err) => repo_error_response(err),
+        Ok(tasks) => Ok(HttpResponse::Ok()
+            .json(tasks.iter().map(TaskResponse::from).collect::<Vec<_>>())),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -115,11 +119,11 @@ pub async fn list_tasks(
 pub async fn get_task(
     tasks: web::Data<PostgresTaskRepository>,
     path: web::Path<Uuid>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     match tasks.find_by_id(TaskId(*path)).await {
-        Ok(Some(task)) => HttpResponse::Ok().json(TaskResponse::from(&task)),
-        Ok(None) => not_found(),
-        Err(err) => repo_error_response(err),
+        Ok(Some(task)) => Ok(HttpResponse::Ok().json(TaskResponse::from(&task))),
+        Ok(None) => Err(ApiError::not_found()),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -131,9 +135,9 @@ pub async fn update_task(
     tasks: web::Data<PostgresTaskRepository>,
     path: web::Path<Uuid>,
     body: web::Json<TaskRequest>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
-        return bad_request("title must not be empty");
+        return Err(ApiError::bad_request("title must not be empty"));
     }
     let id = TaskId(*path);
     match tasks.find_by_id(id).await {
@@ -149,12 +153,12 @@ pub async fn update_task(
                 ..existing
             };
             match tasks.update(updated).await {
-                Ok(task) => HttpResponse::Ok().json(TaskResponse::from(&task)),
-                Err(err) => repo_error_response(err),
+                Ok(task) => Ok(HttpResponse::Ok().json(TaskResponse::from(&task))),
+                Err(err) => Err(repo_error_response(err)),
             }
         }
-        Ok(None) => not_found(),
-        Err(err) => repo_error_response(err),
+        Ok(None) => Err(ApiError::not_found()),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -162,10 +166,10 @@ pub async fn update_task(
 pub async fn delete_task(
     tasks: web::Data<PostgresTaskRepository>,
     path: web::Path<Uuid>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     match tasks.delete(TaskId(*path)).await {
-        Ok(()) => HttpResponse::NoContent().finish(),
-        Err(err) => repo_error_response(err),
+        Ok(()) => Ok(HttpResponse::NoContent().finish()),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
