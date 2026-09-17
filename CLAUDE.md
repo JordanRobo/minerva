@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Minerva is an open source project-management platform for schools, organized goal/milestone-first. The repo is at the scaffolding stage: no business logic exists yet — the only backend endpoint is `GET /health`. The license will be Elastic License 2.0; `LICENSE` is a placeholder until the real text is added.
+Minerva is an open source project-management platform for schools, organized goal/milestone-first. The backend's first milestone is done: the `domain` layer (Goal, Milestone, GoalMilestone, Task, TaskRelation, ProgressSnapshot, Status), all six Diesel migrations, and the application-layer repository ports with their Postgres implementations are in place and wired into the Actix composition root. The only real HTTP route is `GET /health`; the `/debug/*` routes are temporary, unauthenticated wiring-verification endpoints, not the real API surface. The license will be Elastic License 2.0; `LICENSE` is a placeholder until the real text is added.
 
 ## Commands
 
