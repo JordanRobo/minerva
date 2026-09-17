@@ -1,6 +1,7 @@
 mod debug;
 mod error;
 mod goals;
+mod milestones;
 
 use actix_web::{web, App, HttpResponse, HttpServer};
 use infrastructure::db::build_pool;
@@ -51,20 +52,24 @@ async fn main() -> std::io::Result<()> {
             .app_data(task_relations.clone())
             .app_data(progress_snapshots.clone())
             .route("/health", web::get().to(health))
-            // The real API surface, starting with Goals (Milestone 2).
+            // The real API surface, built endpoint-group by endpoint-group.
             .service(
                 web::scope("/api")
                     .route("/goals", web::post().to(goals::create_goal))
                     .route("/goals", web::get().to(goals::list_goals))
                     .route("/goals/{id}", web::get().to(goals::get_goal))
                     .route("/goals/{id}", web::put().to(goals::update_goal))
-                    .route("/goals/{id}", web::delete().to(goals::delete_goal)),
+                    .route("/goals/{id}", web::delete().to(goals::delete_goal))
+                    .route("/milestones", web::post().to(milestones::create_milestone))
+                    .route("/milestones", web::get().to(milestones::list_milestones))
+                    .route("/milestones/{id}", web::get().to(milestones::get_milestone))
+                    .route("/milestones/{id}", web::put().to(milestones::update_milestone))
+                    .route("/milestones/{id}", web::delete().to(milestones::delete_milestone)),
             )
             // TEMPORARY: verifies repository wiring end-to-end; unauthenticated
             // and not meant to ship. Remove this scope before /debug is a real API.
             .service(
                 web::scope("/debug")
-                    .route("/milestones", web::get().to(debug::list_milestones))
                     .route("/tasks", web::get().to(debug::list_tasks))
                     .route("/task-relations", web::get().to(debug::list_task_relations))
                     .route("/progress-snapshots", web::get().to(debug::list_progress_snapshots))
