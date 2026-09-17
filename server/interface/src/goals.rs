@@ -12,7 +12,7 @@ use infrastructure::repositories::PostgresGoalRepository;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::repo_error_response;
+use crate::error::{bad_request, not_found, repo_error_response};
 
 /// JSON shape of a goal in responses.
 #[derive(Serialize)]
@@ -139,12 +139,4 @@ pub async fn delete_goal(
         Ok(()) => HttpResponse::NoContent().finish(),
         Err(err) => repo_error_response(err),
     }
-}
-
-fn bad_request(message: &str) -> HttpResponse {
-    HttpResponse::BadRequest().json(serde_json::json!({ "error": message }))
-}
-
-fn not_found() -> HttpResponse {
-    HttpResponse::NotFound().json(serde_json::json!({ "error": "not found" }))
 }

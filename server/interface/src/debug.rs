@@ -8,24 +8,15 @@
 
 use actix_web::{web, HttpResponse};
 use application::ports::{
-    GoalMilestoneRepository, MilestoneRepository, ProgressSnapshotRepository,
-    TaskRelationRepository, TaskRepository,
+    GoalMilestoneRepository, ProgressSnapshotRepository, TaskRelationRepository, TaskRepository,
 };
 use domain::{GoalId, MilestoneId, ProgressTarget, TaskId};
 use infrastructure::repositories::{
-    PostgresGoalMilestoneRepository, PostgresMilestoneRepository,
-    PostgresProgressSnapshotRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
+    PostgresGoalMilestoneRepository, PostgresProgressSnapshotRepository,
+    PostgresTaskRelationRepository, PostgresTaskRepository,
 };
 use serde::Deserialize;
 use uuid::Uuid;
-
-/// `GET /debug/milestones` — every milestone.
-pub async fn list_milestones(milestones: web::Data<PostgresMilestoneRepository>) -> HttpResponse {
-    match milestones.list().await {
-        Ok(milestones) => HttpResponse::Ok().json(milestones),
-        Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
-    }
-}
 
 /// `GET /debug/tasks` — tasks not assigned to any milestone.
 ///

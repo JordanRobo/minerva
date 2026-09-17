@@ -1,5 +1,5 @@
-//! Shared mapping from application-layer repository errors to HTTP responses,
-//! so every endpoint group translates [`RepositoryError`] the same way.
+//! Shared helpers for building HTTP error responses, so every endpoint group
+//! translates failures the same way.
 
 use actix_web::HttpResponse;
 use application::ports::RepositoryError;
@@ -18,4 +18,14 @@ pub fn repo_error_response(err: RepositoryError) -> HttpResponse {
         RepositoryError::Unexpected(_) => HttpResponse::InternalServerError()
             .json(serde_json::json!({ "error": "internal server error" })),
     }
+}
+
+/// A 400 response with a JSON error message, for invalid client input.
+pub fn bad_request(message: &str) -> HttpResponse {
+    HttpResponse::BadRequest().json(serde_json::json!({ "error": message }))
+}
+
+/// A 404 response with the standard JSON error body.
+pub fn not_found() -> HttpResponse {
+    HttpResponse::NotFound().json(serde_json::json!({ "error": "not found" }))
 }
