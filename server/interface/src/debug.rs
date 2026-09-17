@@ -7,27 +7,14 @@
 //! `main.rs`) before `/debug` is considered a real API surface.
 
 use actix_web::{web, HttpResponse};
-use application::ports::{
-    GoalMilestoneRepository, ProgressSnapshotRepository, TaskRelationRepository, TaskRepository,
-};
+use application::ports::{GoalMilestoneRepository, ProgressSnapshotRepository, TaskRelationRepository};
 use domain::{GoalId, MilestoneId, ProgressTarget, TaskId};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresProgressSnapshotRepository,
-    PostgresTaskRelationRepository, PostgresTaskRepository,
+    PostgresTaskRelationRepository,
 };
 use serde::Deserialize;
 use uuid::Uuid;
-
-/// `GET /debug/tasks` — tasks not assigned to any milestone.
-///
-/// `TaskRepository` exposes no bulk "list all" read, so this uses the
-/// parameter-free `list_unassigned` to exercise the wiring.
-pub async fn list_tasks(tasks: web::Data<PostgresTaskRepository>) -> HttpResponse {
-    match tasks.list_unassigned().await {
-        Ok(tasks) => HttpResponse::Ok().json(tasks),
-        Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
-    }
-}
 
 #[derive(Deserialize)]
 pub struct TaskIdQuery {

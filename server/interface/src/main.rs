@@ -2,6 +2,7 @@ mod debug;
 mod error;
 mod goals;
 mod milestones;
+mod tasks;
 
 use actix_web::{web, App, HttpResponse, HttpServer};
 use infrastructure::db::build_pool;
@@ -64,13 +65,17 @@ async fn main() -> std::io::Result<()> {
                     .route("/milestones", web::get().to(milestones::list_milestones))
                     .route("/milestones/{id}", web::get().to(milestones::get_milestone))
                     .route("/milestones/{id}", web::put().to(milestones::update_milestone))
-                    .route("/milestones/{id}", web::delete().to(milestones::delete_milestone)),
+                    .route("/milestones/{id}", web::delete().to(milestones::delete_milestone))
+                    .route("/tasks", web::post().to(tasks::create_task))
+                    .route("/tasks", web::get().to(tasks::list_tasks))
+                    .route("/tasks/{id}", web::get().to(tasks::get_task))
+                    .route("/tasks/{id}", web::put().to(tasks::update_task))
+                    .route("/tasks/{id}", web::delete().to(tasks::delete_task)),
             )
             // TEMPORARY: verifies repository wiring end-to-end; unauthenticated
             // and not meant to ship. Remove this scope before /debug is a real API.
             .service(
                 web::scope("/debug")
-                    .route("/tasks", web::get().to(debug::list_tasks))
                     .route("/task-relations", web::get().to(debug::list_task_relations))
                     .route("/progress-snapshots", web::get().to(debug::list_progress_snapshots))
                     .route("/goal-milestones", web::get().to(debug::list_goal_milestones)),

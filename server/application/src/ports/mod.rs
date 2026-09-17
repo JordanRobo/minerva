@@ -27,6 +27,9 @@ pub enum RepositoryError {
     NotFound,
     /// The operation conflicts with the current state (e.g. a duplicate).
     Conflict(String),
+    /// The operation referenced an entity that does not exist (e.g. a foreign
+    /// key pointing at a missing row).
+    InvalidReference(String),
     /// Something unexpected went wrong (I/O failure, constraint violation, ...).
     Unexpected(String),
 }
@@ -36,6 +39,7 @@ impl std::fmt::Display for RepositoryError {
         match self {
             RepositoryError::NotFound => write!(f, "requested resource was not found"),
             RepositoryError::Conflict(detail) => write!(f, "conflict: {detail}"),
+            RepositoryError::InvalidReference(detail) => write!(f, "invalid reference: {detail}"),
             RepositoryError::Unexpected(detail) => {
                 write!(f, "unexpected repository error: {detail}")
             }
