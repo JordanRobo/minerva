@@ -1,13 +1,14 @@
 //! Tasks: the day-to-day work that moves toward a milestone.
 
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::milestone::MilestoneId;
 use crate::task_relation::{TaskRelation, TaskRelationType};
 
 /// Identifier for a [`Task`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct TaskId(pub Uuid);
 
 impl TaskId {
@@ -29,7 +30,7 @@ impl Default for TaskId {
 /// deliberately separate from [`crate::status::Status`], which describes how
 /// healthy a goal or milestone is against its target date. The two answer
 /// different questions and neither is derived from the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TaskStatus {
     /// Not planned to start yet.
     Backlog,
@@ -42,7 +43,7 @@ pub enum TaskStatus {
 }
 
 /// A unit of day-to-day work, optionally attached to a milestone.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Task {
     pub id: TaskId,
     /// The milestone this task contributes to, if one has been chosen. A

@@ -5,4 +5,8 @@ edition.workspace = true
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+# `serde` is a data-shape concern (Serialize only), not I/O: it lets the
+# interface layer return domain values as JSON without copying them into DTOs.
+# `std` is required for the String/Option impls used by these types.
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
 uuid = { version = "1", features = ["v4", "serde"] }
