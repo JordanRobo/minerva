@@ -1,12 +1,13 @@
 //! Milestones: the measurable steps a goal is broken into.
 
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::status::GoalStatus;
 
 /// Identifier for a [`Milestone`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct MilestoneId(pub Uuid);
 
 impl MilestoneId {
@@ -23,7 +24,7 @@ impl Default for MilestoneId {
 }
 
 /// A single measurable step on the way to a goal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Milestone {
     pub id: MilestoneId,
     pub title: String,

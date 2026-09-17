@@ -1,6 +1,7 @@
 //! Point-in-time records of how far along a goal or milestone is.
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::goal::GoalId;
@@ -8,7 +9,7 @@ use crate::milestone::MilestoneId;
 use crate::status::Status;
 
 /// Identifier for a [`ProgressSnapshot`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct ProgressSnapshotId(pub Uuid);
 
 impl ProgressSnapshotId {
@@ -26,7 +27,7 @@ impl Default for ProgressSnapshotId {
 
 /// The thing a progress snapshot was recorded for: either a goal or a
 /// milestone, never both and never neither.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum ProgressTarget {
     Goal(GoalId),
     Milestone(MilestoneId),
@@ -55,7 +56,7 @@ impl std::error::Error for ProgressError {}
 ///
 /// Snapshots are what let the platform answer "how has progress changed over
 /// time?" without re-deriving history from other data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProgressSnapshot {
     pub id: ProgressSnapshotId,
     pub target: ProgressTarget,

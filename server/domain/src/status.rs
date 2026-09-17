@@ -1,7 +1,9 @@
 //! Status types shared by goals and milestones.
 
+use serde::Serialize;
+
 /// The state of a goal or milestone with respect to its target date.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Status {
     /// Progress is moving along as planned.
     OnTrack,
@@ -14,7 +16,7 @@ pub enum Status {
 }
 
 /// Where a [`GoalStatus`] value came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum StatusSource {
     /// The status was worked out by the system from the underlying data.
     Computed,
@@ -24,7 +26,7 @@ pub enum StatusSource {
 
 /// A status together with where it came from, so callers can always tell a
 /// system-computed value apart from one that was overridden by hand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct GoalStatus {
     pub status: Status,
     pub source: StatusSource,

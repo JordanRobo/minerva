@@ -2,12 +2,13 @@
 //! another (for example, one task must finish before another can start).
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::task::TaskId;
 
 /// Identifier for a [`TaskRelation`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct TaskRelationId(pub Uuid);
 
 impl TaskRelationId {
@@ -40,7 +41,7 @@ impl Default for TaskRelationId {
 /// exhaustive matches are still allowed, and constructing the known variants
 /// works as usual everywhere.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TaskRelationType {
     /// The source task must be finished before the target task can proceed.
     Blocks,
@@ -67,7 +68,7 @@ pub enum TaskRelationType {
 // TODO(application): decide where and how to keep Blocks/BlockedBy pairs
 // consistent when relations are created or removed; that orchestration
 // belongs in the application layer, not here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TaskRelation {
     pub id: TaskRelationId,
     pub source_task_id: TaskId,

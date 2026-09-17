@@ -1,13 +1,14 @@
 //! Goals: the outcomes a school project is organized around.
 
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::milestone::Milestone;
 use crate::status::{GoalStatus, Status};
 
 /// Identifier for a [`Goal`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct GoalId(pub Uuid);
 
 impl GoalId {
@@ -24,7 +25,7 @@ impl Default for GoalId {
 }
 
 /// An outcome the project is organized around, broken into milestones.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Goal {
     pub id: GoalId,
     pub title: String,
