@@ -10,16 +10,19 @@ use chrono::{DateTime, NaiveDate, Utc};
 use domain::{Goal, GoalId, GoalStatus, Status};
 use infrastructure::repositories::PostgresGoalRepository;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{repo_error_response, ApiError};
+use crate::openapi::GoalStatusDoc;
 
 /// JSON shape of a goal in responses.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct GoalResponse {
     pub id: Uuid,
     pub title: String,
     pub description: Option<String>,
+    #[schema(value_type = GoalStatusDoc)]
     pub status: GoalStatus,
     pub target_date: Option<NaiveDate>,
     pub created_at: DateTime<Utc>,
@@ -42,7 +45,7 @@ impl From<&Goal> for GoalResponse {
 
 /// Body for `POST /api/goals` and `PUT /api/goals/{id}`. The id, status, and
 /// timestamps are server-managed and never accepted from the client.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct GoalRequest {
     pub title: String,
     #[serde(default)]
@@ -53,6 +56,16 @@ pub struct GoalRequest {
 
 /// `POST /api/goals` — create a goal. 201 with the created goal; 400 if the
 /// title is missing or blank.
+#[utoipa::path(
+    post,
+    path = "/api/goals",
+    tags = ["goals"],
+    request_body = GoalRequest,
+    responses(
+        (status = 201, description = "Goal created", body = GoalResponse),
+        (status = 400, description = "Title is missing or blank", body = ApiError)
+    )
+)]
 pub async fn create_goal(
     goals: web::Data<PostgresGoalRepository>,
     body: web::Json<GoalRequest>,
@@ -78,6 +91,12 @@ pub async fn create_goal(
 }
 
 /// `GET /api/goals` — every goal.
+#[utoipa::path(
+    get,
+    path = "/api/goals",
+    tags = ["goals"],
+    responses((status = 200, description = "All goals", body = Vec<GoalResponse>))
+)]
 pub async fn list_goals(
     goals: web::Data<PostgresGoalRepository>,
 ) -> Result<HttpResponse, ApiError> {
@@ -89,6 +108,16 @@ pub async fn list_goals(
 }
 
 /// `GET /api/goals/{id}` — one goal, or 404.
+#[utoipa::path(
+    get,
+    path = "/api/goals/{id}",
+    tags = ["goals"],
+    params(("id" = Uuid, Path, description = "Goal identifier")),
+    responses(
+        (status = 200, description = "The goal", body = GoalResponse),
+        (status = 404, description = "No goal with this id", body = ApiError)
+    )
+)]
 pub async fn get_goal(
     goals: web::Data<PostgresGoalRepository>,
     path: web::Path<Uuid>,
@@ -102,6 +131,18 @@ pub async fn get_goal(
 
 /// `PUT /api/goals/{id}` — replace a goal's fields. The stored status and
 /// created_at are preserved; updated_at is refreshed. 404 if the goal is gone.
+#[utoipa::path(
+    put,
+    path = "/api/goals/{id}",
+    tags = ["goals"],
+    params(("id" = Uuid, Path, description = "Goal identifier")),
+    request_body = GoalRequest,
+    responses(
+        (status = 200, description = "The updated goal", body = GoalResponse),
+        (status = 400, description = "Title is missing or blank", body = ApiError),
+        (status = 404, description = "No goal with this id", body = ApiError)
+    )
+)]
 pub async fn update_goal(
     goals: web::Data<PostgresGoalRepository>,
     path: web::Path<Uuid>,
@@ -133,6 +174,16 @@ pub async fn update_goal(
 }
 
 /// `DELETE /api/goals/{id}` — remove a goal. 204 on success, 404 if missing.
+#[utoipa::path(
+    delete,
+    path = "/api/goals/{id}",
+    tags = ["goals"],
+    params(("id" = Uuid, Path, description = "Goal identifier")),
+    responses(
+        (status = 204, description = "Goal deleted"),
+        (status = 404, description = "No goal with this id", body = ApiError)
+    )
+)]
 pub async fn delete_goal(
     goals: web::Data<PostgresGoalRepository>,
     path: web::Path<Uuid>,

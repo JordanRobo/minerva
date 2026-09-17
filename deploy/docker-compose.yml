@@ -1,86 +1,86 @@
 name: minerva
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: minerva-postgres
-    environment:
-      POSTGRES_USER: minerva
-      POSTGRES_PASSWORD: minerva
-      POSTGRES_DB: minerva
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U minerva -d minerva"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
+    postgres:
+        image: postgres:16-alpine
+        container_name: minerva-postgres
+        environment:
+            POSTGRES_USER: minerva
+            POSTGRES_PASSWORD: minerva
+            POSTGRES_DB: minerva
+        ports:
+            - "5432:5432"
+        volumes:
+            - postgres-data:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U minerva -d minerva"]
+            interval: 5s
+            timeout: 5s
+            retries: 12
 
-  redis:
-    image: redis:7-alpine
-    container_name: minerva-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
+    redis:
+        image: redis:7-alpine
+        container_name: minerva-redis
+        ports:
+            - "6379:6379"
+        volumes:
+            - redis-data:/data
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            timeout: 3s
+            retries: 12
 
-  # Placeholder S3-compatible object storage for local dev.
-  rustfs:
-    image: rustfs/rustfs:latest
-    container_name: minerva-rustfs
-    environment:
-      RUSTFS_ACCESS_KEY_ID: minerva
-      RUSTFS_SECRET_ACCESS_KEY: minerva-dev-secret
-      RUSTFS_ROOT: /data
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - rustfs-data:/data
+    # Placeholder S3-compatible object storage for local dev.
+    rustfs:
+        image: rustfs/rustfs:latest
+        container_name: minerva-rustfs
+        environment:
+            RUSTFS_ACCESS_KEY_ID: minerva
+            RUSTFS_SECRET_ACCESS_KEY: minerva-dev-secret
+            RUSTFS_ROOT: /data
+        ports:
+            - "9000:9000"
+            - "9001:9001"
+        volumes:
+            - rustfs-data:/data
 
-  server:
-    build:
-      # Relative to this file's directory (deploy/), so the context is the repo root.
-      context: ..
-      dockerfile: deploy/docker/server.Dockerfile
-    container_name: minerva-server
-    environment:
-      PORT: "8080"
-      DATABASE_URL: postgresql://minerva:minerva@postgres:5432/minerva
-      REDIS_URL: redis://redis:6379
-      S3_ENDPOINT: http://rustfs:9000
-      S3_REGION: us-east-1
-      S3_BUCKET: minerva
-      S3_ACCESS_KEY_ID: minerva
-      S3_SECRET_ACCESS_KEY: minerva-dev-secret
-    ports:
-      # Host port 3010 (host 8080 is used by gluetun on the dev machine).
-      - "3010:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    server:
+        build:
+            # Relative to this file's directory (deploy/), so the context is the repo root.
+            context: ..
+            dockerfile: deploy/docker/server.Dockerfile
+        container_name: minerva-server
+        environment:
+            PORT: "8080"
+            DATABASE_URL: postgresql://minerva:minerva@postgres:5432/minerva
+            REDIS_URL: redis://redis:6379
+            S3_ENDPOINT: http://rustfs:9000
+            S3_REGION: us-east-1
+            S3_BUCKET: minerva
+            S3_ACCESS_KEY_ID: minerva
+            S3_SECRET_ACCESS_KEY: minerva-dev-secret
+        ports:
+            # Host port 3010 (host 8080 is used by gluetun on the dev machine).
+            - "3010:8080"
+        depends_on:
+            postgres:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
 
-  web:
-    build:
-      # Relative to this file's directory (deploy/), so the context is the repo root.
-      context: ..
-      dockerfile: deploy/docker/web.Dockerfile
-    container_name: minerva-web
-    environment:
-      PORT: "3000"
-    ports:
-      - "3000:3000"
+    web:
+        build:
+            # Relative to this file's directory (deploy/), so the context is the repo root.
+            context: ..
+            dockerfile: deploy/docker/web.Dockerfile
+        container_name: minerva-web
+        environment:
+            PORT: "3000"
+        ports:
+            - "3000:3000"
 
 volumes:
-  postgres-data:
-  redis-data:
-  rustfs-data:
+    postgres-data:
+    redis-data:
+    rustfs-data:

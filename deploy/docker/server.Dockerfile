@@ -15,12 +15,20 @@ RUN mkdir -p domain/src application/src infrastructure/src interface/src \
     && touch domain/src/lib.rs application/src/lib.rs infrastructure/src/lib.rs interface/src/main.rs
 RUN cargo fetch
 
+# Build-time only: curl is needed by utoipa-swagger-ui's build.rs (downloads the
+# Swagger UI assets zip at compile time), libpq-dev provides the Postgres client
+# library that pq-sys links against, ca-certificates is curl's TLS trust store.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY server/ .
 RUN cargo build --release -p interface
 
 FROM debian:bookworm-slim AS runtime
+# libpq5 is the only non-stdlib shared library the binary needs at runtime.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/minerva-server /usr/local/bin/minerva-server

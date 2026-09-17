@@ -46,3 +46,16 @@ CLI:
 cd server
 diesel migration generate add_first_table
 ```
+
+## API documentation
+
+The `interface` crate generates an OpenAPI 3 document from code annotations
+(utoipa) and serves it alongside a Swagger UI, both outside the `/api` scope:
+
+- Swagger UI: http://localhost:8080/api-docs/swagger-ui/
+- Raw OpenAPI JSON: http://localhost:8080/api-docs/openapi.json
+
+Under Docker compose the API is mapped to host port 3010, so use
+http://localhost:3010/api-docs/swagger-ui/ there. All `/api/*` endpoints
+(goals, milestones, tasks) are documented; the temporary `/debug/*` routes
+are not.

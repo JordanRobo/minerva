@@ -10,16 +10,19 @@ use chrono::{DateTime, NaiveDate, Utc};
 use domain::{GoalStatus, Milestone, MilestoneId, Status};
 use infrastructure::repositories::PostgresMilestoneRepository;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{repo_error_response, ApiError};
+use crate::openapi::GoalStatusDoc;
 
 /// JSON shape of a milestone in responses.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MilestoneResponse {
     pub id: Uuid,
     pub title: String,
     pub description: Option<String>,
+    #[schema(value_type = GoalStatusDoc)]
     pub status: GoalStatus,
     pub target_date: Option<NaiveDate>,
     pub created_at: DateTime<Utc>,
@@ -43,7 +46,7 @@ impl From<&Milestone> for MilestoneResponse {
 /// Body for `POST /api/milestones` and `PUT /api/milestones/{id}`. The id,
 /// status, and timestamps are server-managed and never accepted from the
 /// client.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct MilestoneRequest {
     pub title: String,
     #[serde(default)]
@@ -54,6 +57,16 @@ pub struct MilestoneRequest {
 
 /// `POST /api/milestones` — create a milestone. 201 with the created
 /// milestone; 400 if the title is missing or blank.
+#[utoipa::path(
+    post,
+    path = "/api/milestones",
+    tags = ["milestones"],
+    request_body = MilestoneRequest,
+    responses(
+        (status = 201, description = "Milestone created", body = MilestoneResponse),
+        (status = 400, description = "Title is missing or blank", body = ApiError)
+    )
+)]
 pub async fn create_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
     body: web::Json<MilestoneRequest>,
@@ -78,6 +91,12 @@ pub async fn create_milestone(
 }
 
 /// `GET /api/milestones` — every milestone.
+#[utoipa::path(
+    get,
+    path = "/api/milestones",
+    tags = ["milestones"],
+    responses((status = 200, description = "All milestones", body = Vec<MilestoneResponse>))
+)]
 pub async fn list_milestones(
     milestones: web::Data<PostgresMilestoneRepository>,
 ) -> Result<HttpResponse, ApiError> {
@@ -89,6 +108,16 @@ pub async fn list_milestones(
 }
 
 /// `GET /api/milestones/{id}` — one milestone, or 404.
+#[utoipa::path(
+    get,
+    path = "/api/milestones/{id}",
+    tags = ["milestones"],
+    params(("id" = Uuid, Path, description = "Milestone identifier")),
+    responses(
+        (status = 200, description = "The milestone", body = MilestoneResponse),
+        (status = 404, description = "No milestone with this id", body = ApiError)
+    )
+)]
 pub async fn get_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
     path: web::Path<Uuid>,
@@ -103,6 +132,18 @@ pub async fn get_milestone(
 /// `PUT /api/milestones/{id}` — replace a milestone's fields. The stored
 /// status and created_at are preserved; updated_at is refreshed. 404 if the
 /// milestone is gone.
+#[utoipa::path(
+    put,
+    path = "/api/milestones/{id}",
+    tags = ["milestones"],
+    params(("id" = Uuid, Path, description = "Milestone identifier")),
+    request_body = MilestoneRequest,
+    responses(
+        (status = 200, description = "The updated milestone", body = MilestoneResponse),
+        (status = 400, description = "Title is missing or blank", body = ApiError),
+        (status = 404, description = "No milestone with this id", body = ApiError)
+    )
+)]
 pub async fn update_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
     path: web::Path<Uuid>,
@@ -134,6 +175,16 @@ pub async fn update_milestone(
 }
 
 /// `DELETE /api/milestones/{id}` — remove a milestone. 204 on success, 404 if missing.
+#[utoipa::path(
+    delete,
+    path = "/api/milestones/{id}",
+    tags = ["milestones"],
+    params(("id" = Uuid, Path, description = "Milestone identifier")),
+    responses(
+        (status = 204, description = "Milestone deleted"),
+        (status = 404, description = "No milestone with this id", body = ApiError)
+    )
+)]
 pub async fn delete_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
     path: web::Path<Uuid>,

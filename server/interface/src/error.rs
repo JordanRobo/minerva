@@ -9,11 +9,12 @@
 use actix_web::{http::StatusCode, HttpResponse, ResponseError};
 use application::ports::RepositoryError;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// The standard API error envelope. Handlers return it as the `Err` of a
 /// `Result<HttpResponse, ApiError>`; the [`ResponseError`] impl turns it into
 /// a JSON response with the matching status code.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ApiError {
     /// Stable snake_case error code (e.g. `"not_found"`).
     pub code: String,

@@ -10,17 +10,20 @@ use chrono::{DateTime, NaiveDate, Utc};
 use domain::{MilestoneId, Task, TaskId, TaskStatus};
 use infrastructure::repositories::PostgresTaskRepository;
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::error::{repo_error_response, ApiError};
+use crate::openapi::TaskStatusDoc;
 
 /// JSON shape of a task in responses.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct TaskResponse {
     pub id: Uuid,
     pub milestone_id: Option<Uuid>,
     pub title: String,
     pub description: Option<String>,
+    #[schema(value_type = TaskStatusDoc)]
     pub status: TaskStatus,
     pub target_date: Option<NaiveDate>,
     pub created_at: DateTime<Utc>,
@@ -45,13 +48,14 @@ impl From<&Task> for TaskResponse {
 /// Body for `POST /api/tasks` and `PUT /api/tasks/{id}`. The id and
 /// timestamps are server-managed and never accepted from the client; a
 /// missing or null `milestone_id` leaves the task unassigned.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct TaskRequest {
     #[serde(default)]
     pub milestone_id: Option<Uuid>,
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[schema(value_type = TaskStatusDoc)]
     pub status: TaskStatus,
     #[serde(default)]
     pub target_date: Option<NaiveDate>,
@@ -59,14 +63,30 @@ pub struct TaskRequest {
 
 /// Query params for `GET /api/tasks`: exactly one of `milestone_id` or
 /// `unassigned=true` selects which list to return.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema, IntoParams)]
 pub struct TaskListQuery {
+    /// Filter to the tasks assigned to this milestone.
     pub milestone_id: Option<Uuid>,
+    /// When `true`, filter to the tasks not assigned to any milestone.
     pub unassigned: Option<bool>,
 }
 
 /// `POST /api/tasks` — create a task. 201 with the created task; 400 if the
 /// title is missing or blank.
+#[utoipa::path(
+    post,
+    path = "/api/tasks",
+    tags = ["tasks"],
+    request_body = TaskRequest,
+    responses(
+        (status = 201, description = "Task created", body = TaskResponse),
+        (
+            status = 400,
+            description = "Title is missing or blank, or milestone_id does not reference an existing milestone",
+            body = ApiError
+        )
+    )
+)]
 pub async fn create_task(
     tasks: web::Data<PostgresTaskRepository>,
     body: web::Json<TaskRequest>,
@@ -95,6 +115,20 @@ pub async fn create_task(
 /// `GET /api/tasks?unassigned=true` — the tasks with no milestone. 400 if
 /// neither (or both) is supplied: the repository has no "list every task"
 /// read, so there is nothing else to return.
+#[utoipa::path(
+    get,
+    path = "/api/tasks",
+    tags = ["tasks"],
+    params(TaskListQuery),
+    responses(
+        (status = 200, description = "The matching tasks", body = Vec<TaskResponse>),
+        (
+            status = 400,
+            description = "Neither milestone_id nor unassigned=true supplied, or both",
+            body = ApiError
+        )
+    )
+)]
 pub async fn list_tasks(
     query: web::Query<TaskListQuery>,
     tasks: web::Data<PostgresTaskRepository>,
@@ -116,6 +150,16 @@ pub async fn list_tasks(
 }
 
 /// `GET /api/tasks/{id}` — one task, or 404.
+#[utoipa::path(
+    get,
+    path = "/api/tasks/{id}",
+    tags = ["tasks"],
+    params(("id" = Uuid, Path, description = "Task identifier")),
+    responses(
+        (status = 200, description = "The task", body = TaskResponse),
+        (status = 404, description = "No task with this id", body = ApiError)
+    )
+)]
 pub async fn get_task(
     tasks: web::Data<PostgresTaskRepository>,
     path: web::Path<Uuid>,
@@ -131,6 +175,22 @@ pub async fn get_task(
 /// to another milestone or unassigning it (`milestone_id` null). The stored
 /// id and created_at are preserved; updated_at is refreshed. 404 if the task
 /// is gone.
+#[utoipa::path(
+    put,
+    path = "/api/tasks/{id}",
+    tags = ["tasks"],
+    params(("id" = Uuid, Path, description = "Task identifier")),
+    request_body = TaskRequest,
+    responses(
+        (status = 200, description = "The updated task", body = TaskResponse),
+        (
+            status = 400,
+            description = "Title is missing or blank, or milestone_id does not reference an existing milestone",
+            body = ApiError
+        ),
+        (status = 404, description = "No task with this id", body = ApiError)
+    )
+)]
 pub async fn update_task(
     tasks: web::Data<PostgresTaskRepository>,
     path: web::Path<Uuid>,
@@ -163,6 +223,16 @@ pub async fn update_task(
 }
 
 /// `DELETE /api/tasks/{id}` — remove a task. 204 on success, 404 if missing.
+#[utoipa::path(
+    delete,
+    path = "/api/tasks/{id}",
+    tags = ["tasks"],
+    params(("id" = Uuid, Path, description = "Task identifier")),
+    responses(
+        (status = 204, description = "Task deleted"),
+        (status = 404, description = "No task with this id", body = ApiError)
+    )
+)]
 pub async fn delete_task(
     tasks: web::Data<PostgresTaskRepository>,
     path: web::Path<Uuid>,

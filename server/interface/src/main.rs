@@ -2,6 +2,7 @@ mod debug;
 mod error;
 mod goals;
 mod milestones;
+mod openapi;
 mod tasks;
 
 use actix_web::{web, App, HttpResponse, HttpServer};
@@ -10,8 +11,11 @@ use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
     PostgresProgressSnapshotRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
 };
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::error::ApiError;
+use crate::openapi::ApiDoc;
 
 async fn health() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
@@ -47,6 +51,7 @@ async fn main() -> std::io::Result<()> {
     println!("minerva-server listening on 0.0.0.0:{port}");
 
     HttpServer::new(move || {
+        let openapi = ApiDoc::openapi();
         App::new()
             .app_data(goals.clone())
             .app_data(milestones.clone())
@@ -88,6 +93,14 @@ async fn main() -> std::io::Result<()> {
                     .route("/task-relations", web::get().to(debug::list_task_relations))
                     .route("/progress-snapshots", web::get().to(debug::list_progress_snapshots))
                     .route("/goal-milestones", web::get().to(debug::list_goal_milestones)),
+            )
+            // API documentation (not part of the /api surface): a Swagger UI
+            // rendering the generated OpenAPI 3 document, plus the raw JSON at
+            // /api-docs/openapi.json (registered by `.url`). Unauthenticated
+            // like the rest of the server until auth lands in Milestone 3.
+            .service(
+                SwaggerUi::new("/api-docs/swagger-ui/{_:.*}")
+                    .url("/api-docs/openapi.json", openapi),
             )
     })
     .bind(("0.0.0.0", port))?

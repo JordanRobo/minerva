@@ -20,3 +20,5 @@ uuid = { version = "1", features = ["serde"] }
 domain = { path = "../domain" }
 application = { path = "../application" }
 infrastructure = { path = "../infrastructure" }
+utoipa = { version = "5.5.0", features = ["actix_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
