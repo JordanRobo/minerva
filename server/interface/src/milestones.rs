@@ -12,7 +12,7 @@ use infrastructure::repositories::PostgresMilestoneRepository;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{bad_request, not_found, repo_error_response};
+use crate::error::{repo_error_response, ApiError};
 
 /// JSON shape of a milestone in responses.
 #[derive(Serialize)]
@@ -57,9 +57,9 @@ pub struct MilestoneRequest {
 pub async fn create_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
     body: web::Json<MilestoneRequest>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
-        return bad_request("title must not be empty");
+        return Err(ApiError::bad_request("title must not be empty"));
     }
     let now = Utc::now();
     let milestone = Milestone {
@@ -72,19 +72,19 @@ pub async fn create_milestone(
         updated_at: now,
     };
     match milestones.create(milestone).await {
-        Ok(milestone) => HttpResponse::Created().json(MilestoneResponse::from(&milestone)),
-        Err(err) => repo_error_response(err),
+        Ok(milestone) => Ok(HttpResponse::Created().json(MilestoneResponse::from(&milestone))),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
 /// `GET /api/milestones` — every milestone.
 pub async fn list_milestones(
     milestones: web::Data<PostgresMilestoneRepository>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     match milestones.list().await {
-        Ok(milestones) => HttpResponse::Ok()
-            .json(milestones.iter().map(MilestoneResponse::from).collect::<Vec<_>>()),
-        Err(err) => repo_error_response(err),
+        Ok(milestones) => Ok(HttpResponse::Ok()
+            .json(milestones.iter().map(MilestoneResponse::from).collect::<Vec<_>>())),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -92,11 +92,11 @@ pub async fn list_milestones(
 pub async fn get_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
     path: web::Path<Uuid>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     match milestones.find_by_id(MilestoneId(*path)).await {
-        Ok(Some(milestone)) => HttpResponse::Ok().json(MilestoneResponse::from(&milestone)),
-        Ok(None) => not_found(),
-        Err(err) => repo_error_response(err),
+        Ok(Some(milestone)) => Ok(HttpResponse::Ok().json(MilestoneResponse::from(&milestone))),
+        Ok(None) => Err(ApiError::not_found()),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -107,9 +107,9 @@ pub async fn update_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
     path: web::Path<Uuid>,
     body: web::Json<MilestoneRequest>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
-        return bad_request("title must not be empty");
+        return Err(ApiError::bad_request("title must not be empty"));
     }
     let id = MilestoneId(*path);
     match milestones.find_by_id(id).await {
@@ -124,12 +124,12 @@ pub async fn update_milestone(
                 ..existing
             };
             match milestones.update(updated).await {
-                Ok(milestone) => HttpResponse::Ok().json(MilestoneResponse::from(&milestone)),
-                Err(err) => repo_error_response(err),
+                Ok(milestone) => Ok(HttpResponse::Ok().json(MilestoneResponse::from(&milestone))),
+                Err(err) => Err(repo_error_response(err)),
             }
         }
-        Ok(None) => not_found(),
-        Err(err) => repo_error_response(err),
+        Ok(None) => Err(ApiError::not_found()),
+        Err(err) => Err(repo_error_response(err)),
     }
 }
 
@@ -137,9 +137,9 @@ pub async fn update_milestone(
 pub async fn delete_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
     path: web::Path<Uuid>,
-) -> HttpResponse {
+) -> Result<HttpResponse, ApiError> {
     match milestones.delete(MilestoneId(*path)).await {
-        Ok(()) => HttpResponse::NoContent().finish(),
-        Err(err) => repo_error_response(err),
+        Ok(()) => Ok(HttpResponse::NoContent().finish()),
+        Err(err) => Err(repo_error_response(err)),
     }
 }

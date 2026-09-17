@@ -11,6 +11,8 @@ use infrastructure::repositories::{
     PostgresProgressSnapshotRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
 };
 
+use crate::error::ApiError;
+
 async fn health() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
 }
@@ -56,6 +58,13 @@ async fn main() -> std::io::Result<()> {
             // The real API surface, built endpoint-group by endpoint-group.
             .service(
                 web::scope("/api")
+                    // Malformed or unparsable JSON bodies get the standard
+                    // error envelope instead of Actix's default plaintext.
+                    .app_data(
+                        web::JsonConfig::default().error_handler(|err, _req| {
+                            ApiError::bad_request(format!("invalid JSON body: {err}")).into()
+                        }),
+                    )
                     .route("/goals", web::post().to(goals::create_goal))
                     .route("/goals", web::get().to(goals::list_goals))
                     .route("/goals/{id}", web::get().to(goals::get_goal))
