@@ -5,7 +5,8 @@ use actix_web::HttpResponse;
 use application::ports::RepositoryError;
 
 /// Translate a [`RepositoryError`] into an HTTP error response:
-/// `NotFound` -> 404, `Conflict` -> 409 (detail surfaced), `Unexpected` -> 500
+/// `NotFound` -> 404, `Conflict` -> 409 (detail surfaced),
+/// `InvalidReference` -> 400 (detail surfaced), `Unexpected` -> 500
 /// (generic message — internals are not leaked to clients).
 pub fn repo_error_response(err: RepositoryError) -> HttpResponse {
     match err {
@@ -14,6 +15,9 @@ pub fn repo_error_response(err: RepositoryError) -> HttpResponse {
         }
         RepositoryError::Conflict(detail) => {
             HttpResponse::Conflict().json(serde_json::json!({ "error": detail }))
+        }
+        RepositoryError::InvalidReference(detail) => {
+            HttpResponse::BadRequest().json(serde_json::json!({ "error": detail }))
         }
         RepositoryError::Unexpected(_) => HttpResponse::InternalServerError()
             .json(serde_json::json!({ "error": "internal server error" })),

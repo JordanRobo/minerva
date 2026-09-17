@@ -1,7 +1,7 @@
 //! Tasks: the day-to-day work that moves toward a milestone.
 
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::milestone::MilestoneId;
@@ -30,7 +30,9 @@ impl Default for TaskId {
 /// deliberately separate from [`crate::status::Status`], which describes how
 /// healthy a goal or milestone is against its target date. The two answer
 /// different questions and neither is derived from the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+// JSON uses the same snake_case strings as the `tasks.status` column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     /// Not planned to start yet.
     Backlog,

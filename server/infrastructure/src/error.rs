@@ -7,13 +7,19 @@ use diesel::result::{DatabaseErrorKind, Error as DieselError};
 /// Map a Diesel query error to [`RepositoryError`].
 ///
 /// Unique-constraint violations become [`RepositoryError::Conflict`],
-/// "no rows" results become [`RepositoryError::NotFound`], and everything
-/// else is surfaced as [`RepositoryError::Unexpected`] carrying the
-/// underlying message.
+/// foreign-key violations become [`RepositoryError::InvalidReference`] (the
+/// referenced row does not exist), "no rows" results become
+/// [`RepositoryError::NotFound`], and everything else is surfaced as
+/// [`RepositoryError::Unexpected`] carrying the underlying message.
 pub fn map_diesel_error(err: DieselError) -> RepositoryError {
     match err {
         DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, _) => {
             RepositoryError::Conflict(err.to_string())
+        }
+        // A dangling reference (e.g. a task pointing at a missing milestone)
+        // is bad client input, not a server error.
+        DieselError::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, _) => {
+            RepositoryError::InvalidReference(err.to_string())
         }
         DieselError::NotFound => RepositoryError::NotFound,
         other => RepositoryError::Unexpected(other.to_string()),
