@@ -1,3 +1,4 @@
+mod auth;
 mod debug;
 mod error;
 mod goals;
@@ -116,7 +117,11 @@ async fn main() -> std::io::Result<()> {
                     .route("/tasks", web::get().to(tasks::list_tasks))
                     .route("/tasks/{id}", web::get().to(tasks::get_task))
                     .route("/tasks/{id}", web::put().to(tasks::update_task))
-                    .route("/tasks/{id}", web::delete().to(tasks::delete_task)),
+                    .route("/tasks/{id}", web::delete().to(tasks::delete_task))
+                    .route("/auth/signup", web::post().to(auth::signup))
+                    .route("/auth/login", web::post().to(auth::login))
+                    .route("/auth/logout", web::post().to(auth::logout))
+                    .route("/auth/me", web::get().to(auth::me)),
             )
             // TEMPORARY: verifies repository wiring end-to-end; unauthenticated
             // and not meant to ship. Remove this scope before /debug is a real API.
@@ -124,9 +129,7 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/debug")
                     .route("/task-relations", web::get().to(debug::list_task_relations))
                     .route("/progress-snapshots", web::get().to(debug::list_progress_snapshots))
-                    .route("/goal-milestones", web::get().to(debug::list_goal_milestones))
-                    .route("/users", web::get().to(debug::list_users))
-                    .route("/sessions", web::get().to(debug::list_sessions)),
+                    .route("/goal-milestones", web::get().to(debug::list_goal_milestones)),
             )
             // API documentation (not part of the /api surface): a Swagger UI
             // rendering the generated OpenAPI 3 document, plus the raw JSON at

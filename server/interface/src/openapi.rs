@@ -1,7 +1,7 @@
 //! OpenAPI document for the Minerva API, assembled from the
-//! `#[utoipa::path]` annotations on the handlers in `goals`, `milestones`,
-//! and `tasks`. Served as JSON at `/api-docs/openapi.json` and rendered by
-//! Swagger UI at `/api-docs/swagger-ui/` (wired up in `main.rs`).
+//! `#[utoipa::path]` annotations on the handlers in `auth`, `goals`,
+//! `milestones`, and `tasks`. Served as JSON at `/api-docs/openapi.json` and
+//! rendered by Swagger UI at `/api-docs/swagger-ui/` (wired up in `main.rs`).
 //!
 //! The `*Doc` schema types mirror the wire shape of domain status types:
 //! `domain` is pure logic and cannot depend on utoipa, so the documentation
@@ -55,11 +55,16 @@ pub struct GoalStatusDoc {
         description = "REST API for Minerva, a goal/milestone-first project-management platform for schools.",
     ),
     tags(
+        (name = "auth", description = "Authentication: account creation, login, logout, and the current user."),
         (name = "goals", description = "Goals: the top-level outcomes a school works toward."),
         (name = "milestones", description = "Milestones: dated checkpoints within a goal."),
         (name = "tasks", description = "Tasks: day-to-day work, optionally attached to a milestone."),
     ),
     paths(
+        crate::auth::signup,
+        crate::auth::login,
+        crate::auth::logout,
+        crate::auth::me,
         crate::goals::create_goal,
         crate::goals::list_goals,
         crate::goals::get_goal,
@@ -78,6 +83,9 @@ pub struct GoalStatusDoc {
     ),
     components(schemas(
         crate::error::ApiError,
+        crate::auth::LoginRequest,
+        crate::auth::SignupRequest,
+        crate::auth::UserResponse,
         crate::goals::GoalRequest,
         crate::goals::GoalResponse,
         crate::milestones::MilestoneRequest,

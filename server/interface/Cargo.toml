@@ -13,9 +13,10 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 # chrono types appear in the Goals API DTOs and server-set timestamps.
 chrono = { version = "0.4", features = ["serde"] }
-# `serde` (derive) + `uuid` (serde) are only for the temporary /debug query
-# params; both are already in the dependency tree via serde_json and domain.
+# `serde` (derive) + `uuid` (serde) are for the API DTOs; both are already in
+# the dependency tree via serde_json and domain.
 serde = { version = "1", features = ["derive"] }
+sha2 = { workspace = true }
 uuid = { version = "1", features = ["serde"] }
 domain = { path = "../domain" }
 application = { path = "../application" }

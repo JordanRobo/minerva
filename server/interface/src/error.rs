@@ -37,6 +37,16 @@ impl ApiError {
         }
     }
 
+    /// 401 — the request carries no valid credentials (a failed login, or a
+    /// missing/expired session cookie). Deliberately generic: it must not
+    /// reveal whether an account with the given email exists.
+    pub fn unauthorized() -> Self {
+        Self {
+            code: "unauthorized".to_owned(),
+            message: "invalid credentials".to_owned(),
+        }
+    }
+
     /// 404 — the requested resource does not exist.
     pub fn not_found() -> Self {
         Self {
@@ -74,6 +84,7 @@ impl ApiError {
 impl ResponseError for ApiError {
     fn status_code(&self) -> StatusCode {
         match self.code.as_str() {
+            "unauthorized" => StatusCode::UNAUTHORIZED,
             "not_found" => StatusCode::NOT_FOUND,
             "conflict" => StatusCode::CONFLICT,
             "internal_error" => StatusCode::INTERNAL_SERVER_ERROR,
