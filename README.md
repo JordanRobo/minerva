@@ -3,6 +3,7 @@
   <img alt="Minerva: open source project management for schools and non-profits" src="docs/assets/banner-light.svg">
 </picture>
 
+---
 Minerva is an open source project management platform built for schools. It
 is goal/milestone-first: teams start from what they are trying to achieve,
 break it into milestones, and track progress against those — rather than
