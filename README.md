@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <img alt="Minerva: open source project management for schools and non-profits" src="docs/assets/banner-light.svg">
+</picture>
+
 # Minerva
 
 Minerva is an open source project management platform built for schools. It
