@@ -9,16 +9,22 @@
 pub mod goal_milestone_repository;
 pub mod goal_repository;
 pub mod milestone_repository;
+pub mod password_hasher;
 pub mod progress_snapshot_repository;
+pub mod session_repository;
 pub mod task_relation_repository;
 pub mod task_repository;
+pub mod user_repository;
 
 pub use goal_milestone_repository::GoalMilestoneRepository;
 pub use goal_repository::GoalRepository;
 pub use milestone_repository::MilestoneRepository;
+pub use password_hasher::{PasswordHashError, PasswordHasher};
 pub use progress_snapshot_repository::ProgressSnapshotRepository;
+pub use session_repository::SessionRepository;
 pub use task_relation_repository::TaskRelationRepository;
 pub use task_repository::TaskRepository;
+pub use user_repository::UserRepository;
 
 /// An error from a repository operation.
 #[derive(Debug)]

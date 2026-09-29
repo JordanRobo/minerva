@@ -9,8 +9,10 @@ use actix_web::{web, App, HttpResponse, HttpServer};
 use infrastructure::db::build_pool;
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
-    PostgresProgressSnapshotRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
+    PostgresProgressSnapshotRepository, PostgresSessionRepository,
+    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserRepository,
 };
+use infrastructure::Argon2PasswordHasher;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -36,7 +38,7 @@ async fn main() -> std::io::Result<()> {
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run minerva-server");
     let pool = build_pool(&database_url);
 
-    // One shared pool, six repositories. Each is registered as its own
+    // One shared pool, eight repositories. Each is registered as its own
     // `web::Data` rather than wrapped in a single AppState struct: every
     // handler uses exactly one repository, so per-repo Data keeps each
     // handler's signature naming only the repo it actually calls. (The pool
@@ -46,7 +48,12 @@ async fn main() -> std::io::Result<()> {
     let goal_milestones = web::Data::new(PostgresGoalMilestoneRepository::new(pool.clone()));
     let tasks = web::Data::new(PostgresTaskRepository::new(pool.clone()));
     let task_relations = web::Data::new(PostgresTaskRelationRepository::new(pool.clone()));
-    let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool));
+    let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
+    let users = web::Data::new(PostgresUserRepository::new(pool.clone()));
+    let sessions = web::Data::new(PostgresSessionRepository::new(pool));
+    // The password hasher holds no state; it is registered like the
+    // repositories so handlers name their dependency in their signature.
+    let password_hasher = web::Data::new(Argon2PasswordHasher);
 
     println!("minerva-server listening on 0.0.0.0:{port}");
 
@@ -59,6 +66,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(tasks.clone())
             .app_data(task_relations.clone())
             .app_data(progress_snapshots.clone())
+            .app_data(users.clone())
+            .app_data(sessions.clone())
+            .app_data(password_hasher.clone())
             .route("/health", web::get().to(health))
             // The real API surface, built endpoint-group by endpoint-group.
             .service(
@@ -92,7 +102,9 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/debug")
                     .route("/task-relations", web::get().to(debug::list_task_relations))
                     .route("/progress-snapshots", web::get().to(debug::list_progress_snapshots))
-                    .route("/goal-milestones", web::get().to(debug::list_goal_milestones)),
+                    .route("/goal-milestones", web::get().to(debug::list_goal_milestones))
+                    .route("/users", web::get().to(debug::list_users))
+                    .route("/sessions", web::get().to(debug::list_sessions)),
             )
             // API documentation (not part of the /api surface): a Swagger UI
             // rendering the generated OpenAPI 3 document, plus the raw JSON at

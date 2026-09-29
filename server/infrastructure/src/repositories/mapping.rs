@@ -13,8 +13,8 @@ use uuid::Uuid;
 use application::ports::RepositoryError;
 use domain::{
     Goal, GoalId, GoalStatus, Milestone, MilestoneId, ProgressSnapshot, ProgressSnapshotId,
-    ProgressTarget, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId,
-    TaskRelationType, TaskStatus,
+    ProgressTarget, Session, SessionId, Status, StatusSource, Task, TaskId, TaskRelation,
+    TaskRelationId, TaskRelationType, TaskStatus, User, UserId,
 };
 
 /// A row of the `goals` table: id, title, description, status,
@@ -253,4 +253,52 @@ pub fn progress_snapshot_from_row(row: ProgressSnapshotRow) -> Result<ProgressSn
     .map_err(|err| RepositoryError::Unexpected(err.to_string()))?;
     snapshot.id = ProgressSnapshotId(id);
     Ok(snapshot)
+}
+
+/// A row of the `users` table: id, email, password_hash, display_name,
+/// created_at, updated_at — in that order.
+pub type UserRow = (
+    Uuid,
+    String,
+    String,
+    String,
+    DateTime<Utc>,
+    DateTime<Utc>,
+);
+
+/// Build a [`User`] from a `users` row.
+pub fn user_from_row(row: UserRow) -> Result<User, RepositoryError> {
+    let (id, email, password_hash, display_name, created_at, updated_at) = row;
+    Ok(User {
+        id: UserId(id),
+        email,
+        password_hash,
+        display_name,
+        created_at,
+        updated_at,
+    })
+}
+
+/// A row of the `sessions` table: id, user_id, token_hash, created_at,
+/// expires_at, last_seen_at — in that order.
+pub type SessionRow = (
+    Uuid,
+    Uuid,
+    String,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    DateTime<Utc>,
+);
+
+/// Build a [`Session`] from a `sessions` row.
+pub fn session_from_row(row: SessionRow) -> Result<Session, RepositoryError> {
+    let (id, user_id, token_hash, created_at, expires_at, last_seen_at) = row;
+    Ok(Session {
+        id: SessionId(id),
+        user_id: UserId(user_id),
+        token_hash,
+        created_at,
+        expires_at,
+        last_seen_at,
+    })
 }

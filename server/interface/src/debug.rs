@@ -7,11 +7,14 @@
 //! `main.rs`) before `/debug` is considered a real API surface.
 
 use actix_web::{web, HttpResponse};
-use application::ports::{GoalMilestoneRepository, ProgressSnapshotRepository, TaskRelationRepository};
-use domain::{GoalId, MilestoneId, ProgressTarget, TaskId};
+use application::ports::{
+    GoalMilestoneRepository, ProgressSnapshotRepository, SessionRepository,
+    TaskRelationRepository, UserRepository,
+};
+use domain::{GoalId, MilestoneId, ProgressTarget, TaskId, UserId};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresProgressSnapshotRepository,
-    PostgresTaskRelationRepository,
+    PostgresSessionRepository, PostgresTaskRelationRepository, PostgresUserRepository,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -70,6 +73,30 @@ pub async fn list_goal_milestones(
 ) -> HttpResponse {
     match links.milestones_for_goal(GoalId(query.goal_id)).await {
         Ok(ids) => HttpResponse::Ok().json(ids),
+        Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
+    }
+}
+
+/// `GET /debug/users` — all users.
+pub async fn list_users(users: web::Data<PostgresUserRepository>) -> HttpResponse {
+    match users.list().await {
+        Ok(users) => HttpResponse::Ok().json(users),
+        Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UserIdQuery {
+    pub user_id: Uuid,
+}
+
+/// `GET /debug/sessions?user_id=<uuid>` — sessions belonging to a user.
+pub async fn list_sessions(
+    query: web::Query<UserIdQuery>,
+    sessions: web::Data<PostgresSessionRepository>,
+) -> HttpResponse {
+    match sessions.list_for_user(UserId(query.user_id)).await {
+        Ok(sessions) => HttpResponse::Ok().json(sessions),
         Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
     }
 }
