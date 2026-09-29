@@ -1,4 +1,5 @@
-//! Postgres implementations of the application layer's repository ports.
+//! Postgres and Redis implementations of the application layer's repository
+//! ports.
 //!
 //! Each repository wraps a [`crate::db::PgPool`] and runs its Diesel queries
 //! on the blocking thread pool via `tokio::task::spawn_blocking`, so async
@@ -16,6 +17,7 @@ pub mod goal_repository;
 pub mod mapping;
 pub mod milestone_repository;
 pub mod progress_snapshot_repository;
+pub mod redis_session_repository;
 pub mod session_repository;
 pub mod task_relation_repository;
 pub mod task_repository;
@@ -25,6 +27,7 @@ pub use goal_milestone_repository::PostgresGoalMilestoneRepository;
 pub use goal_repository::PostgresGoalRepository;
 pub use milestone_repository::PostgresMilestoneRepository;
 pub use progress_snapshot_repository::PostgresProgressSnapshotRepository;
+pub use redis_session_repository::RedisSessionRepository;
 pub use session_repository::PostgresSessionRepository;
 pub use task_relation_repository::PostgresTaskRelationRepository;
 pub use task_repository::PostgresTaskRepository;

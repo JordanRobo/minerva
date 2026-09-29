@@ -6,13 +6,16 @@ mod openapi;
 mod tasks;
 
 use actix_web::{web, App, HttpResponse, HttpServer};
+use application::ports::SessionRepository;
 use infrastructure::db::build_pool;
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
     PostgresProgressSnapshotRepository, PostgresSessionRepository,
     PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserRepository,
+    RedisSessionRepository,
 };
 use infrastructure::Argon2PasswordHasher;
+use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -50,7 +53,26 @@ async fn main() -> std::io::Result<()> {
     let task_relations = web::Data::new(PostgresTaskRelationRepository::new(pool.clone()));
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
     let users = web::Data::new(PostgresUserRepository::new(pool.clone()));
-    let sessions = web::Data::new(PostgresSessionRepository::new(pool));
+    // Sessions are the swappable storage: Redis when REDIS_URL is configured,
+    // Postgres otherwise. A missing REDIS_URL is not an error — it just means
+    // "use Postgres for sessions" (see docs/architecture.md). A present but
+    // unreachable one fails fast, like DATABASE_URL does.
+    let sessions: web::Data<dyn SessionRepository> = match std::env::var("REDIS_URL") {
+        Ok(redis_url) => {
+            println!("using Redis for session storage ({redis_url})");
+            let repo: Arc<dyn SessionRepository> = Arc::new(
+                RedisSessionRepository::connect(&redis_url)
+                    .expect("REDIS_URL is set but could not connect to Redis"),
+            );
+            repo.into()
+        }
+        Err(_) => {
+            println!("REDIS_URL not set; using Postgres for session storage");
+            let repo: Arc<dyn SessionRepository> =
+                Arc::new(PostgresSessionRepository::new(pool));
+            repo.into()
+        }
+    };
     // The password hasher holds no state; it is registered like the
     // repositories so handlers name their dependency in their signature.
     let password_hasher = web::Data::new(Argon2PasswordHasher);

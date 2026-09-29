@@ -34,3 +34,11 @@ pub fn map_diesel_error(err: DieselError) -> RepositoryError {
 pub fn map_pool_error(err: diesel::r2d2::PoolError) -> RepositoryError {
     RepositoryError::Unexpected(format!("connection pool error: {err}"))
 }
+
+/// Map a Redis command or connection error to [`RepositoryError::Unexpected`].
+///
+/// A "key does not exist" result is not an error in Redis (reads return
+/// `Nil`), so there is no `NotFound` arm here.
+pub fn map_redis_error(err: redis::RedisError) -> RepositoryError {
+    RepositoryError::Unexpected(format!("redis error: {err}"))
+}

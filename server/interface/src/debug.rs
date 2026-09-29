@@ -14,7 +14,7 @@ use application::ports::{
 use domain::{GoalId, MilestoneId, ProgressTarget, TaskId, UserId};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresProgressSnapshotRepository,
-    PostgresSessionRepository, PostgresTaskRelationRepository, PostgresUserRepository,
+    PostgresTaskRelationRepository, PostgresUserRepository,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -91,9 +91,12 @@ pub struct UserIdQuery {
 }
 
 /// `GET /debug/sessions?user_id=<uuid>` — sessions belonging to a user.
+///
+/// Takes the [`SessionRepository`] trait object because the concrete storage
+/// (Redis or Postgres) is decided at startup by whether `REDIS_URL` is set.
 pub async fn list_sessions(
     query: web::Query<UserIdQuery>,
-    sessions: web::Data<PostgresSessionRepository>,
+    sessions: web::Data<dyn SessionRepository>,
 ) -> HttpResponse {
     match sessions.list_for_user(UserId(query.user_id)).await {
         Ok(sessions) => HttpResponse::Ok().json(sessions),
