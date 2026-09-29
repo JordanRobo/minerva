@@ -54,8 +54,9 @@ pub struct GoalRequest {
     pub target_date: Option<NaiveDate>,
 }
 
-/// `POST /api/goals` — create a goal. 201 with the created goal; 400 if the
-/// title is missing or blank.
+/// Create Goal
+/// 
+/// Create a new goal - a strategic outcome the school is working toward.
 #[utoipa::path(
     post,
     path = "/api/goals",
@@ -90,7 +91,9 @@ pub async fn create_goal(
     }
 }
 
-/// `GET /api/goals` — every goal.
+/// List Goals
+///
+/// List every goal, across all statuses.
 #[utoipa::path(
     get,
     path = "/api/goals",
@@ -107,7 +110,9 @@ pub async fn list_goals(
     }
 }
 
-/// `GET /api/goals/{id}` — one goal, or 404.
+/// Get Individual Goal
+/// 
+/// Fetch a single goal by its ID.
 #[utoipa::path(
     get,
     path = "/api/goals/{id}",
@@ -129,8 +134,9 @@ pub async fn get_goal(
     }
 }
 
-/// `PUT /api/goals/{id}` — replace a goal's fields. The stored status and
-/// created_at are preserved; updated_at is refreshed. 404 if the goal is gone.
+/// Update Goal
+/// 
+/// Update a goal's title, description, or target date. Status and timestamps are managed by the server.
 #[utoipa::path(
     put,
     path = "/api/goals/{id}",
@@ -173,7 +179,9 @@ pub async fn update_goal(
     }
 }
 
-/// `DELETE /api/goals/{id}` — remove a goal. 204 on success, 404 if missing.
+/// Delete Goal
+/// 
+/// Delete a goal, including its links to any milestones.
 #[utoipa::path(
     delete,
     path = "/api/goals/{id}",

@@ -71,8 +71,9 @@ pub struct TaskListQuery {
     pub unassigned: Option<bool>,
 }
 
-/// `POST /api/tasks` — create a task. 201 with the created task; 400 if the
-/// title is missing or blank.
+/// Create Task
+/// 
+/// Create a new task, optionally assigning it to a milestone.
 #[utoipa::path(
     post,
     path = "/api/tasks",
@@ -111,10 +112,9 @@ pub async fn create_task(
     }
 }
 
-/// `GET /api/tasks?milestone_id={id}` — the tasks for one milestone, or
-/// `GET /api/tasks?unassigned=true` — the tasks with no milestone. 400 if
-/// neither (or both) is supplied: the repository has no "list every task"
-/// read, so there is nothing else to return.
+/// List Tasks
+/// 
+/// List tasks, filtered to either a milestone's tasks or the unassigned pool.
 #[utoipa::path(
     get,
     path = "/api/tasks",
@@ -149,7 +149,9 @@ pub async fn list_tasks(
     }
 }
 
-/// `GET /api/tasks/{id}` — one task, or 404.
+/// Get Task
+/// 
+/// Fetch a single task by its ID.
 #[utoipa::path(
     get,
     path = "/api/tasks/{id}",
@@ -171,10 +173,9 @@ pub async fn get_task(
     }
 }
 
-/// `PUT /api/tasks/{id}` — replace a task's fields, including reassigning it
-/// to another milestone or unassigning it (`milestone_id` null). The stored
-/// id and created_at are preserved; updated_at is refreshed. 404 if the task
-/// is gone.
+/// Update Task
+/// 
+/// Update a task's fields, including reassigning it to a different milestone or unassigning it.
 #[utoipa::path(
     put,
     path = "/api/tasks/{id}",
@@ -222,7 +223,9 @@ pub async fn update_task(
     }
 }
 
-/// `DELETE /api/tasks/{id}` — remove a task. 204 on success, 404 if missing.
+/// Delete Task
+/// 
+/// Delete a task.
 #[utoipa::path(
     delete,
     path = "/api/tasks/{id}",
