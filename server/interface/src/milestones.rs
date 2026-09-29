@@ -55,8 +55,9 @@ pub struct MilestoneRequest {
     pub target_date: Option<NaiveDate>,
 }
 
-/// `POST /api/milestones` — create a milestone. 201 with the created
-/// milestone; 400 if the title is missing or blank.
+/// Create Milestone
+/// 
+/// Create a new milestone - a measurable step toward a goal.
 #[utoipa::path(
     post,
     path = "/api/milestones",
@@ -90,7 +91,9 @@ pub async fn create_milestone(
     }
 }
 
-/// `GET /api/milestones` — every milestone.
+/// List all Milestones
+/// 
+/// List every milestone, across all statuses.
 #[utoipa::path(
     get,
     path = "/api/milestones",
@@ -107,7 +110,9 @@ pub async fn list_milestones(
     }
 }
 
-/// `GET /api/milestones/{id}` — one milestone, or 404.
+/// Get Individual Milestone
+/// 
+/// Fetch a single milestone by its ID.
 #[utoipa::path(
     get,
     path = "/api/milestones/{id}",
@@ -129,9 +134,9 @@ pub async fn get_milestone(
     }
 }
 
-/// `PUT /api/milestones/{id}` — replace a milestone's fields. The stored
-/// status and created_at are preserved; updated_at is refreshed. 404 if the
-/// milestone is gone.
+/// Update Milestone
+/// 
+/// Update a milestone's title, description, or target date. Status and timestamps are managed by the server.
 #[utoipa::path(
     put,
     path = "/api/milestones/{id}",
@@ -174,7 +179,9 @@ pub async fn update_milestone(
     }
 }
 
-/// `DELETE /api/milestones/{id}` — remove a milestone. 204 on success, 404 if missing.
+/// Delete Milestone
+/// 
+/// Delete a milestone. Tasks assigned to it become unassigned rather than being deleted.
 #[utoipa::path(
     delete,
     path = "/api/milestones/{id}",
