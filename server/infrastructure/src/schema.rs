@@ -46,6 +46,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    sessions (id) {
+        id -> Uuid,
+        user_id -> Uuid,
+        token_hash -> Text,
+        created_at -> Timestamptz,
+        expires_at -> Timestamptz,
+        last_seen_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     task_relations (id) {
         id -> Uuid,
         source_task_id -> Uuid,
@@ -68,10 +79,22 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    users (id) {
+        id -> Uuid,
+        email -> Text,
+        password_hash -> Text,
+        display_name -> Text,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(goal_milestones -> goals (goal_id));
 diesel::joinable!(goal_milestones -> milestones (milestone_id));
 diesel::joinable!(progress_snapshots -> goals (goal_id));
 diesel::joinable!(progress_snapshots -> milestones (milestone_id));
+diesel::joinable!(sessions -> users (user_id));
 diesel::joinable!(tasks -> milestones (milestone_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
@@ -79,6 +102,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     goals,
     milestones,
     progress_snapshots,
+    sessions,
     task_relations,
     tasks,
+    users,
 );

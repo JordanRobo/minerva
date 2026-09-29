@@ -12,14 +12,18 @@ pub mod goal;
 pub mod goal_milestone;
 pub mod milestone;
 pub mod progress;
+pub mod session;
 pub mod status;
 pub mod task;
 pub mod task_relation;
+pub mod user;
 
 pub use goal::{Goal, GoalId};
 pub use goal_milestone::GoalMilestone;
 pub use milestone::{Milestone, MilestoneId};
 pub use progress::{ProgressError, ProgressSnapshot, ProgressSnapshotId, ProgressTarget};
+pub use session::{Session, SessionId};
 pub use status::{GoalStatus, Status, StatusSource};
 pub use task::{Task, TaskId, TaskStatus};
 pub use task_relation::{TaskRelation, TaskRelationId, TaskRelationType};
+pub use user::{User, UserId};
