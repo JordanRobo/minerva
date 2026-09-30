@@ -12,8 +12,8 @@ use infrastructure::db::build_pool;
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
     PostgresProgressSnapshotRepository, PostgresSessionRepository,
-    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserRepository,
-    RedisSessionRepository,
+    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserIdentityRepository,
+    PostgresUserRepository, RedisSessionRepository,
 };
 use infrastructure::Argon2PasswordHasher;
 use std::sync::Arc;
@@ -42,7 +42,7 @@ async fn main() -> std::io::Result<()> {
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run minerva-server");
     let pool = build_pool(&database_url);
 
-    // One shared pool, eight repositories. Each is registered as its own
+    // One shared pool, nine repositories. Each is registered as its own
     // `web::Data` rather than wrapped in a single AppState struct: every
     // handler uses exactly one repository, so per-repo Data keeps each
     // handler's signature naming only the repo it actually calls. (The pool
@@ -54,6 +54,7 @@ async fn main() -> std::io::Result<()> {
     let task_relations = web::Data::new(PostgresTaskRelationRepository::new(pool.clone()));
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
     let users = web::Data::new(PostgresUserRepository::new(pool.clone()));
+    let user_identities = web::Data::new(PostgresUserIdentityRepository::new(pool.clone()));
     // Sessions are the swappable storage: Redis when REDIS_URL is configured,
     // Postgres otherwise. A missing REDIS_URL is not an error — it just means
     // "use Postgres for sessions" (see docs/architecture.md). A present but
@@ -90,6 +91,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(task_relations.clone())
             .app_data(progress_snapshots.clone())
             .app_data(users.clone())
+            .app_data(user_identities.clone())
             .app_data(sessions.clone())
             .app_data(password_hasher.clone())
             .route("/health", web::get().to(health))

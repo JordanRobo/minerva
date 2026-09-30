@@ -26,9 +26,10 @@ impl Default for UserId {
 pub struct User {
     pub id: UserId,
     pub email: String,
-    /// The hashed password. Plaintext passwords are never stored or kept in
-    /// memory past the moment of verification.
-    pub password_hash: String,
+    /// The hashed password, or `None` for a user who can only sign in via an
+    /// external identity provider. Plaintext passwords are never stored or
+    /// kept in memory past the moment of verification.
+    pub password_hash: Option<String>,
     pub display_name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

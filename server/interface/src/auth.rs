@@ -236,7 +236,7 @@ pub async fn signup(
     let user = User {
         id: UserId::new(),
         email,
-        password_hash,
+        password_hash: Some(password_hash),
         display_name: body.display_name.clone(),
         created_at: now,
         updated_at: now,
@@ -268,12 +268,17 @@ pub async fn login(
 ) -> Result<HttpResponse, ApiError> {
     let email = body.email.trim().to_lowercase();
     let user = users.find_by_email(email).await.map_err(repo_error_response)?;
-    // Both "no such user" and "wrong password" fall through to the same 401.
+    // "No such user", "wrong password", and "account has no password" all
+    // fall through to the same 401: the response must not reveal that a
+    // passwordless account (one that can only sign in via an external
+    // identity provider) exists.
     let Some(user) = user else {
         return Err(ApiError::unauthorized());
     };
+    let Some(password_hash) = user.password_hash.clone() else {
+        return Err(ApiError::unauthorized());
+    };
     let password = body.password.clone();
-    let password_hash = user.password_hash.clone();
     let valid = run_hasher(password_hasher.clone(), move |h| {
         h.verify(&password, &password_hash)
     })

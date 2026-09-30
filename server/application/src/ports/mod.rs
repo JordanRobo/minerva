@@ -14,6 +14,7 @@ pub mod progress_snapshot_repository;
 pub mod session_repository;
 pub mod task_relation_repository;
 pub mod task_repository;
+pub mod user_identity_repository;
 pub mod user_repository;
 
 pub use goal_milestone_repository::GoalMilestoneRepository;
@@ -24,6 +25,7 @@ pub use progress_snapshot_repository::ProgressSnapshotRepository;
 pub use session_repository::SessionRepository;
 pub use task_relation_repository::TaskRelationRepository;
 pub use task_repository::TaskRepository;
+pub use user_identity_repository::UserIdentityRepository;
 pub use user_repository::UserRepository;
 
 /// An error from a repository operation.

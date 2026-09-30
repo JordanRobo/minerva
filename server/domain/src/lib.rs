@@ -17,6 +17,7 @@ pub mod status;
 pub mod task;
 pub mod task_relation;
 pub mod user;
+pub mod user_identity;
 
 pub use goal::{Goal, GoalId};
 pub use goal_milestone::GoalMilestone;
@@ -27,3 +28,4 @@ pub use status::{GoalStatus, Status, StatusSource};
 pub use task::{Task, TaskId, TaskStatus};
 pub use task_relation::{TaskRelation, TaskRelationId, TaskRelationType};
 pub use user::{User, UserId};
+pub use user_identity::{UserIdentity, UserIdentityId};

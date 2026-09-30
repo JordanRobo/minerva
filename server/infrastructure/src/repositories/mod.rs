@@ -21,6 +21,7 @@ pub mod redis_session_repository;
 pub mod session_repository;
 pub mod task_relation_repository;
 pub mod task_repository;
+pub mod user_identity_repository;
 pub mod user_repository;
 
 pub use goal_milestone_repository::PostgresGoalMilestoneRepository;
@@ -31,4 +32,5 @@ pub use redis_session_repository::RedisSessionRepository;
 pub use session_repository::PostgresSessionRepository;
 pub use task_relation_repository::PostgresTaskRelationRepository;
 pub use task_repository::PostgresTaskRepository;
+pub use user_identity_repository::PostgresUserIdentityRepository;
 pub use user_repository::PostgresUserRepository;
