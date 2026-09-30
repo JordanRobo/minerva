@@ -7,8 +7,9 @@ mod openapi;
 mod tasks;
 
 use actix_web::{web, App, HttpResponse, HttpServer};
-use application::ports::SessionRepository;
+use application::ports::{OidcProvider, SessionRepository};
 use infrastructure::db::build_pool;
+use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
     PostgresProgressSnapshotRepository, PostgresSessionRepository,
@@ -79,11 +80,34 @@ async fn main() -> std::io::Result<()> {
     // repositories so handlers name their dependency in their signature.
     let password_hasher = web::Data::new(Argon2PasswordHasher);
 
+    // OIDC sign-in is optional: without OIDC_ISSUER_URL the server behaves
+    // exactly as before and no provider is registered. With it, a missing
+    // sibling variable or an unreachable/misconfigured IdP that answers 4xx
+    // fails startup like DATABASE_URL does; a merely unreachable IdP only
+    // warns (discovery retries lazily on first use).
+    let oidc: Option<web::Data<dyn OidcProvider>> = match OidcConfig::from_env() {
+        Ok(Some(config)) => {
+            let issuer = config.issuer_url.clone();
+            let provider: Arc<dyn OidcProvider> = Arc::new(
+                OpenIdConnectProvider::connect(config)
+                    .await
+                    .unwrap_or_else(|err| panic!("{err}")),
+            );
+            println!("OIDC enabled (issuer {issuer})");
+            Some(provider.into())
+        }
+        Ok(None) => {
+            println!("OIDC not configured");
+            None
+        }
+        Err(message) => panic!("{message}"),
+    };
+
     println!("minerva-server listening on 0.0.0.0:{port}");
 
     HttpServer::new(move || {
         let openapi = ApiDoc::openapi();
-        App::new()
+        let mut app = App::new()
             .app_data(goals.clone())
             .app_data(milestones.clone())
             .app_data(goal_milestones.clone())
@@ -93,8 +117,13 @@ async fn main() -> std::io::Result<()> {
             .app_data(users.clone())
             .app_data(user_identities.clone())
             .app_data(sessions.clone())
-            .app_data(password_hasher.clone())
-            .route("/health", web::get().to(health))
+            .app_data(password_hasher.clone());
+        // Registered only when OIDC is configured, so handlers can request
+        // `web::Data<dyn OidcProvider>` once the routes land.
+        if let Some(oidc) = oidc.clone() {
+            app = app.app_data(oidc);
+        }
+        app.route("/health", web::get().to(health))
             // The real API surface, built endpoint-group by endpoint-group.
             .service(
                 web::scope("/api")

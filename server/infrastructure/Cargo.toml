@@ -11,7 +11,12 @@ chrono = "0.4"
 diesel = { workspace = true }
 domain = { path = "../domain" }
 object_store = { workspace = true }
+openidconnect = { workspace = true }
 password-hash = { workspace = true }
 redis = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
 uuid = "1"
