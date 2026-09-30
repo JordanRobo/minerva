@@ -6,7 +6,7 @@
 //! These are not meant to ship: remove this module and its routes (see
 //! `main.rs`) before `/debug` is considered a real API surface.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use application::ports::{
     GoalMilestoneRepository, ProgressSnapshotRepository, TaskRelationRepository,
 };
@@ -51,7 +51,7 @@ pub async fn list_progress_snapshots(
         (None, Some(milestone_id)) => ProgressTarget::Milestone(MilestoneId(milestone_id)),
         _ => {
             return HttpResponse::BadRequest()
-                .body("provide exactly one of goal_id or milestone_id")
+                .body("provide exactly one of goal_id or milestone_id");
         }
     };
     match snapshots.list_for_target(target).await {

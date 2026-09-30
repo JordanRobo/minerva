@@ -3,25 +3,27 @@ mod debug;
 mod error;
 mod goals;
 mod milestones;
+mod oidc;
 mod openapi;
 mod tasks;
 
-use actix_web::{web, App, HttpResponse, HttpServer};
+use actix_web::{App, HttpResponse, HttpServer, web};
 use application::ports::{OidcProvider, SessionRepository};
+use infrastructure::Argon2PasswordHasher;
 use infrastructure::db::build_pool;
 use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
-    PostgresProgressSnapshotRepository, PostgresSessionRepository,
-    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserIdentityRepository,
-    PostgresUserRepository, RedisSessionRepository,
+    PostgresProgressSnapshotRepository, PostgresSessionRepository, PostgresTaskRelationRepository,
+    PostgresTaskRepository, PostgresUserIdentityRepository, PostgresUserRepository,
+    RedisSessionRepository,
 };
-use infrastructure::Argon2PasswordHasher;
 use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::error::ApiError;
+use crate::oidc::OidcAuth;
 use crate::openapi::ApiDoc;
 
 async fn health() -> HttpResponse {
@@ -71,8 +73,7 @@ async fn main() -> std::io::Result<()> {
         }
         Err(_) => {
             println!("REDIS_URL not set; using Postgres for session storage");
-            let repo: Arc<dyn SessionRepository> =
-                Arc::new(PostgresSessionRepository::new(pool));
+            let repo: Arc<dyn SessionRepository> = Arc::new(PostgresSessionRepository::new(pool));
             repo.into()
         }
     };
@@ -81,11 +82,13 @@ async fn main() -> std::io::Result<()> {
     let password_hasher = web::Data::new(Argon2PasswordHasher);
 
     // OIDC sign-in is optional: without OIDC_ISSUER_URL the server behaves
-    // exactly as before and no provider is registered. With it, a missing
-    // sibling variable or an unreachable/misconfigured IdP that answers 4xx
-    // fails startup like DATABASE_URL does; a merely unreachable IdP only
-    // warns (discovery retries lazily on first use).
-    let oidc: Option<web::Data<dyn OidcProvider>> = match OidcConfig::from_env() {
+    // exactly as before and nothing OIDC-related is registered (the
+    // OIDC_STATE_SECRET / WEB_BASE_URL / OIDC_AUTO_CREATE_USERS variables are
+    // not even read). With it, a missing or invalid one of those, or an
+    // unreachable/misconfigured IdP that answers 4xx, fails startup like
+    // DATABASE_URL does; a merely unreachable IdP only warns (discovery
+    // retries lazily on first use).
+    let oidc: Option<web::Data<OidcAuth>> = match OidcConfig::from_env() {
         Ok(Some(config)) => {
             let issuer = config.issuer_url.clone();
             let provider: Arc<dyn OidcProvider> = Arc::new(
@@ -93,8 +96,9 @@ async fn main() -> std::io::Result<()> {
                     .await
                     .unwrap_or_else(|err| panic!("{err}")),
             );
+            let auth = OidcAuth::from_env(provider).unwrap_or_else(|message| panic!("{message}"));
             println!("OIDC enabled (issuer {issuer})");
-            Some(provider.into())
+            Some(web::Data::new(auth))
         }
         Ok(None) => {
             println!("OIDC not configured");
@@ -118,8 +122,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(user_identities.clone())
             .app_data(sessions.clone())
             .app_data(password_hasher.clone());
-        // Registered only when OIDC is configured, so handlers can request
-        // `web::Data<dyn OidcProvider>` once the routes land.
+        // Registered only when OIDC is configured; the OIDC handlers take it
+        // as an `Option` extractor and treat its absence as "OIDC off".
         if let Some(oidc) = oidc.clone() {
             app = app.app_data(oidc);
         }
@@ -129,11 +133,9 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/api")
                     // Malformed or unparsable JSON bodies get the standard
                     // error envelope instead of Actix's default plaintext.
-                    .app_data(
-                        web::JsonConfig::default().error_handler(|err, _req| {
-                            ApiError::bad_request(format!("invalid JSON body: {err}")).into()
-                        }),
-                    )
+                    .app_data(web::JsonConfig::default().error_handler(|err, _req| {
+                        ApiError::bad_request(format!("invalid JSON body: {err}")).into()
+                    }))
                     .route("/goals", web::post().to(goals::create_goal))
                     .route("/goals", web::get().to(goals::list_goals))
                     .route("/goals/{id}", web::get().to(goals::get_goal))
@@ -142,8 +144,14 @@ async fn main() -> std::io::Result<()> {
                     .route("/milestones", web::post().to(milestones::create_milestone))
                     .route("/milestones", web::get().to(milestones::list_milestones))
                     .route("/milestones/{id}", web::get().to(milestones::get_milestone))
-                    .route("/milestones/{id}", web::put().to(milestones::update_milestone))
-                    .route("/milestones/{id}", web::delete().to(milestones::delete_milestone))
+                    .route(
+                        "/milestones/{id}",
+                        web::put().to(milestones::update_milestone),
+                    )
+                    .route(
+                        "/milestones/{id}",
+                        web::delete().to(milestones::delete_milestone),
+                    )
                     .route("/tasks", web::post().to(tasks::create_task))
                     .route("/tasks", web::get().to(tasks::list_tasks))
                     .route("/tasks/{id}", web::get().to(tasks::get_task))
@@ -152,15 +160,24 @@ async fn main() -> std::io::Result<()> {
                     .route("/auth/signup", web::post().to(auth::signup))
                     .route("/auth/login", web::post().to(auth::login))
                     .route("/auth/logout", web::post().to(auth::logout))
-                    .route("/auth/me", web::get().to(auth::me)),
+                    .route("/auth/me", web::get().to(auth::me))
+                    .route("/auth/providers", web::get().to(oidc::list_auth_providers))
+                    .route("/auth/oidc/login", web::get().to(oidc::oidc_login))
+                    .route("/auth/oidc/callback", web::get().to(oidc::oidc_callback)),
             )
             // TEMPORARY: verifies repository wiring end-to-end; unauthenticated
             // and not meant to ship. Remove this scope before /debug is a real API.
             .service(
                 web::scope("/debug")
                     .route("/task-relations", web::get().to(debug::list_task_relations))
-                    .route("/progress-snapshots", web::get().to(debug::list_progress_snapshots))
-                    .route("/goal-milestones", web::get().to(debug::list_goal_milestones)),
+                    .route(
+                        "/progress-snapshots",
+                        web::get().to(debug::list_progress_snapshots),
+                    )
+                    .route(
+                        "/goal-milestones",
+                        web::get().to(debug::list_goal_milestones),
+                    ),
             )
             // API documentation (not part of the /api surface): a Swagger UI
             // rendering the generated OpenAPI 3 document, plus the raw JSON at

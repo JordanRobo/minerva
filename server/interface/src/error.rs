@@ -6,7 +6,7 @@
 //! snake_case identifier clients can branch on and `message` is
 //! human-readable.
 
-use actix_web::{http::StatusCode, HttpResponse, ResponseError};
+use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use application::ports::RepositoryError;
 use serde::Serialize;
 use utoipa::ToSchema;

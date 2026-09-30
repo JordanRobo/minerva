@@ -8,7 +8,9 @@ name = "minerva-server"
 path = "src/main.rs"
 
 [dependencies]
-actix-web = { workspace = true }
+# secure-cookies enables the cookie crate's authenticated-encryption jars,
+# used to store the OIDC flow's one-time state (see src/oidc.rs).
+actix-web = { workspace = true, features = ["secure-cookies"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 # chrono types appear in the Goals API DTOs and server-set timestamps.
@@ -23,3 +25,10 @@ application = { path = "../application" }
 infrastructure = { path = "../infrastructure" }
 utoipa = { version = "5.5.0", features = ["actix_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["actix-web"] }
+
+[dev-dependencies]
+# Only for the OIDC handler tests' fake provider (implements the async_trait-based port).
+async-trait = { workspace = true }
+# The handler tests build their own one-connection pools (test_pool in
+# oidc.rs) so parallel test runs cannot exhaust Postgres's max_connections.
+diesel = { workspace = true }

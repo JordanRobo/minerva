@@ -1,6 +1,6 @@
 //! OpenAPI document for the Minerva API, assembled from the
 //! `#[utoipa::path]` annotations on the handlers in `auth`, `goals`,
-//! `milestones`, and `tasks`. Served as JSON at `/api-docs/openapi.json` and
+//! `milestones`, `oidc`, and `tasks`. Served as JSON at `/api-docs/openapi.json` and
 //! rendered by Swagger UI at `/api-docs/swagger-ui/` (wired up in `main.rs`).
 //!
 //! The `*Doc` schema types mirror the wire shape of domain status types:
@@ -65,6 +65,9 @@ pub struct GoalStatusDoc {
         crate::auth::login,
         crate::auth::logout,
         crate::auth::me,
+        crate::oidc::list_auth_providers,
+        crate::oidc::oidc_login,
+        crate::oidc::oidc_callback,
         crate::goals::create_goal,
         crate::goals::list_goals,
         crate::goals::get_goal,
@@ -86,6 +89,10 @@ pub struct GoalStatusDoc {
         crate::auth::LoginRequest,
         crate::auth::SignupRequest,
         crate::auth::UserResponse,
+        crate::oidc::AuthProvidersResponse,
+        crate::oidc::OidcProviderInfo,
+        crate::oidc::OidcLoginQuery,
+        crate::oidc::OidcCallbackQuery,
         crate::goals::GoalRequest,
         crate::goals::GoalResponse,
         crate::milestones::MilestoneRequest,
