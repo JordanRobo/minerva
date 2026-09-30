@@ -4,7 +4,7 @@
 //! wire format is a contract with API clients and should be able to evolve
 //! independently of the domain model.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use application::ports::MilestoneRepository;
 use chrono::{DateTime, NaiveDate, Utc};
 use domain::{GoalStatus, Milestone, MilestoneId, Status};
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::error::{repo_error_response, ApiError};
+use crate::error::{ApiError, repo_error_response};
 use crate::openapi::GoalStatusDoc;
 
 /// JSON shape of a milestone in responses.
@@ -56,7 +56,7 @@ pub struct MilestoneRequest {
 }
 
 /// Create Milestone
-/// 
+///
 /// Create a new milestone - a measurable step toward a goal.
 #[utoipa::path(
     post,
@@ -92,7 +92,7 @@ pub async fn create_milestone(
 }
 
 /// List all Milestones
-/// 
+///
 /// List every milestone, across all statuses.
 #[utoipa::path(
     get,
@@ -104,14 +104,18 @@ pub async fn list_milestones(
     milestones: web::Data<PostgresMilestoneRepository>,
 ) -> Result<HttpResponse, ApiError> {
     match milestones.list().await {
-        Ok(milestones) => Ok(HttpResponse::Ok()
-            .json(milestones.iter().map(MilestoneResponse::from).collect::<Vec<_>>())),
+        Ok(milestones) => Ok(HttpResponse::Ok().json(
+            milestones
+                .iter()
+                .map(MilestoneResponse::from)
+                .collect::<Vec<_>>(),
+        )),
         Err(err) => Err(repo_error_response(err)),
     }
 }
 
 /// Get Individual Milestone
-/// 
+///
 /// Fetch a single milestone by its ID.
 #[utoipa::path(
     get,
@@ -135,7 +139,7 @@ pub async fn get_milestone(
 }
 
 /// Update Milestone
-/// 
+///
 /// Update a milestone's title, description, or target date. Status and timestamps are managed by the server.
 #[utoipa::path(
     put,
@@ -180,7 +184,7 @@ pub async fn update_milestone(
 }
 
 /// Delete Milestone
-/// 
+///
 /// Delete a milestone. Tasks assigned to it become unassigned rather than being deleted.
 #[utoipa::path(
     delete,

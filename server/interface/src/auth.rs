@@ -6,12 +6,10 @@
 //! cookie; the server stores only its SHA-256 hash, so a leaked database
 //! cannot be turned into live sessions.
 
-use actix_web::cookie::{time::OffsetDateTime, Cookie, SameSite};
+use actix_web::cookie::{Cookie, SameSite, time::OffsetDateTime};
 use actix_web::dev::Payload;
-use actix_web::{web, FromRequest, HttpRequest, HttpResponse};
-use application::ports::{
-    PasswordHashError, PasswordHasher, SessionRepository, UserRepository,
-};
+use actix_web::{FromRequest, HttpRequest, HttpResponse, web};
+use application::ports::{PasswordHashError, PasswordHasher, SessionRepository, UserRepository};
 use chrono::{DateTime, Duration, Utc};
 use domain::{Session, SessionId, User, UserId};
 use infrastructure::Argon2PasswordHasher;
@@ -23,7 +21,7 @@ use std::pin::Pin;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::error::{repo_error_response, ApiError};
+use crate::error::{ApiError, repo_error_response};
 
 /// Name of the session cookie.
 const COOKIE_NAME: &str = "minerva_session";
@@ -126,10 +124,7 @@ fn hash_token(token: &str) -> String {
 
 /// Run a (CPU-bound) password hash or verify off the async runtime's worker
 /// threads, mirroring `run_on_postgres`/`run_on_redis` in infrastructure.
-async fn run_hasher<T, F>(
-    hasher: web::Data<Argon2PasswordHasher>,
-    op: F,
-) -> Result<T, ApiError>
+async fn run_hasher<T, F>(hasher: web::Data<Argon2PasswordHasher>, op: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce(&Argon2PasswordHasher) -> Result<T, PasswordHashError> + Send + 'static,
@@ -142,8 +137,9 @@ where
 
 /// Create a session for `user_id` and return the cookie carrying its raw
 /// token. Only the token's hash is stored; from here on the raw token exists
-/// only in the response cookie.
-async fn issue_session(
+/// only in the response cookie. Shared with the OIDC callback so sessions are
+/// indistinguishable regardless of how the user signed in.
+pub(crate) async fn issue_session(
     sessions: &web::Data<dyn SessionRepository>,
     user_id: UserId,
 ) -> Result<Cookie<'static>, ApiError> {
@@ -158,7 +154,10 @@ async fn issue_session(
         expires_at,
         last_seen_at: now,
     };
-    sessions.create(session).await.map_err(repo_error_response)?;
+    sessions
+        .create(session)
+        .await
+        .map_err(repo_error_response)?;
     Ok(session_cookie(&token, expires_at))
 }
 
@@ -174,8 +173,7 @@ fn session_cookie(token: &str, expires_at: DateTime<Utc>) -> Cookie<'static> {
     // Second precision is all a cookie expiry needs; the unix-timestamp
     // constructor avoids time's chrono feature (not enabled in our tree).
     cookie.set_expires(
-        OffsetDateTime::from_unix_timestamp(expires_at.timestamp())
-            .expect("valid session expiry"),
+        OffsetDateTime::from_unix_timestamp(expires_at.timestamp()).expect("valid session expiry"),
     );
     cookie
 }
@@ -236,14 +234,16 @@ pub async fn signup(
     let user = User {
         id: UserId::new(),
         email,
-        password_hash,
+        password_hash: Some(password_hash),
         display_name: body.display_name.clone(),
         created_at: now,
         updated_at: now,
     };
     let user = users.create(user).await.map_err(repo_error_response)?;
     let cookie = issue_session(&sessions, user.id).await?;
-    Ok(HttpResponse::Created().cookie(cookie).json(UserResponse::from(&user)))
+    Ok(HttpResponse::Created()
+        .cookie(cookie)
+        .json(UserResponse::from(&user)))
 }
 
 /// Log In
@@ -267,13 +267,21 @@ pub async fn login(
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, ApiError> {
     let email = body.email.trim().to_lowercase();
-    let user = users.find_by_email(email).await.map_err(repo_error_response)?;
-    // Both "no such user" and "wrong password" fall through to the same 401.
+    let user = users
+        .find_by_email(email)
+        .await
+        .map_err(repo_error_response)?;
+    // "No such user", "wrong password", and "account has no password" all
+    // fall through to the same 401: the response must not reveal that a
+    // passwordless account (one that can only sign in via an external
+    // identity provider) exists.
     let Some(user) = user else {
         return Err(ApiError::unauthorized());
     };
+    let Some(password_hash) = user.password_hash.clone() else {
+        return Err(ApiError::unauthorized());
+    };
     let password = body.password.clone();
-    let password_hash = user.password_hash.clone();
     let valid = run_hasher(password_hasher.clone(), move |h| {
         h.verify(&password, &password_hash)
     })
@@ -282,7 +290,9 @@ pub async fn login(
         return Err(ApiError::unauthorized());
     }
     let cookie = issue_session(&sessions, user.id).await?;
-    Ok(HttpResponse::Ok().cookie(cookie).json(UserResponse::from(&user)))
+    Ok(HttpResponse::Ok()
+        .cookie(cookie)
+        .json(UserResponse::from(&user)))
 }
 
 /// Log Out
@@ -305,7 +315,10 @@ pub async fn logout(
             .await
             .map_err(repo_error_response)?;
         if let Some(session) = session {
-            sessions.delete(session.id).await.map_err(repo_error_response)?;
+            sessions
+                .delete(session.id)
+                .await
+                .map_err(repo_error_response)?;
         }
     }
     Ok(HttpResponse::NoContent().cookie(clear_cookie()).finish())

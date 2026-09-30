@@ -4,7 +4,7 @@
 //! format is a contract with API clients and should be able to evolve
 //! independently of the domain model.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use application::ports::GoalRepository;
 use chrono::{DateTime, NaiveDate, Utc};
 use domain::{Goal, GoalId, GoalStatus, Status};
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::error::{repo_error_response, ApiError};
+use crate::error::{ApiError, repo_error_response};
 use crate::openapi::GoalStatusDoc;
 
 /// JSON shape of a goal in responses.
@@ -55,7 +55,7 @@ pub struct GoalRequest {
 }
 
 /// Create Goal
-/// 
+///
 /// Create a new goal - a strategic outcome the school is working toward.
 #[utoipa::path(
     post,
@@ -104,14 +104,15 @@ pub async fn list_goals(
     goals: web::Data<PostgresGoalRepository>,
 ) -> Result<HttpResponse, ApiError> {
     match goals.list().await {
-        Ok(goals) => Ok(HttpResponse::Ok()
-            .json(goals.iter().map(GoalResponse::from).collect::<Vec<_>>())),
+        Ok(goals) => {
+            Ok(HttpResponse::Ok().json(goals.iter().map(GoalResponse::from).collect::<Vec<_>>()))
+        }
         Err(err) => Err(repo_error_response(err)),
     }
 }
 
 /// Get Individual Goal
-/// 
+///
 /// Fetch a single goal by its ID.
 #[utoipa::path(
     get,
@@ -135,7 +136,7 @@ pub async fn get_goal(
 }
 
 /// Update Goal
-/// 
+///
 /// Update a goal's title, description, or target date. Status and timestamps are managed by the server.
 #[utoipa::path(
     put,
@@ -180,7 +181,7 @@ pub async fn update_goal(
 }
 
 /// Delete Goal
-/// 
+///
 /// Delete a goal, including its links to any milestones.
 #[utoipa::path(
     delete,

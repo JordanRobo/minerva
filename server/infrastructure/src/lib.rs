@@ -1,12 +1,14 @@
 //! Minerva infrastructure layer.
 //!
-//! Adapters for external systems: Postgres (Diesel), Redis, and
-//! S3-compatible object storage (`object_store`). The Postgres adapters live
-//! in `db` (connection pooling) and `repositories`; Redis and S3 are not
-//! implemented yet. All configuration is read from environment variables.
+//! Adapters for external systems: Postgres (Diesel), Redis,
+//! S3-compatible object storage (`object_store`), and an OpenID Connect
+//! identity provider. The Postgres adapters live in `db` (connection pooling)
+//! and `repositories`; the OIDC adapter lives in `oidc`. All configuration is
+//! read from environment variables.
 
 pub mod db;
 pub mod error;
+pub mod oidc;
 pub mod password_hasher;
 pub mod repositories;
 

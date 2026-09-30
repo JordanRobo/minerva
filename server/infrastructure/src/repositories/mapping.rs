@@ -14,7 +14,7 @@ use application::ports::RepositoryError;
 use domain::{
     Goal, GoalId, GoalStatus, Milestone, MilestoneId, ProgressSnapshot, ProgressSnapshotId,
     ProgressTarget, Session, SessionId, Status, StatusSource, Task, TaskId, TaskRelation,
-    TaskRelationId, TaskRelationType, TaskStatus, User, UserId,
+    TaskRelationId, TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserIdentityId,
 };
 
 /// A row of the `goals` table: id, title, description, status,
@@ -256,11 +256,12 @@ pub fn progress_snapshot_from_row(row: ProgressSnapshotRow) -> Result<ProgressSn
 }
 
 /// A row of the `users` table: id, email, password_hash, display_name,
-/// created_at, updated_at — in that order.
+/// created_at, updated_at — in that order. `password_hash` is `None` for a
+/// user who can only sign in via an external identity provider.
 pub type UserRow = (
     Uuid,
     String,
-    String,
+    Option<String>,
     String,
     DateTime<Utc>,
     DateTime<Utc>,
@@ -300,5 +301,22 @@ pub fn session_from_row(row: SessionRow) -> Result<Session, RepositoryError> {
         created_at,
         expires_at,
         last_seen_at,
+    })
+}
+
+/// A row of the `user_identities` table: id, user_id, issuer, subject,
+/// email, created_at — in that order.
+pub type UserIdentityRow = (Uuid, Uuid, String, String, Option<String>, DateTime<Utc>);
+
+/// Build a [`UserIdentity`] from a `user_identities` row.
+pub fn user_identity_from_row(row: UserIdentityRow) -> Result<UserIdentity, RepositoryError> {
+    let (id, user_id, issuer, subject, email, created_at) = row;
+    Ok(UserIdentity {
+        id: UserIdentityId(id),
+        user_id: UserId(user_id),
+        issuer,
+        subject,
+        email,
+        created_at,
     })
 }

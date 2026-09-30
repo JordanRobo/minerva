@@ -4,7 +4,7 @@
 //! format is a contract with API clients and should be able to evolve
 //! independently of the domain model.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use application::ports::TaskRepository;
 use chrono::{DateTime, NaiveDate, Utc};
 use domain::{MilestoneId, Task, TaskId, TaskStatus};
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::error::{repo_error_response, ApiError};
+use crate::error::{ApiError, repo_error_response};
 use crate::openapi::TaskStatusDoc;
 
 /// JSON shape of a task in responses.
@@ -72,7 +72,7 @@ pub struct TaskListQuery {
 }
 
 /// Create Task
-/// 
+///
 /// Create a new task, optionally assigning it to a milestone.
 #[utoipa::path(
     post,
@@ -113,7 +113,7 @@ pub async fn create_task(
 }
 
 /// List Tasks
-/// 
+///
 /// List tasks, filtered to either a milestone's tasks or the unassigned pool.
 #[utoipa::path(
     get,
@@ -139,18 +139,19 @@ pub async fn list_tasks(
         _ => {
             return Err(ApiError::bad_request(
                 "provide exactly one of milestone_id or unassigned=true",
-            ))
+            ));
         }
     };
     match listed {
-        Ok(tasks) => Ok(HttpResponse::Ok()
-            .json(tasks.iter().map(TaskResponse::from).collect::<Vec<_>>())),
+        Ok(tasks) => {
+            Ok(HttpResponse::Ok().json(tasks.iter().map(TaskResponse::from).collect::<Vec<_>>()))
+        }
         Err(err) => Err(repo_error_response(err)),
     }
 }
 
 /// Get Task
-/// 
+///
 /// Fetch a single task by its ID.
 #[utoipa::path(
     get,
@@ -174,7 +175,7 @@ pub async fn get_task(
 }
 
 /// Update Task
-/// 
+///
 /// Update a task's fields, including reassigning it to a different milestone or unassigning it.
 #[utoipa::path(
     put,
@@ -224,7 +225,7 @@ pub async fn update_task(
 }
 
 /// Delete Task
-/// 
+///
 /// Delete a task.
 #[utoipa::path(
     delete,
@@ -266,8 +267,8 @@ mod tests {
 
     #[test]
     fn task_request_optional_fields_default_to_none() {
-        let body: TaskRequest = serde_json::from_str(r#"{"title": "t", "status": "backlog"}"#)
-            .unwrap();
+        let body: TaskRequest =
+            serde_json::from_str(r#"{"title": "t", "status": "backlog"}"#).unwrap();
         assert_eq!(body.milestone_id, None);
         assert_eq!(body.description, None);
         assert_eq!(body.target_date, None);

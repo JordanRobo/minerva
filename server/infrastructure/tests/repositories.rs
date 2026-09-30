@@ -5,13 +5,15 @@
 
 use application::ports::{
     GoalMilestoneRepository, GoalRepository, MilestoneRepository, ProgressSnapshotRepository,
-    TaskRelationRepository, TaskRepository,
+    RepositoryError, TaskRelationRepository, TaskRepository, UserRepository,
+    UserIdentityRepository,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use diesel::prelude::*;
 use domain::{
     Goal, GoalId, GoalMilestone, GoalStatus, Milestone, MilestoneId, ProgressSnapshot,
     ProgressTarget, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationType,
-    TaskStatus,
+    TaskStatus, User, UserId, UserIdentity,
 };
 
 /// `Utc::now()` has nanosecond precision but Postgres `timestamptz` only
@@ -23,6 +25,7 @@ use infrastructure::db::{build_pool, PgPool};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
     PostgresProgressSnapshotRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
+    PostgresUserIdentityRepository, PostgresUserRepository,
 };
 use uuid::Uuid;
 
@@ -288,4 +291,63 @@ async fn progress_snapshot_repository_round_trip() {
 
     goals.delete(goal.id).await.unwrap();
     milestones.delete(milestone.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn user_identity_repository_round_trip() {
+    let Some(pool) = pool() else { return };
+    let identities = PostgresUserIdentityRepository::new(pool.clone());
+    let users = PostgresUserRepository::new(pool.clone());
+
+    // A passwordless user: its identity link is the only way in.
+    let now = now();
+    let user = User {
+        id: UserId::new(),
+        email: format!("identity-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: "Identity test user".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    users.create(user.clone()).await.unwrap();
+
+    let identity = UserIdentity::new(
+        user.id,
+        "https://idp.example".into(),
+        format!("sub-{}", Uuid::new_v4()),
+        Some(user.email.clone()),
+        now,
+    );
+    identities.create(identity.clone()).await.unwrap();
+
+    let found = identities
+        .find_by_issuer_and_subject("https://idp.example".into(), identity.subject.clone())
+        .await
+        .unwrap()
+        .expect("identity to exist");
+    assert_eq!(found, identity);
+    assert_eq!(
+        identities.list_for_user(user.id).await.unwrap(),
+        vec![identity.clone()]
+    );
+
+    // The (issuer, subject) pair is unique: linking it a second time is a conflict.
+    let duplicate = UserIdentity::new(
+        user.id,
+        "https://idp.example".into(),
+        identity.subject.clone(),
+        None,
+        now,
+    );
+    assert!(matches!(
+        identities.create(duplicate).await,
+        Err(RepositoryError::Conflict(_))
+    ));
+
+    // UserRepository has no delete yet; dropping the user row directly also
+    // cascade-deletes its identity links.
+    let mut conn = pool.get().unwrap();
+    diesel::delete(infrastructure::schema::users::table.find(user.id.0))
+        .execute(&mut conn)
+        .unwrap();
 }
