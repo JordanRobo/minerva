@@ -1,7 +1,8 @@
-//! End-to-end discovery test against a real OpenID Connect provider.
+//! End-to-end discovery test against a real OpenID Connect provider — any
+//! conforming IdP works, not just Authentik.
 //!
-//! Skipped unless the OIDC_* variables are set; in local dev, point them at
-//! the self-hosted Authentik (see deploy/docker-compose.yml for the names).
+//! Skipped unless the OIDC_* variables are set; see `.env.example` at the
+//! repo root for the names and what each one does.
 
 use application::ports::OidcProvider;
 use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
