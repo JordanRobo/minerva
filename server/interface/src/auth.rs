@@ -339,3 +339,527 @@ pub async fn logout(
 pub async fn me(auth: AuthenticatedUser) -> Result<HttpResponse, ApiError> {
     Ok(HttpResponse::Ok().json(UserResponse::from(&auth.user)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::App;
+    use actix_web::dev::{Service, ServiceResponse};
+    use actix_web::http::{header, StatusCode};
+    use actix_web::test::{read_body, init_service, TestRequest};
+    use diesel::prelude::*;
+    use infrastructure::db::PgPool;
+    use infrastructure::repositories::PostgresSessionRepository;
+    use std::sync::Arc;
+
+    /// The `DATABASE_URL` the tests run against, or `None` to skip.
+    fn database_url() -> Option<String> {
+        std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|url| !url.is_empty())
+    }
+
+    /// A one-connection pool: the default settings (max_size 10, min_idle =
+    /// max_size) times the parallel handler-test pools would exceed local
+    /// Postgres's `max_connections`. Pending migrations are applied once per
+    /// process first, so the tests are self-sufficient against a fresh
+    /// database.
+    fn test_pool(url: &str) -> PgPool {
+        let pool = diesel::r2d2::Pool::builder()
+            .max_size(1)
+            .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(url))
+            .expect("could not create test pool");
+        static MIGRATIONS_APPLIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        MIGRATIONS_APPLIED.get_or_init(|| {
+            infrastructure::migrations::run_migrations(&pool)
+                .expect("could not apply migrations in tests");
+        });
+        pool
+    }
+
+    /// Build the auth app (real Postgres repositories and hasher, routes as
+    /// in `main.rs`) and initialize it. A macro because `init_service`'s
+    /// service type is opaque and cannot be named in a helper's signature.
+    macro_rules! test_app {
+        ($url:expr) => {{
+            let pool = test_pool($url);
+            let session_repo: Arc<dyn SessionRepository> =
+                Arc::new(PostgresSessionRepository::new(pool.clone()));
+            let sessions: web::Data<dyn SessionRepository> = session_repo.into();
+            init_service(
+                App::new()
+                    .app_data(web::Data::new(PostgresUserRepository::new(pool.clone())))
+                    .app_data(sessions)
+                    .app_data(web::Data::new(Argon2PasswordHasher))
+                    .route("/api/auth/signup", web::post().to(signup))
+                    .route("/api/auth/login", web::post().to(login))
+                    .route("/api/auth/logout", web::post().to(logout))
+                    .route("/api/auth/me", web::get().to(me)),
+            )
+            .await
+        }};
+    }
+
+    // Request helpers are macros rather than generic functions: `init_service`'s
+    // service type is opaque, and the request type it takes
+    // (`actix_http::Request`) cannot be named here without a direct `actix-http`
+    // dependency (oidc.rs's test module uses macros for the same reason).
+
+    macro_rules! post_json {
+        ($app:expr, $uri:expr, $body:expr $(,)?) => {{
+            $app
+                .call(TestRequest::post().uri($uri).set_json($body).to_request())
+                .await
+                .unwrap()
+        }};
+    }
+
+    /// GET `uri` with the session cookie set to `token`, or no cookie.
+    macro_rules! get {
+        ($app:expr, $uri:expr, $token:expr) => {{
+            let mut req = TestRequest::get().uri($uri);
+            let token: Option<&str> = $token;
+            if let Some(t) = token {
+                req = req.insert_header((header::COOKIE, format!("{COOKIE_NAME}={t}")));
+            }
+            $app.call(req.to_request()).await.unwrap()
+        }};
+    }
+
+    /// POST `/api/auth/logout` with the session cookie set to `token`, or no
+    /// cookie.
+    macro_rules! post_logout {
+        ($app:expr, $token:expr) => {{
+            let mut req = TestRequest::post().uri("/api/auth/logout");
+            let token: Option<&str> = $token;
+            if let Some(t) = token {
+                req = req.insert_header((header::COOKIE, format!("{COOKIE_NAME}={t}")));
+            }
+            $app.call(req.to_request()).await.unwrap()
+        }};
+    }
+
+    /// The full value of the first `Set-Cookie` for `name`, if any.
+    fn set_cookie(res: &ServiceResponse, name: &str) -> Option<String> {
+        res.headers()
+            .get_all(header::SET_COOKIE)
+            .filter_map(|value| value.to_str().ok())
+            .find(|set| set.starts_with(&format!("{name}=")))
+            .map(str::to_owned)
+    }
+
+    /// The raw session token out of the `minerva_session` Set-Cookie.
+    fn session_token(res: &ServiceResponse) -> String {
+        set_cookie(res, COOKIE_NAME)
+            .expect("session cookie set")
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches(&format!("{COOKIE_NAME}="))
+            .to_owned()
+    }
+
+    fn unique_email(prefix: &str) -> String {
+        format!("{prefix}-{}@example.com", Uuid::new_v4())
+    }
+
+    /// A password account with a real Argon2 hash, created directly so login
+    /// tests do not depend on signup (which roadmap 2.5 removes).
+    async fn create_password_user(pool: &PgPool, email: String) -> User {
+        let users = PostgresUserRepository::new(pool.clone());
+        let now = Utc::now();
+        let password_hash = Argon2PasswordHasher.hash("password123").expect("hash password");
+        let user = User {
+            id: UserId::new(),
+            email,
+            password_hash: Some(password_hash),
+            display_name: "Auth test user".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        users.create(user).await.expect("create user")
+    }
+
+    /// Delete a user row directly (the repository has no delete); its
+    /// sessions cascade-delete with it.
+    fn delete_user(pool: &PgPool, user_id: UserId) {
+        let mut conn = pool.get().expect("pool connection");
+        diesel::delete(infrastructure::schema::users::table.find(user_id.0))
+            .execute(&mut conn)
+            .expect("delete user");
+    }
+
+    // ---- signup ----
+    // These pin CURRENT behaviour: open signup exists today and is removed by
+    // roadmap 2.5 (invite-only accounts). Replace when that lands.
+
+    #[actix_web::test]
+    async fn signup_creates_the_user_and_sets_a_session_cookie() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let email = unique_email("signup");
+        let app = test_app!(&url);
+        let res = post_json!(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({
+                "email": format!("  {}  ", email.to_uppercase()),
+                "password": "password123",
+                "display_name": "Signup user",
+            }),
+        );
+        assert_eq!(res.status(), StatusCode::CREATED);
+
+        // The cookie is HttpOnly (JS cannot read it), Lax (CSRF baseline)
+        // and scoped to the whole site.
+        let set = set_cookie(&res, COOKIE_NAME).expect("session cookie set");
+        assert!(set.contains("HttpOnly"), "{set}");
+        assert!(set.contains("SameSite=Lax"), "{set}");
+        assert!(set.contains("Path=/"), "{set}");
+
+        // The email is trimmed and lowercased; the hash never crosses the wire.
+        let body = read_body(res).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["email"], email);
+        assert_eq!(json["display_name"], "Signup user");
+        assert!(json.get("password_hash").is_none(), "no hash in response");
+
+        let pool = test_pool(&url);
+        let users = PostgresUserRepository::new(pool.clone());
+        let user = users
+            .find_by_email(email)
+            .await
+            .unwrap()
+            .expect("user created");
+        delete_user(&pool, user.id);
+    }
+
+    #[actix_web::test]
+    async fn signup_rejects_a_blank_email() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let app = test_app!(&url);
+        let res = post_json!(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({
+                "email": "   ",
+                "password": "password123",
+                "display_name": "Blank",
+            }),
+        );
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = read_body(res).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "bad_request");
+    }
+
+    #[actix_web::test]
+    async fn signup_rejects_a_short_password() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let app = test_app!(&url);
+        let res = post_json!(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({
+                "email": unique_email("short"),
+                "password": "short",
+                "display_name": "Short password",
+            }),
+        );
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = read_body(res).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "bad_request");
+    }
+
+    #[actix_web::test]
+    async fn signup_duplicate_email_is_a_conflict() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let email = unique_email("dup");
+        let app = test_app!(&url);
+        let first = post_json!(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({
+                "email": email.clone(),
+                "password": "password123",
+                "display_name": "First",
+            }),
+        );
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        // Same address in another case: normalization must still catch it.
+        let second = post_json!(
+            &app,
+            "/api/auth/signup",
+            serde_json::json!({
+                "email": email.to_uppercase(),
+                "password": "password123",
+                "display_name": "Second",
+            }),
+        );
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+        let body = read_body(second).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "conflict");
+
+        let pool = test_pool(&url);
+        let users = PostgresUserRepository::new(pool.clone());
+        let user = users
+            .find_by_email(email)
+            .await
+            .unwrap()
+            .expect("user created");
+        delete_user(&pool, user.id);
+    }
+
+    // ---- login ----
+
+    #[actix_web::test]
+    async fn login_success_sets_a_session_cookie() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let email = unique_email("login");
+        let user = create_password_user(&pool, email.clone()).await;
+        let app = test_app!(&url);
+        let res = post_json!(
+            &app,
+            "/api/auth/login",
+            serde_json::json!({ "email": email, "password": "password123" }),
+        );
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!session_token(&res).is_empty());
+        let body = read_body(res).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["email"], email);
+
+        delete_user(&pool, user.id);
+    }
+
+    #[actix_web::test]
+    async fn login_email_is_case_insensitive() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let email = unique_email("case");
+        let user = create_password_user(&pool, email.clone()).await;
+        let app = test_app!(&url);
+        let res = post_json!(
+            &app,
+            "/api/auth/login",
+            serde_json::json!({ "email": email.to_uppercase(), "password": "password123" }),
+        );
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!session_token(&res).is_empty());
+
+        delete_user(&pool, user.id);
+    }
+
+    #[actix_web::test]
+    async fn login_failures_are_indistinguishable() {
+        // Wrong password, unknown email and a passwordless account must all
+        // produce the same status and a byte-identical body: the response
+        // must not reveal which accounts exist.
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let known = create_password_user(&pool, unique_email("known")).await;
+        let users = PostgresUserRepository::new(pool.clone());
+        let now = Utc::now();
+        let passwordless = User {
+            id: UserId::new(),
+            email: unique_email("sso"),
+            password_hash: None,
+            display_name: "SSO only".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        users
+            .create(passwordless.clone())
+            .await
+            .expect("create passwordless user");
+
+        let app = test_app!(&url);
+        let wrong_password = post_json!(
+            &app,
+            "/api/auth/login",
+            serde_json::json!({ "email": known.email, "password": "not-the-password" }),
+        );
+        assert_eq!(wrong_password.status(), StatusCode::UNAUTHORIZED);
+        let unknown_email = post_json!(
+            &app,
+            "/api/auth/login",
+            serde_json::json!({ "email": unique_email("ghost"), "password": "password123" }),
+        );
+        assert_eq!(unknown_email.status(), StatusCode::UNAUTHORIZED);
+        let passwordless_login = post_json!(
+            &app,
+            "/api/auth/login",
+            serde_json::json!({ "email": passwordless.email, "password": "password123" }),
+        );
+        assert_eq!(passwordless_login.status(), StatusCode::UNAUTHORIZED);
+
+        let bodies = [
+            read_body(wrong_password).await,
+            read_body(unknown_email).await,
+            read_body(passwordless_login).await,
+        ];
+        assert_eq!(bodies[0], bodies[1]);
+        assert_eq!(bodies[0], bodies[2]);
+        let json: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        assert_eq!(json["error"]["code"], "unauthorized");
+
+        delete_user(&pool, known.id);
+        delete_user(&pool, passwordless.id);
+    }
+
+    // ---- me ----
+
+    #[actix_web::test]
+    async fn me_returns_the_user_for_a_valid_session() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let email = unique_email("me");
+        let user = create_password_user(&pool, email.clone()).await;
+        let app = test_app!(&url);
+        let login = post_json!(
+            &app,
+            "/api/auth/login",
+            serde_json::json!({ "email": email, "password": "password123" }),
+        );
+        assert_eq!(login.status(), StatusCode::OK);
+        let token = session_token(&login);
+
+        let res = get!(&app, "/api/auth/me", Some(&token));
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = read_body(res).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["email"], email);
+        assert_eq!(json["id"], user.id.0.to_string());
+
+        delete_user(&pool, user.id);
+    }
+
+    #[actix_web::test]
+    async fn me_without_a_cookie_is_unauthorized() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let app = test_app!(&url);
+        let res = get!(&app, "/api/auth/me", None);
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let body = read_body(res).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "unauthorized");
+    }
+
+    #[actix_web::test]
+    async fn me_with_a_garbage_cookie_is_unauthorized() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let app = test_app!(&url);
+        let res = get!(&app, "/api/auth/me", Some("not-a-real-token"));
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn me_with_an_expired_session_is_unauthorized() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let user = create_password_user(&pool, unique_email("expired")).await;
+        // A session already past its expiry, created directly: the repository
+        // still returns it, so the 401 must come from the extractor's
+        // `is_expired` check.
+        let sessions = PostgresSessionRepository::new(pool.clone());
+        let now = Utc::now();
+        sessions
+            .create(Session {
+                id: SessionId::new(),
+                user_id: user.id,
+                token_hash: hash_token("expired-token"),
+                created_at: now - Duration::hours(2),
+                expires_at: now - Duration::hours(1),
+                last_seen_at: now - Duration::hours(2),
+            })
+            .await
+            .expect("create expired session");
+
+        let app = test_app!(&url);
+        let res = get!(&app, "/api/auth/me", Some("expired-token"));
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        delete_user(&pool, user.id);
+    }
+
+    // ---- logout ----
+
+    #[actix_web::test]
+    async fn logout_deletes_the_session_and_clears_the_cookie() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let email = unique_email("logout");
+        let user = create_password_user(&pool, email.clone()).await;
+        let app = test_app!(&url);
+        let login = post_json!(
+            &app,
+            "/api/auth/login",
+            serde_json::json!({ "email": email, "password": "password123" }),
+        );
+        assert_eq!(login.status(), StatusCode::OK);
+        let token = session_token(&login);
+
+        let res = post_logout!(&app, Some(&token));
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        // The browser is told to drop the cookie.
+        let set = set_cookie(&res, COOKIE_NAME).expect("cookie cleared");
+        assert!(set.contains("Max-Age=0"), "{set}");
+
+        // The session row is gone: the old cookie no longer authenticates.
+        let me = get!(&app, "/api/auth/me", Some(&token));
+        assert_eq!(me.status(), StatusCode::UNAUTHORIZED);
+
+        delete_user(&pool, user.id);
+    }
+
+    #[actix_web::test]
+    async fn logout_without_a_cookie_still_succeeds() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let app = test_app!(&url);
+        let res = post_logout!(&app, None);
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(set_cookie(&res, COOKIE_NAME).is_some(), "cookie cleared");
+    }
+}

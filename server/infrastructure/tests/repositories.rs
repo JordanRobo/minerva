@@ -21,7 +21,7 @@ use domain::{
 fn now() -> DateTime<Utc> {
     Utc.timestamp_millis_opt(Utc::now().timestamp_millis()).unwrap()
 }
-use infrastructure::db::{build_pool, PgPool};
+use infrastructure::db::PgPool;
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
     PostgresProgressSnapshotRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
@@ -35,7 +35,14 @@ static MIGRATIONS_APPLIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn pool() -> Option<PgPool> {
     std::env::var("DATABASE_URL").ok().as_deref().map(|url| {
-        let pool = build_pool(url);
+        // One connection per test: the default settings (max_size 10,
+        // min_idle = max_size) times every parallel test binary would exceed
+        // local Postgres's `max_connections` (see oidc.rs's test_pool). Every
+        // test here uses a single connection at a time.
+        let pool = diesel::r2d2::Pool::builder()
+            .max_size(1)
+            .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(url))
+            .expect("could not create test pool");
         MIGRATIONS_APPLIED.get_or_init(|| {
             infrastructure::migrations::run_migrations(&pool)
                 .expect("could not apply migrations in tests");
@@ -361,4 +368,112 @@ async fn user_identity_repository_round_trip() {
     diesel::delete(infrastructure::schema::users::table.find(user.id.0))
         .execute(&mut conn)
         .unwrap();
+}
+
+#[tokio::test]
+async fn user_repository_round_trip() {
+    let Some(pool) = pool() else { return };
+    let users = PostgresUserRepository::new(pool.clone());
+    let now = now();
+    let email = format!("user-{}@example.com", Uuid::new_v4());
+    let user = User {
+        id: UserId::new(),
+        email: email.clone(),
+        password_hash: Some("not-a-real-hash".into()),
+        display_name: "Round trip user".into(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    let created = users.create(user).await.expect("create");
+    assert_eq!(created.email, email);
+
+    let by_id = users
+        .find_by_id(created.id)
+        .await
+        .expect("find by id")
+        .expect("user exists");
+    assert_eq!(by_id, created);
+
+    // Lookups are case-insensitive: the port lowercases before querying.
+    let by_email = users
+        .find_by_email(email.to_uppercase())
+        .await
+        .expect("find by email")
+        .expect("user found by mixed-case email");
+    assert_eq!(by_email, created);
+
+    // A duplicate (normalized) email violates the unique constraint.
+    let duplicate = User {
+        id: UserId::new(),
+        email: email.clone(),
+        password_hash: None,
+        display_name: "Duplicate".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    assert!(matches!(
+        users.create(duplicate).await,
+        Err(RepositoryError::Conflict(_))
+    ));
+
+    // Update the row and read it back.
+    let mut updated = created.clone();
+    updated.display_name = "Updated name".into();
+    let updated = users.update(updated).await.expect("update");
+    let reloaded = users
+        .find_by_id(created.id)
+        .await
+        .expect("reload")
+        .expect("user exists");
+    assert_eq!(reloaded, updated);
+
+    // A passwordless account (SSO-only) round-trips as `None`, not an empty
+    // string.
+    let passwordless = User {
+        id: UserId::new(),
+        email: format!("passwordless-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: "Passwordless".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    let created_pw = users.create(passwordless).await.expect("create passwordless");
+    let reloaded_pw = users
+        .find_by_id(created_pw.id)
+        .await
+        .expect("reload passwordless")
+        .expect("passwordless user exists");
+    assert_eq!(reloaded_pw.password_hash, None);
+
+    // Characterization: `find_by_email` lowercases only the *query*. A row
+    // stored with mixed case (bypassing signup's normalization) is never
+    // found. Every current write path normalizes, so this stays latent —
+    // pinned here so a future change to the lookup (e.g. `LOWER(email) =
+    // LOWER(?)`) surfaces as a test failure instead of a silent behaviour
+    // change.
+    let mixed_case_email = format!("Mixed-Case-{}@example.com", Uuid::new_v4());
+    let mixed_case = User {
+        id: UserId::new(),
+        email: mixed_case_email.clone(),
+        password_hash: None,
+        display_name: "Mixed case".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    let mixed = users.create(mixed_case).await.expect("create mixed-case user");
+    assert!(users
+        .find_by_email(mixed_case_email.to_lowercase())
+        .await
+        .expect("find mixed-case")
+        .is_none());
+
+    // UserRepository has no delete yet; drop the rows directly (sessions and
+    // identities would cascade).
+    let mut conn = pool.get().unwrap();
+    for id in [created.id, created_pw.id, mixed.id] {
+        diesel::delete(infrastructure::schema::users::table.find(id.0))
+            .execute(&mut conn)
+            .unwrap();
+    }
 }
