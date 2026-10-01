@@ -199,7 +199,7 @@ async fn main() -> std::io::Result<()> {
             // API documentation (not part of the /api surface): a Swagger UI
             // rendering the generated OpenAPI 3 document, plus the raw JSON at
             // /api-docs/openapi.json (registered by `.url`). Unauthenticated
-            // like the rest of the server until auth lands in Milestone 3.
+            // like the rest of the server; route protection is roadmap item 2.4.
             .service(
                 SwaggerUi::new("/api-docs/swagger-ui/{_:.*}")
                     .url("/api-docs/openapi.json", openapi),

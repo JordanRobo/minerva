@@ -11,4 +11,7 @@ node_modules/
 # graphify knowledge graph (generated locally)
 graphify-out/
 
+# Local planning reference, not part of the repo
+docs/roadmap.md
+
 *.log

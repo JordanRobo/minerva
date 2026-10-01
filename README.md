@@ -9,14 +9,16 @@ is goal/milestone-first: teams start from what they are trying to achieve,
 break it into milestones, and track progress against those — rather than
 managing a flat list of tasks.
 
+Scope and progress live in [docs/roadmap.md](docs/roadmap.md), the project's
+checklist and source of truth for what is planned.
+
 ## Tech stack
 
 - **Frontend:** SvelteKit (TypeScript) — `apps/web`
 - **Backend:** Rust with Actix-web — `server`
 - **Database:** PostgreSQL via Diesel — migrations in `server/migrations`
 - **Cache / optional services:** Redis
-- **Object storage:** any S3-compatible service (RustFS for local dev),
-  accessed through a trait abstraction in the infrastructure layer
+- **Object storage:** RustFS (S3-compatible) runs in the dev stack; server-side integration is roadmap item 7.1
 
 See [docs/architecture.md](docs/architecture.md) for the DDD layering of the
 backend.
@@ -26,9 +28,9 @@ backend.
 ```
 apps/web/            SvelteKit frontend
 server/              Rust Cargo workspace
-  domain/            core business logic (no external deps)
+  domain/            core business logic (no I/O or framework deps)
   application/       use cases
-  infrastructure/    Postgres / Redis / S3 adapters
+  infrastructure/    Postgres / Redis adapters (S3: roadmap 7.1)
   interface/         Actix-web HTTP API (bin: minerva-server)
   migrations/        Diesel migrations
 deploy/              docker-compose.yml + Dockerfiles
