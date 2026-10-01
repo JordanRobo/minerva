@@ -15,7 +15,7 @@ To recreate this project with the same configuration:
 
 ```sh
 # recreate this project
-npx sv@0.17.0 create --template minimal --types ts --install bun /home/jordan/Dev/software/minerva-pm/apps/web
+npx sv@0.17.0 create --template minimal --types ts --install bun apps/web
 ```
 
 ## Developing
