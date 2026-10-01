@@ -35,21 +35,26 @@ use uuid::Uuid;
 static MIGRATIONS_APPLIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn pool() -> Option<PgPool> {
-    std::env::var("DATABASE_URL").ok().as_deref().map(|url| {
-        // One connection per test: the default settings (max_size 10,
-        // min_idle = max_size) times every parallel test binary would exceed
-        // local Postgres's `max_connections` (see oidc.rs's test_pool). Every
-        // test here uses a single connection at a time.
-        let pool = diesel::r2d2::Pool::builder()
-            .max_size(1)
-            .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(url))
-            .expect("could not create test pool");
-        MIGRATIONS_APPLIED.get_or_init(|| {
-            infrastructure::migrations::run_migrations(&pool)
-                .expect("could not apply migrations in tests");
-        });
-        pool
-    })
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip Postgres tests in CI");
+        }
+        return None;
+    };
+    // One connection per test: the default settings (max_size 10,
+    // min_idle = max_size) times every parallel test binary would exceed
+    // local Postgres's `max_connections` (see oidc.rs's test_pool). Every
+    // test here uses a single connection at a time.
+    let pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create test pool");
+    MIGRATIONS_APPLIED.get_or_init(|| {
+        infrastructure::migrations::run_migrations(&pool)
+            .expect("could not apply migrations in tests");
+    });
+    Some(pool)
 }
 
 fn test_status() -> GoalStatus {

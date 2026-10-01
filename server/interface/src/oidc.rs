@@ -701,9 +701,14 @@ mod tests {
 
     /// The `DATABASE_URL` the tests run against, or `None` to skip.
     fn database_url() -> Option<String> {
-        std::env::var("DATABASE_URL")
+        let url = std::env::var("DATABASE_URL")
             .ok()
-            .filter(|url| !url.is_empty())
+            .filter(|url| !url.is_empty());
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if url.is_none() && std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip OIDC tests in CI");
+        }
+        url
     }
 
     /// A one-connection pool: the default settings (max_size 10, min_idle =

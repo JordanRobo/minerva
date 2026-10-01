@@ -11,9 +11,20 @@ use infrastructure::repositories::RedisSessionRepository;
 use uuid::Uuid;
 
 fn repo() -> Option<RedisSessionRepository> {
-    std::env::var("REDIS_URL")
-        .ok()
-        .and_then(|url| RedisSessionRepository::connect(&url).ok())
+    let Some(url) = std::env::var("REDIS_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("REDIS_URL is not set; refusing to skip Redis tests in CI");
+        }
+        return None;
+    };
+    match RedisSessionRepository::connect(&url) {
+        Ok(repo) => Some(repo),
+        Err(err) if std::env::var_os("CI").is_some() => {
+            panic!("could not connect to Redis at {url}: {err}")
+        }
+        Err(_) => None,
+    }
 }
 
 /// `Utc::now()` has nanosecond precision; quantize to milliseconds so

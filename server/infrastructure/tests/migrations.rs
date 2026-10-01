@@ -6,10 +6,14 @@ use infrastructure::db::{PgPool, build_pool};
 use infrastructure::migrations::run_migrations;
 
 fn pool() -> Option<PgPool> {
-    std::env::var("DATABASE_URL")
-        .ok()
-        .as_deref()
-        .map(build_pool)
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip migration tests in CI");
+        }
+        return None;
+    };
+    Some(build_pool(&url))
 }
 
 #[test]
