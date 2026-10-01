@@ -71,8 +71,7 @@ impl Task {
     /// this one, so direction matters.
     pub fn is_blocked(&self, relations: &[TaskRelation]) -> bool {
         relations.iter().any(|relation| {
-            relation.target_task_id == self.id
-                && relation.relation_type == TaskRelationType::Blocks
+            relation.target_task_id == self.id && relation.relation_type == TaskRelationType::Blocks
         })
     }
 }
@@ -148,7 +147,11 @@ mod tests {
         // blocked by this one, so it does not block this task.
         let task = test_task(None);
         let other = TaskId::new();
-        let relations = [relation_between(other, task.id, TaskRelationType::BlockedBy)];
+        let relations = [relation_between(
+            other,
+            task.id,
+            TaskRelationType::BlockedBy,
+        )];
         assert!(!task.is_blocked(&relations));
     }
 

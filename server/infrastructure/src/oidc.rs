@@ -92,7 +92,9 @@ impl OidcConfig {
             display_name: non_empty(&mut lookup, "OIDC_DISPLAY_NAME")
                 .unwrap_or_else(|| DEFAULT_DISPLAY_NAME.to_owned()),
             scopes: parse_scopes(
-                non_empty(&mut lookup, "OIDC_SCOPES").as_deref().unwrap_or(DEFAULT_SCOPES),
+                non_empty(&mut lookup, "OIDC_SCOPES")
+                    .as_deref()
+                    .unwrap_or(DEFAULT_SCOPES),
             ),
             groups_claim: non_empty(&mut lookup, "OIDC_GROUPS_CLAIM")
                 .unwrap_or_else(|| DEFAULT_GROUPS_CLAIM.to_owned()),
@@ -127,10 +129,10 @@ fn parse_scopes(raw: &str) -> Vec<String> {
 /// endpoint is always present in provider metadata, the token and userinfo
 /// endpoints optional.
 type DiscoveredClient = CoreClient<
-    EndpointSet, // authorization endpoint
-    EndpointNotSet, // device authorization endpoint
-    EndpointNotSet, // introspection endpoint
-    EndpointNotSet, // revocation endpoint
+    EndpointSet,      // authorization endpoint
+    EndpointNotSet,   // device authorization endpoint
+    EndpointNotSet,   // introspection endpoint
+    EndpointNotSet,   // revocation endpoint
     EndpointMaybeSet, // token endpoint
     EndpointMaybeSet, // userinfo endpoint
 >;
@@ -193,7 +195,8 @@ impl OpenIdConnectProvider {
     /// network call; concurrent first-time callers may discover twice, which
     /// is harmless (both results are equivalent).
     async fn ensure_discovered(&self) -> Result<Arc<Discovered>, OidcError> {
-        if let Discovery::Ready(ref discovered) = *self.discovery.lock().expect("discovery lock poisoned")
+        if let Discovery::Ready(ref discovered) =
+            *self.discovery.lock().expect("discovery lock poisoned")
         {
             return Ok(Arc::clone(discovered));
         }
@@ -360,9 +363,9 @@ impl OidcProvider for OpenIdConnectProvider {
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
             .ok_or_else(|| OidcError::InvalidIdToken("ID token is not a compact JWT".into()))?;
-        let groups_token: GroupsIdToken = raw.parse().map_err(|err| {
-            OidcError::InvalidIdToken(format!("unparsable ID token: {err}"))
-        })?;
+        let groups_token: GroupsIdToken = raw
+            .parse()
+            .map_err(|err| OidcError::InvalidIdToken(format!("unparsable ID token: {err}")))?;
 
         let claims = groups_token
             .claims(
@@ -396,7 +399,12 @@ mod tests {
     use super::*;
 
     fn lookup_from(pairs: &[(&str, &str)]) -> impl FnMut(&str) -> Option<String> {
-        move |key: &str| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_owned())
+        move |key: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_owned())
+        }
     }
 
     const FULL_ENV: [(&str, &str); 4] = [
@@ -501,10 +509,7 @@ mod tests {
         let config = OidcConfig::from_lookup(lookup_from(&pairs))
             .unwrap()
             .expect("config");
-        assert_eq!(
-            config.scopes,
-            vec!["openid".to_owned(), "email".to_owned()]
-        );
+        assert_eq!(config.scopes, vec!["openid".to_owned(), "email".to_owned()]);
     }
 
     fn extra(claim: &str, value: Value) -> ExtraIdTokenClaims {
@@ -517,7 +522,10 @@ mod tests {
     fn extract_groups_handles_array_string_and_absent() {
         assert_eq!(
             extract_groups(
-                &extra("groups", Value::Array(vec![Value::String("a".into()), Value::String("b".into())])),
+                &extra(
+                    "groups",
+                    Value::Array(vec![Value::String("a".into()), Value::String("b".into())])
+                ),
                 "groups"
             ),
             vec!["a".to_owned(), "b".to_owned()]
@@ -535,7 +543,10 @@ mod tests {
             "app_roles",
             Value::Array(vec![Value::String("admin".into()), Value::Number(1.into())]),
         );
-        assert_eq!(extract_groups(&claims, "app_roles"), vec!["admin".to_owned()]);
+        assert_eq!(
+            extract_groups(&claims, "app_roles"),
+            vec!["admin".to_owned()]
+        );
         assert!(extract_groups(&claims, "groups").is_empty());
     }
 }

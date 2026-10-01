@@ -345,8 +345,8 @@ mod tests {
     use super::*;
     use actix_web::App;
     use actix_web::dev::{Service, ServiceResponse};
-    use actix_web::http::{header, StatusCode};
-    use actix_web::test::{read_body, init_service, TestRequest};
+    use actix_web::http::{StatusCode, header};
+    use actix_web::test::{TestRequest, init_service, read_body};
     use diesel::prelude::*;
     use infrastructure::db::PgPool;
     use infrastructure::repositories::PostgresSessionRepository;
@@ -354,9 +354,14 @@ mod tests {
 
     /// The `DATABASE_URL` the tests run against, or `None` to skip.
     fn database_url() -> Option<String> {
-        std::env::var("DATABASE_URL")
+        let url = std::env::var("DATABASE_URL")
             .ok()
-            .filter(|url| !url.is_empty())
+            .filter(|url| !url.is_empty());
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if url.is_none() && std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip auth tests in CI");
+        }
+        url
     }
 
     /// A one-connection pool: the default settings (max_size 10, min_idle =
@@ -407,8 +412,7 @@ mod tests {
 
     macro_rules! post_json {
         ($app:expr, $uri:expr, $body:expr $(,)?) => {{
-            $app
-                .call(TestRequest::post().uri($uri).set_json($body).to_request())
+            $app.call(TestRequest::post().uri($uri).set_json($body).to_request())
                 .await
                 .unwrap()
         }};
@@ -468,7 +472,9 @@ mod tests {
     async fn create_password_user(pool: &PgPool, email: String) -> User {
         let users = PostgresUserRepository::new(pool.clone());
         let now = Utc::now();
-        let password_hash = Argon2PasswordHasher.hash("password123").expect("hash password");
+        let password_hash = Argon2PasswordHasher
+            .hash("password123")
+            .expect("hash password");
         let user = User {
             id: UserId::new(),
             email,

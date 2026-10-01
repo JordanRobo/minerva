@@ -14,7 +14,10 @@ pub trait GoalMilestoneRepository: Send + Sync {
         milestone_id: MilestoneId,
     ) -> Result<(), RepositoryError>;
 
-    async fn milestones_for_goal(&self, goal_id: GoalId) -> Result<Vec<MilestoneId>, RepositoryError>;
+    async fn milestones_for_goal(
+        &self,
+        goal_id: GoalId,
+    ) -> Result<Vec<MilestoneId>, RepositoryError>;
 
     async fn goals_for_milestone(
         &self,

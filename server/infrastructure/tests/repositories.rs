@@ -5,21 +5,22 @@
 
 use application::ports::{
     GoalMilestoneRepository, GoalRepository, MilestoneRepository, ProgressSnapshotRepository,
-    RepositoryError, TaskRelationRepository, TaskRepository, UserRepository,
-    UserIdentityRepository,
+    RepositoryError, TaskRelationRepository, TaskRepository, UserIdentityRepository,
+    UserRepository,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use diesel::prelude::*;
 use domain::{
     Goal, GoalId, GoalMilestone, GoalStatus, Milestone, MilestoneId, ProgressSnapshot,
-    ProgressTarget, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationType,
-    TaskStatus, User, UserId, UserIdentity,
+    ProgressTarget, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationType, TaskStatus,
+    User, UserId, UserIdentity,
 };
 
 /// `Utc::now()` has nanosecond precision but Postgres `timestamptz` only
 /// stores microseconds, so quantize to milliseconds for exact round-trips.
 fn now() -> DateTime<Utc> {
-    Utc.timestamp_millis_opt(Utc::now().timestamp_millis()).unwrap()
+    Utc.timestamp_millis_opt(Utc::now().timestamp_millis())
+        .unwrap()
 }
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{
@@ -34,21 +35,26 @@ use uuid::Uuid;
 static MIGRATIONS_APPLIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn pool() -> Option<PgPool> {
-    std::env::var("DATABASE_URL").ok().as_deref().map(|url| {
-        // One connection per test: the default settings (max_size 10,
-        // min_idle = max_size) times every parallel test binary would exceed
-        // local Postgres's `max_connections` (see oidc.rs's test_pool). Every
-        // test here uses a single connection at a time.
-        let pool = diesel::r2d2::Pool::builder()
-            .max_size(1)
-            .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(url))
-            .expect("could not create test pool");
-        MIGRATIONS_APPLIED.get_or_init(|| {
-            infrastructure::migrations::run_migrations(&pool)
-                .expect("could not apply migrations in tests");
-        });
-        pool
-    })
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip Postgres tests in CI");
+        }
+        return None;
+    };
+    // One connection per test: the default settings (max_size 10,
+    // min_idle = max_size) times every parallel test binary would exceed
+    // local Postgres's `max_connections` (see oidc.rs's test_pool). Every
+    // test here uses a single connection at a time.
+    let pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create test pool");
+    MIGRATIONS_APPLIED.get_or_init(|| {
+        infrastructure::migrations::run_migrations(&pool)
+            .expect("could not apply migrations in tests");
+    });
+    Some(pool)
 }
 
 fn test_status() -> GoalStatus {
@@ -116,7 +122,11 @@ async fn goal_repository_round_trip() {
     let created = repo.create(goal.clone()).await.unwrap();
     assert_eq!(created.id, goal.id);
 
-    let found = repo.find_by_id(goal.id).await.unwrap().expect("goal to exist");
+    let found = repo
+        .find_by_id(goal.id)
+        .await
+        .unwrap()
+        .expect("goal to exist");
     assert_eq!(found, goal);
     assert!(repo.list().await.unwrap().iter().any(|g| g.id == goal.id));
 
@@ -154,12 +164,21 @@ async fn milestone_repository_round_trip() {
         .unwrap()
         .expect("milestone to exist");
     assert_eq!(found, milestone);
-    assert!(repo.list().await.unwrap().iter().any(|m| m.id == milestone.id));
+    assert!(
+        repo.list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.id == milestone.id)
+    );
 
     let mut updated = found;
     updated.title = "Updated title".into();
     repo.update(updated.clone()).await.unwrap();
-    assert_eq!(repo.find_by_id(milestone.id).await.unwrap().unwrap(), updated);
+    assert_eq!(
+        repo.find_by_id(milestone.id).await.unwrap().unwrap(),
+        updated
+    );
 
     repo.delete(milestone.id).await.unwrap();
     assert!(repo.find_by_id(milestone.id).await.unwrap().is_none());
@@ -181,12 +200,24 @@ async fn goal_milestone_repository_round_trip() {
         .link(GoalMilestone::new(goal.id, milestone.id))
         .await
         .unwrap();
-    assert_eq!(links.milestones_for_goal(goal.id).await.unwrap(), vec![milestone.id]);
-    assert_eq!(links.goals_for_milestone(milestone.id).await.unwrap(), vec![goal.id]);
+    assert_eq!(
+        links.milestones_for_goal(goal.id).await.unwrap(),
+        vec![milestone.id]
+    );
+    assert_eq!(
+        links.goals_for_milestone(milestone.id).await.unwrap(),
+        vec![goal.id]
+    );
 
     links.unlink(goal.id, milestone.id).await.unwrap();
     assert!(links.milestones_for_goal(goal.id).await.unwrap().is_empty());
-    assert!(links.goals_for_milestone(milestone.id).await.unwrap().is_empty());
+    assert!(
+        links
+            .goals_for_milestone(milestone.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     goals.delete(goal.id).await.unwrap();
     milestones.delete(milestone.id).await.unwrap();
@@ -204,9 +235,19 @@ async fn task_repository_round_trip() {
     let task = test_task(None);
     repo.create(task.clone()).await.unwrap();
 
-    let found = repo.find_by_id(task.id).await.unwrap().expect("task to exist");
+    let found = repo
+        .find_by_id(task.id)
+        .await
+        .unwrap()
+        .expect("task to exist");
     assert_eq!(found, task);
-    assert!(repo.list_unassigned().await.unwrap().iter().any(|t| t.id == task.id));
+    assert!(
+        repo.list_unassigned()
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.id == task.id)
+    );
 
     // Assign the task to the milestone and move it along the board.
     let mut updated = found;
@@ -214,8 +255,21 @@ async fn task_repository_round_trip() {
     updated.status = TaskStatus::InProgress;
     repo.update(updated.clone()).await.unwrap();
     assert_eq!(repo.find_by_id(task.id).await.unwrap().unwrap(), updated);
-    assert!(repo.list_by_milestone(milestone.id).await.unwrap().iter().any(|t| t.id == task.id));
-    assert!(!repo.list_unassigned().await.unwrap().iter().any(|t| t.id == task.id));
+    assert!(
+        repo.list_by_milestone(milestone.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.id == task.id)
+    );
+    assert!(
+        !repo
+            .list_unassigned()
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.id == task.id)
+    );
 
     repo.delete(task.id).await.unwrap();
     assert!(repo.find_by_id(task.id).await.unwrap().is_none());
@@ -233,18 +287,19 @@ async fn task_relation_repository_round_trip() {
     tasks.create(source.clone()).await.unwrap();
     tasks.create(target.clone()).await.unwrap();
 
-    let relation = TaskRelation::new(
-        source.id,
-        target.id,
-        TaskRelationType::Blocks,
-        now(),
-    );
+    let relation = TaskRelation::new(source.id, target.id, TaskRelationType::Blocks, now());
     repo.create(relation.clone()).await.unwrap();
 
     // The task appears in the listing whether it is the source or the
     // target of the relation.
-    assert_eq!(repo.list_for_task(source.id).await.unwrap(), vec![relation.clone()]);
-    assert_eq!(repo.list_for_task(target.id).await.unwrap(), vec![relation.clone()]);
+    assert_eq!(
+        repo.list_for_task(source.id).await.unwrap(),
+        vec![relation.clone()]
+    );
+    assert_eq!(
+        repo.list_for_task(target.id).await.unwrap(),
+        vec![relation.clone()]
+    );
 
     repo.delete(relation.id).await.unwrap();
     assert!(repo.list_for_task(source.id).await.unwrap().is_empty());
@@ -287,7 +342,10 @@ async fn progress_snapshot_repository_round_trip() {
     repo.create(first.clone()).await.unwrap();
     repo.create(second.clone()).await.unwrap();
 
-    let for_goal = repo.list_for_target(ProgressTarget::Goal(goal.id)).await.unwrap();
+    let for_goal = repo
+        .list_for_target(ProgressTarget::Goal(goal.id))
+        .await
+        .unwrap();
     assert_eq!(for_goal, vec![first, second]);
 
     // Snapshots of one target never leak into another target's listing.
@@ -438,7 +496,10 @@ async fn user_repository_round_trip() {
         created_at: now,
         updated_at: now,
     };
-    let created_pw = users.create(passwordless).await.expect("create passwordless");
+    let created_pw = users
+        .create(passwordless)
+        .await
+        .expect("create passwordless");
     let reloaded_pw = users
         .find_by_id(created_pw.id)
         .await
@@ -461,12 +522,17 @@ async fn user_repository_round_trip() {
         created_at: now,
         updated_at: now,
     };
-    let mixed = users.create(mixed_case).await.expect("create mixed-case user");
-    assert!(users
-        .find_by_email(mixed_case_email.to_lowercase())
+    let mixed = users
+        .create(mixed_case)
         .await
-        .expect("find mixed-case")
-        .is_none());
+        .expect("create mixed-case user");
+    assert!(
+        users
+            .find_by_email(mixed_case_email.to_lowercase())
+            .await
+            .expect("find mixed-case")
+            .is_none()
+    );
 
     // UserRepository has no delete yet; drop the rows directly (sessions and
     // identities would cascade).

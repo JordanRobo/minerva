@@ -130,7 +130,9 @@ impl SessionRepository for RedisSessionRepository {
             }
             let _: bool = conn.expire(&key, ttl).map_err(map_redis_error)?;
             let id_key = session_id_key(&session.id);
-            let _: () = conn.set(&id_key, &session.token_hash).map_err(map_redis_error)?;
+            let _: () = conn
+                .set(&id_key, &session.token_hash)
+                .map_err(map_redis_error)?;
             let _: bool = conn.expire(&id_key, ttl).map_err(map_redis_error)?;
             // The index set has no TTL: stale members are harmless (their
             // session keys are already evicted) and get removed the next
@@ -152,7 +154,7 @@ impl SessionRepository for RedisSessionRepository {
             let mut conn = client.get_connection().map_err(map_redis_error)?;
             // A missing (or already evicted) key is a plain `None`, not an error.
             let fields: HashMap<String, String> = conn
-                .hgetall(&session_key(&token_hash))
+                .hgetall(session_key(&token_hash))
                 .map_err(map_redis_error)?;
             if fields.is_empty() {
                 return Ok(None);
@@ -175,7 +177,7 @@ impl SessionRepository for RedisSessionRepository {
             let mut sessions = Vec::new();
             for token_hash in token_hashes {
                 let fields: HashMap<String, String> = conn
-                    .hgetall(&session_key(&token_hash))
+                    .hgetall(session_key(&token_hash))
                     .map_err(map_redis_error)?;
                 // Evicted sessions leave stale set members behind; skip them.
                 if !fields.is_empty() {
@@ -223,7 +225,9 @@ impl SessionRepository for RedisSessionRepository {
                 // and the index need explicit removal.
                 let _: usize = conn.del(session_key(token_hash)).map_err(map_redis_error)?;
             }
-            let _: usize = conn.del(user_sessions_key(&user_id)).map_err(map_redis_error)?;
+            let _: usize = conn
+                .del(user_sessions_key(&user_id))
+                .map_err(map_redis_error)?;
             Ok(())
         })
         .await
@@ -237,9 +241,8 @@ impl SessionRepository for RedisSessionRepository {
         let client = self.client.clone();
         run_on_redis(move || {
             let mut conn = client.get_connection().map_err(map_redis_error)?;
-            let token_hash: Option<String> = conn
-                .get(&session_id_key(&id))
-                .map_err(map_redis_error)?;
+            let token_hash: Option<String> =
+                conn.get(session_id_key(&id)).map_err(map_redis_error)?;
             let Some(token_hash) = token_hash else {
                 return Err(RepositoryError::NotFound);
             };

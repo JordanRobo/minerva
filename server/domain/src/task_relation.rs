@@ -141,12 +141,8 @@ mod tests {
     fn a_relation_links_two_tasks_with_a_type() {
         let source = TaskId::new();
         let target = TaskId::new();
-        let relation = TaskRelation::new(
-            source,
-            target,
-            TaskRelationType::Blocks,
-            test_timestamp(),
-        );
+        let relation =
+            TaskRelation::new(source, target, TaskRelationType::Blocks, test_timestamp());
         assert_eq!(relation.source_task_id, source);
         assert_eq!(relation.target_task_id, target);
         assert_eq!(relation.relation_type, TaskRelationType::Blocks);

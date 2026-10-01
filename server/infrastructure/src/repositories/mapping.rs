@@ -76,7 +76,7 @@ pub fn goal_status_from_db(status: &str, source: &str) -> Result<GoalStatus, Rep
         other => {
             return Err(RepositoryError::Unexpected(format!(
                 "unknown status_source value {other:?} in database"
-            )))
+            )));
         }
     };
     Ok(GoalStatus {
@@ -174,7 +174,9 @@ pub type TaskRelationRow = (Uuid, Uuid, Uuid, String, DateTime<Utc>);
 /// required: a variant added to `domain` later has no database
 /// representation until one is chosen here, and storing an invented string
 /// would corrupt data, so it is reported instead.
-pub fn relation_type_to_db(relation_type: TaskRelationType) -> Result<&'static str, RepositoryError> {
+pub fn relation_type_to_db(
+    relation_type: TaskRelationType,
+) -> Result<&'static str, RepositoryError> {
     match relation_type {
         TaskRelationType::Blocks => Ok("blocks"),
         TaskRelationType::BlockedBy => Ok("blocked_by"),
@@ -226,7 +228,9 @@ pub type ProgressSnapshotRow = (
 /// The row is reconstructed through [`ProgressSnapshot::new`] so the
 /// 0..=100 `percent_complete` invariant is enforced in Rust as well as by
 /// the database CHECK constraint.
-pub fn progress_snapshot_from_row(row: ProgressSnapshotRow) -> Result<ProgressSnapshot, RepositoryError> {
+pub fn progress_snapshot_from_row(
+    row: ProgressSnapshotRow,
+) -> Result<ProgressSnapshot, RepositoryError> {
     let (id, goal_id, milestone_id, recorded_at, status, percent_complete, note) = row;
     // The CHECK constraint says exactly one of the two is set; a row that
     // violates it is a data-integrity problem, not something to guess at.
@@ -236,7 +240,7 @@ pub fn progress_snapshot_from_row(row: ProgressSnapshotRow) -> Result<ProgressSn
         _ => {
             return Err(RepositoryError::Unexpected(
                 "progress snapshot must reference exactly one of a goal or a milestone".to_owned(),
-            ))
+            ));
         }
     };
     let percent_complete = u8::try_from(percent_complete).map_err(|_| {

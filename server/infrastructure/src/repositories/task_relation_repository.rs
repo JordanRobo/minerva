@@ -4,9 +4,9 @@ use application::ports::{RepositoryError, TaskRelationRepository};
 use diesel::prelude::*;
 use domain::{TaskId, TaskRelation, TaskRelationId};
 
-use crate::db::{run_on_postgres, PgPool};
+use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
-use crate::repositories::mapping::{relation_type_to_db, task_relation_from_row, TaskRelationRow};
+use crate::repositories::mapping::{TaskRelationRow, relation_type_to_db, task_relation_from_row};
 use crate::schema::task_relations;
 
 /// [`TaskRelationRepository`] backed by Postgres through Diesel.

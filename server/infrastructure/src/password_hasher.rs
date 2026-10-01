@@ -1,13 +1,11 @@
 //! Argon2id implementation of [`PasswordHasher`].
 
 use application::ports::{PasswordHashError, PasswordHasher};
-use argon2::password_hash::{
-    rand_core::OsRng, PasswordHash, PasswordVerifier, SaltString,
-};
+use argon2::password_hash::{PasswordHash, PasswordVerifier, SaltString, rand_core::OsRng};
 // The hashing side of the argon2 API; imported anonymously because its name
 // collides with the application-layer port trait.
-use argon2::password_hash::PasswordHasher as _;
 use argon2::Argon2;
+use argon2::password_hash::PasswordHasher as _;
 
 /// [`PasswordHasher`] backed by the `argon2` crate.
 ///

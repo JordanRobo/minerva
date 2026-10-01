@@ -11,15 +11,27 @@ use infrastructure::repositories::RedisSessionRepository;
 use uuid::Uuid;
 
 fn repo() -> Option<RedisSessionRepository> {
-    std::env::var("REDIS_URL")
-        .ok()
-        .and_then(|url| RedisSessionRepository::connect(&url).ok())
+    let Some(url) = std::env::var("REDIS_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("REDIS_URL is not set; refusing to skip Redis tests in CI");
+        }
+        return None;
+    };
+    match RedisSessionRepository::connect(&url) {
+        Ok(repo) => Some(repo),
+        Err(err) if std::env::var_os("CI").is_some() => {
+            panic!("could not connect to Redis at {url}: {err}")
+        }
+        Err(_) => None,
+    }
 }
 
 /// `Utc::now()` has nanosecond precision; quantize to milliseconds so
 /// round-trip comparisons are exact.
 fn now() -> DateTime<Utc> {
-    Utc.timestamp_millis_opt(Utc::now().timestamp_millis()).unwrap()
+    Utc.timestamp_millis_opt(Utc::now().timestamp_millis())
+        .unwrap()
 }
 
 fn test_session(user_id: UserId, ttl_seconds: i64) -> Session {
@@ -68,22 +80,26 @@ async fn session_round_trip() {
     let other = test_session(user_id, 3600);
     repo.create(other.clone()).await.expect("create other");
     repo.delete(session.id).await.expect("delete");
-    assert!(repo
-        .find_by_token_hash(session.token_hash.clone())
-        .await
-        .expect("find deleted")
-        .is_none());
+    assert!(
+        repo.find_by_token_hash(session.token_hash.clone())
+            .await
+            .expect("find deleted")
+            .is_none()
+    );
     assert_eq!(
-        repo.list_for_user(user_id).await.expect("list after delete"),
+        repo.list_for_user(user_id)
+            .await
+            .expect("list after delete"),
         vec![other.clone()]
     );
 
     repo.delete_all_for_user(user_id).await.expect("delete all");
-    assert!(repo
-        .find_by_token_hash(other.token_hash.clone())
-        .await
-        .expect("find after delete all")
-        .is_none());
+    assert!(
+        repo.find_by_token_hash(other.token_hash.clone())
+            .await
+            .expect("find after delete all")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -94,9 +110,10 @@ async fn expired_session_is_evicted_by_redis_ttl() {
     repo.create(session.clone()).await.expect("create");
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    assert!(repo
-        .find_by_token_hash(session.token_hash.clone())
-        .await
-        .expect("find expired")
-        .is_none());
+    assert!(
+        repo.find_by_token_hash(session.token_hash.clone())
+            .await
+            .expect("find expired")
+            .is_none()
+    );
 }

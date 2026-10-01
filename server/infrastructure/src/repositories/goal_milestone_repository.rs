@@ -5,7 +5,7 @@ use diesel::prelude::*;
 use domain::{GoalId, GoalMilestone, MilestoneId};
 use uuid::Uuid;
 
-use crate::db::{run_on_postgres, PgPool};
+use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
 use crate::schema::goal_milestones;
 
@@ -60,7 +60,10 @@ impl GoalMilestoneRepository for PostgresGoalMilestoneRepository {
         .await
     }
 
-    async fn milestones_for_goal(&self, goal_id: GoalId) -> Result<Vec<MilestoneId>, RepositoryError> {
+    async fn milestones_for_goal(
+        &self,
+        goal_id: GoalId,
+    ) -> Result<Vec<MilestoneId>, RepositoryError> {
         let pool = self.pool.clone();
         run_on_postgres(pool, move |conn| {
             let ids: Vec<Uuid> = goal_milestones::table

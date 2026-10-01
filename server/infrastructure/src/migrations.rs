@@ -6,7 +6,7 @@
 //! `diesel_schema_info`.
 
 use diesel::prelude::*;
-use diesel_migrations::{embed_migrations, MigrationHarness};
+use diesel_migrations::{MigrationHarness, embed_migrations};
 
 use crate::db::PgPool;
 
@@ -36,7 +36,12 @@ pub fn run_migrations(pool: &PgPool) -> Result<Vec<String>, String> {
     let applied = conn
         .run_pending_migrations(MIGRATIONS)
         .map_err(|err| format!("could not apply migrations: {err}"))
-        .map(|versions| versions.into_iter().map(|version| version.to_string()).collect());
+        .map(|versions| {
+            versions
+                .into_iter()
+                .map(|version| version.to_string())
+                .collect()
+        });
 
     // Release the lock even when the migrations failed: the connection goes
     // back to the pool and would otherwise hold it until closed, blocking

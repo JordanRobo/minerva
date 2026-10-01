@@ -18,27 +18,33 @@ use uuid::Uuid;
 static MIGRATIONS_APPLIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn pool() -> Option<PgPool> {
-    std::env::var("DATABASE_URL").ok().as_deref().map(|url| {
-        // One connection per test: the default settings (max_size 10,
-        // min_idle = max_size) times every parallel test binary would exceed
-        // local Postgres's `max_connections` (see oidc.rs's test_pool). Every
-        // test here uses a single connection at a time.
-        let pool = diesel::r2d2::Pool::builder()
-            .max_size(1)
-            .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(url))
-            .expect("could not create test pool");
-        MIGRATIONS_APPLIED.get_or_init(|| {
-            infrastructure::migrations::run_migrations(&pool)
-                .expect("could not apply migrations in tests");
-        });
-        pool
-    })
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip Postgres tests in CI");
+        }
+        return None;
+    };
+    // One connection per test: the default settings (max_size 10,
+    // min_idle = max_size) times every parallel test binary would exceed
+    // local Postgres's `max_connections` (see oidc.rs's test_pool). Every
+    // test here uses a single connection at a time.
+    let pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create test pool");
+    MIGRATIONS_APPLIED.get_or_init(|| {
+        infrastructure::migrations::run_migrations(&pool)
+            .expect("could not apply migrations in tests");
+    });
+    Some(pool)
 }
 
 /// `Utc::now()` has nanosecond precision; quantize to milliseconds so
 /// round-trip comparisons are exact.
 fn now() -> DateTime<Utc> {
-    Utc.timestamp_millis_opt(Utc::now().timestamp_millis()).unwrap()
+    Utc.timestamp_millis_opt(Utc::now().timestamp_millis())
+        .unwrap()
 }
 
 /// Sessions reference users, so every test that creates one starts from a
@@ -113,22 +119,26 @@ async fn session_round_trip() {
     let other = test_session(user.id, 3600);
     repo.create(other.clone()).await.expect("create other");
     repo.delete(session.id).await.expect("delete");
-    assert!(repo
-        .find_by_token_hash(session.token_hash.clone())
-        .await
-        .expect("find deleted")
-        .is_none());
+    assert!(
+        repo.find_by_token_hash(session.token_hash.clone())
+            .await
+            .expect("find deleted")
+            .is_none()
+    );
     assert_eq!(
-        repo.list_for_user(user.id).await.expect("list after delete"),
+        repo.list_for_user(user.id)
+            .await
+            .expect("list after delete"),
         vec![other.clone()]
     );
 
     repo.delete_all_for_user(user.id).await.expect("delete all");
-    assert!(repo
-        .find_by_token_hash(other.token_hash.clone())
-        .await
-        .expect("find after delete all")
-        .is_none());
+    assert!(
+        repo.find_by_token_hash(other.token_hash.clone())
+            .await
+            .expect("find after delete all")
+            .is_none()
+    );
 
     delete_user(&pool, user.id);
 }
@@ -154,11 +164,12 @@ async fn find_by_token_hash_unknown_hash_is_none() {
     let Some(pool) = pool() else { return };
     let repo = PostgresSessionRepository::new(pool.clone());
 
-    assert!(repo
-        .find_by_token_hash(format!("test-{}", Uuid::new_v4()))
-        .await
-        .expect("find")
-        .is_none());
+    assert!(
+        repo.find_by_token_hash(format!("test-{}", Uuid::new_v4()))
+            .await
+            .expect("find")
+            .is_none()
+    );
 }
 
 #[tokio::test]
