@@ -8,6 +8,7 @@
 
 pub mod db;
 pub mod error;
+pub mod migrations;
 pub mod oidc;
 pub mod password_hasher;
 pub mod repositories;

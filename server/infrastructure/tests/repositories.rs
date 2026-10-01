@@ -29,8 +29,19 @@ use infrastructure::repositories::{
 };
 use uuid::Uuid;
 
+/// Set once the migrations have been applied by [`pool`], so the tests are
+/// self-sufficient against a fresh database.
+static MIGRATIONS_APPLIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 fn pool() -> Option<PgPool> {
-    std::env::var("DATABASE_URL").ok().as_deref().map(build_pool)
+    std::env::var("DATABASE_URL").ok().as_deref().map(|url| {
+        let pool = build_pool(url);
+        MIGRATIONS_APPLIED.get_or_init(|| {
+            infrastructure::migrations::run_migrations(&pool)
+                .expect("could not apply migrations in tests");
+        });
+        pool
+    })
 }
 
 fn test_status() -> GoalStatus {
