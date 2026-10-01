@@ -739,9 +739,7 @@ mod tests {
             let sessions: web::Data<dyn SessionRepository> = session_repo.into();
             let app = App::new()
                 .app_data(web::Data::new(PostgresUserRepository::new(pool.clone())))
-                .app_data(web::Data::new(PostgresUserIdentityRepository::new(
-                    pool,
-                )))
+                .app_data(web::Data::new(PostgresUserIdentityRepository::new(pool)))
                 .app_data(sessions);
             let app = match oidc {
                 Some(auth) => app.app_data(web::Data::new(auth)),

@@ -4,9 +4,9 @@ use application::ports::{GoalRepository, RepositoryError};
 use diesel::prelude::*;
 use domain::{Goal, GoalId};
 
-use crate::db::{run_on_postgres, PgPool};
+use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
-use crate::repositories::mapping::{goal_from_row, status_source_to_db, status_to_db, GoalRow};
+use crate::repositories::mapping::{GoalRow, goal_from_row, status_source_to_db, status_to_db};
 use crate::schema::goals;
 
 /// [`GoalRepository`] backed by Postgres through Diesel.

@@ -4,10 +4,10 @@ use application::ports::{MilestoneRepository, RepositoryError};
 use diesel::prelude::*;
 use domain::{Milestone, MilestoneId};
 
-use crate::db::{run_on_postgres, PgPool};
+use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
 use crate::repositories::mapping::{
-    milestone_from_row, status_source_to_db, status_to_db, MilestoneRow,
+    MilestoneRow, milestone_from_row, status_source_to_db, status_to_db,
 };
 use crate::schema::milestones;
 
@@ -46,10 +46,7 @@ impl MilestoneRepository for PostgresMilestoneRepository {
         .await
     }
 
-    async fn find_by_id(
-        &self,
-        id: MilestoneId,
-    ) -> Result<Option<Milestone>, RepositoryError> {
+    async fn find_by_id(&self, id: MilestoneId) -> Result<Option<Milestone>, RepositoryError> {
         let pool = self.pool.clone();
         run_on_postgres(pool, move |conn| {
             let row: Option<MilestoneRow> = milestones::table

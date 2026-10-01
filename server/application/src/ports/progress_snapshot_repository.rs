@@ -9,7 +9,8 @@ use crate::ports::RepositoryError;
 
 #[async_trait::async_trait]
 pub trait ProgressSnapshotRepository: Send + Sync {
-    async fn create(&self, snapshot: ProgressSnapshot) -> Result<ProgressSnapshot, RepositoryError>;
+    async fn create(&self, snapshot: ProgressSnapshot)
+    -> Result<ProgressSnapshot, RepositoryError>;
 
     /// Snapshots for the target, ordered oldest-to-newest by `recorded_at`.
     async fn list_for_target(

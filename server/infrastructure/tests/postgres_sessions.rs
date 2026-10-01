@@ -38,7 +38,8 @@ fn pool() -> Option<PgPool> {
 /// `Utc::now()` has nanosecond precision; quantize to milliseconds so
 /// round-trip comparisons are exact.
 fn now() -> DateTime<Utc> {
-    Utc.timestamp_millis_opt(Utc::now().timestamp_millis()).unwrap()
+    Utc.timestamp_millis_opt(Utc::now().timestamp_millis())
+        .unwrap()
 }
 
 /// Sessions reference users, so every test that creates one starts from a
@@ -113,22 +114,26 @@ async fn session_round_trip() {
     let other = test_session(user.id, 3600);
     repo.create(other.clone()).await.expect("create other");
     repo.delete(session.id).await.expect("delete");
-    assert!(repo
-        .find_by_token_hash(session.token_hash.clone())
-        .await
-        .expect("find deleted")
-        .is_none());
+    assert!(
+        repo.find_by_token_hash(session.token_hash.clone())
+            .await
+            .expect("find deleted")
+            .is_none()
+    );
     assert_eq!(
-        repo.list_for_user(user.id).await.expect("list after delete"),
+        repo.list_for_user(user.id)
+            .await
+            .expect("list after delete"),
         vec![other.clone()]
     );
 
     repo.delete_all_for_user(user.id).await.expect("delete all");
-    assert!(repo
-        .find_by_token_hash(other.token_hash.clone())
-        .await
-        .expect("find after delete all")
-        .is_none());
+    assert!(
+        repo.find_by_token_hash(other.token_hash.clone())
+            .await
+            .expect("find after delete all")
+            .is_none()
+    );
 
     delete_user(&pool, user.id);
 }
@@ -154,11 +159,12 @@ async fn find_by_token_hash_unknown_hash_is_none() {
     let Some(pool) = pool() else { return };
     let repo = PostgresSessionRepository::new(pool.clone());
 
-    assert!(repo
-        .find_by_token_hash(format!("test-{}", Uuid::new_v4()))
-        .await
-        .expect("find")
-        .is_none());
+    assert!(
+        repo.find_by_token_hash(format!("test-{}", Uuid::new_v4()))
+            .await
+            .expect("find")
+            .is_none()
+    );
 }
 
 #[tokio::test]

@@ -4,9 +4,9 @@ use application::ports::{ProgressSnapshotRepository, RepositoryError};
 use diesel::prelude::*;
 use domain::{ProgressSnapshot, ProgressTarget};
 
-use crate::db::{run_on_postgres, PgPool};
+use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
-use crate::repositories::mapping::{progress_snapshot_from_row, status_to_db, ProgressSnapshotRow};
+use crate::repositories::mapping::{ProgressSnapshotRow, progress_snapshot_from_row, status_to_db};
 use crate::schema::progress_snapshots;
 
 /// [`ProgressSnapshotRepository`] backed by Postgres through Diesel.
@@ -23,7 +23,10 @@ impl PostgresProgressSnapshotRepository {
 
 #[async_trait::async_trait]
 impl ProgressSnapshotRepository for PostgresProgressSnapshotRepository {
-    async fn create(&self, snapshot: ProgressSnapshot) -> Result<ProgressSnapshot, RepositoryError> {
+    async fn create(
+        &self,
+        snapshot: ProgressSnapshot,
+    ) -> Result<ProgressSnapshot, RepositoryError> {
         let pool = self.pool.clone();
         run_on_postgres(pool, move |conn| {
             // The domain type is exactly one of goal or milestone; the

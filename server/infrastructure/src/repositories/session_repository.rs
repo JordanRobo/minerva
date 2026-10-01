@@ -5,9 +5,9 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use domain::{Session, SessionId, UserId};
 
-use crate::db::{run_on_postgres, PgPool};
+use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
-use crate::repositories::mapping::{session_from_row, SessionRow};
+use crate::repositories::mapping::{SessionRow, session_from_row};
 use crate::schema::sessions;
 
 /// [`SessionRepository`] backed by Postgres through Diesel.

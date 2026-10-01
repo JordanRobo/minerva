@@ -4,9 +4,9 @@ use application::ports::{RepositoryError, TaskRepository};
 use diesel::prelude::*;
 use domain::{MilestoneId, Task, TaskId};
 
-use crate::db::{run_on_postgres, PgPool};
+use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
-use crate::repositories::mapping::{task_from_row, task_status_to_db, TaskRow};
+use crate::repositories::mapping::{TaskRow, task_from_row, task_status_to_db};
 use crate::schema::tasks;
 
 /// [`TaskRepository`] backed by Postgres through Diesel.

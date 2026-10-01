@@ -1,7 +1,7 @@
 //! Postgres connection pool shared by the Diesel-based adapters.
 
-use diesel::r2d2::{self, ConnectionManager};
 use diesel::PgConnection;
+use diesel::r2d2::{self, ConnectionManager};
 
 use application::ports::RepositoryError;
 
@@ -24,7 +24,8 @@ pub fn build_pool(database_url: &str) -> PgPool {
     // Check one connection out (and return it to the pool) so an
     // unreachable database fails here, at startup, instead of on the first
     // query.
-    pool.get().expect("could not establish initial Postgres connection");
+    pool.get()
+        .expect("could not establish initial Postgres connection");
     pool
 }
 
@@ -43,11 +44,10 @@ where
     T: Send + 'static,
     F: FnOnce(&mut PgConnection) -> Result<T, RepositoryError> + Send + 'static,
 {
-    let result = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let mut conn = pool.get().map_err(map_pool_error)?;
         op(&mut conn)
     })
     .await
-    .map_err(|err| RepositoryError::Unexpected(format!("blocking task failed: {err}")))?;
-    result
+    .map_err(|err| RepositoryError::Unexpected(format!("blocking task failed: {err}")))?
 }

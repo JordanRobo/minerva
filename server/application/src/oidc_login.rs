@@ -205,8 +205,12 @@ mod tests {
         )
     }
 
-    const AUTO_CREATE: LoginPolicy = LoginPolicy { auto_create_users: true };
-    const NO_AUTO_CREATE: LoginPolicy = LoginPolicy { auto_create_users: false };
+    const AUTO_CREATE: LoginPolicy = LoginPolicy {
+        auto_create_users: true,
+    };
+    const NO_AUTO_CREATE: LoginPolicy = LoginPolicy {
+        auto_create_users: false,
+    };
 
     #[test]
     fn known_identity_wins_even_when_email_is_missing_or_unverified() {
@@ -232,7 +236,12 @@ mod tests {
         // Even a user row with a *different* email does not divert the login.
         let other = user(UserId::new(), "someone-else@example.com");
         assert_eq!(
-            decide_login(AUTO_CREATE, &claims(None, false), Some(&existing), Some(&other)),
+            decide_login(
+                AUTO_CREATE,
+                &claims(None, false),
+                Some(&existing),
+                Some(&other)
+            ),
             LoginDecision::ExistingIdentity { user_id }
         );
     }
@@ -259,7 +268,12 @@ mod tests {
     #[test]
     fn unverified_email_is_rejected_with_and_without_existing_user() {
         assert_eq!(
-            decide_login(AUTO_CREATE, &claims(Some("a@example.com"), false), None, None),
+            decide_login(
+                AUTO_CREATE,
+                &claims(Some("a@example.com"), false),
+                None,
+                None
+            ),
             LoginDecision::Reject(LoginRejection::EmailNotVerified)
         );
 
@@ -267,7 +281,12 @@ mod tests {
         // rule: an unverified claim must not link to (or create for) anyone.
         let existing = user(UserId::new(), "a@example.com");
         assert_eq!(
-            decide_login(AUTO_CREATE, &claims(Some("a@example.com"), false), None, Some(&existing)),
+            decide_login(
+                AUTO_CREATE,
+                &claims(Some("a@example.com"), false),
+                None,
+                Some(&existing)
+            ),
             LoginDecision::Reject(LoginRejection::EmailNotVerified)
         );
     }
@@ -276,7 +295,12 @@ mod tests {
     fn verified_email_with_existing_user_links_to_it() {
         let existing = user(UserId::new(), "a@example.com");
         assert_eq!(
-            decide_login(AUTO_CREATE, &claims(Some("a@example.com"), true), None, Some(&existing)),
+            decide_login(
+                AUTO_CREATE,
+                &claims(Some("a@example.com"), true),
+                None,
+                Some(&existing)
+            ),
             LoginDecision::LinkToExistingUser {
                 user_id: existing.id
             }
@@ -286,11 +310,21 @@ mod tests {
     #[test]
     fn verified_email_without_user_depends_on_auto_create() {
         assert_eq!(
-            decide_login(AUTO_CREATE, &claims(Some("a@example.com"), true), None, None),
+            decide_login(
+                AUTO_CREATE,
+                &claims(Some("a@example.com"), true),
+                None,
+                None
+            ),
             LoginDecision::CreateUser
         );
         assert_eq!(
-            decide_login(NO_AUTO_CREATE, &claims(Some("a@example.com"), true), None, None),
+            decide_login(
+                NO_AUTO_CREATE,
+                &claims(Some("a@example.com"), true),
+                None,
+                None
+            ),
             LoginDecision::Reject(LoginRejection::SignupDisabled)
         );
     }
@@ -302,7 +336,10 @@ mod tests {
             LoginRejection::EmailNotVerified.code(),
             "oidc_email_not_verified"
         );
-        assert_eq!(LoginRejection::SignupDisabled.code(), "oidc_signup_disabled");
+        assert_eq!(
+            LoginRejection::SignupDisabled.code(),
+            "oidc_signup_disabled"
+        );
     }
 
     #[test]

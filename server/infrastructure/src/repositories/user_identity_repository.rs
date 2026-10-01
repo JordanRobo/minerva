@@ -4,9 +4,9 @@ use application::ports::{RepositoryError, UserIdentityRepository};
 use diesel::prelude::*;
 use domain::{UserId, UserIdentity};
 
-use crate::db::{run_on_postgres, PgPool};
+use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
-use crate::repositories::mapping::{user_identity_from_row, UserIdentityRow};
+use crate::repositories::mapping::{UserIdentityRow, user_identity_from_row};
 use crate::schema::user_identities;
 
 /// [`UserIdentityRepository`] backed by Postgres through Diesel.
