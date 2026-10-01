@@ -708,12 +708,20 @@ mod tests {
 
     /// A one-connection pool: the default settings (max_size 10, min_idle =
     /// max_size) times the ~14 parallel handler-test pools would exceed local
-    /// Postgres's `max_connections`.
+    /// Postgres's `max_connections`. Pending migrations are applied once per
+    /// process first, so the tests are self-sufficient against a fresh
+    /// database.
     fn test_pool(url: &str) -> PgPool {
-        diesel::r2d2::Pool::builder()
+        let pool = diesel::r2d2::Pool::builder()
             .max_size(1)
             .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(url))
-            .expect("could not create test pool")
+            .expect("could not create test pool");
+        static MIGRATIONS_APPLIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        MIGRATIONS_APPLIED.get_or_init(|| {
+            infrastructure::migrations::run_migrations(&pool)
+                .expect("could not apply migrations in tests");
+        });
+        pool
     }
 
     /// Build the test app (real Postgres repositories, optional OIDC) and

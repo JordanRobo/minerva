@@ -9,6 +9,7 @@ argon2 = { workspace = true }
 async-trait = { workspace = true }
 chrono = "0.4"
 diesel = { workspace = true }
+diesel_migrations = { workspace = true }
 domain = { path = "../domain" }
 object_store = { workspace = true }
 openidconnect = { workspace = true }

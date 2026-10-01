@@ -11,6 +11,7 @@ use actix_web::{App, HttpResponse, HttpServer, web};
 use application::ports::{OidcProvider, SessionRepository};
 use infrastructure::Argon2PasswordHasher;
 use infrastructure::db::build_pool;
+use infrastructure::migrations::run_migrations;
 use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
@@ -44,6 +45,22 @@ async fn main() -> std::io::Result<()> {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run minerva-server");
     let pool = build_pool(&database_url);
+
+    // Apply pending migrations so a fresh database is usable without a
+    // separate migration step. Several nodes can start at once (the API
+    // scales horizontally), and `run_migrations` serializes them with a
+    // Postgres advisory lock. RUN_MIGRATIONS=false opts out, e.g. when a
+    // dedicated migration job owns the schema.
+    match std::env::var("RUN_MIGRATIONS") {
+        Ok(value) if value.eq_ignore_ascii_case("false") => {
+            println!("RUN_MIGRATIONS=false; skipping migrations");
+        }
+        _ => match run_migrations(&pool) {
+            Ok(applied) if applied.is_empty() => println!("no pending migrations"),
+            Ok(applied) => println!("applied {} migration(s)", applied.len()),
+            Err(err) => panic!("{err}"),
+        },
+    }
 
     // One shared pool, nine repositories. Each is registered as its own
     // `web::Data` rather than wrapped in a single AppState struct: every
