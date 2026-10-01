@@ -4,9 +4,9 @@
 //! platform: goals, milestones, tasks, how they relate, and progress over
 //! time.
 //! This crate is pure logic with no I/O. Per `docs/architecture.md` it keeps
-//! zero external dependencies beyond two value-type exceptions — `uuid` and
-//! `chrono` — which contribute data types but no behavior that touches the
-//! outside world.
+//! no I/O or framework dependencies beyond three value-type exceptions —
+//! `uuid`, `chrono`, and `serde` — which contribute data types but no
+//! behavior that touches the outside world.
 
 pub mod goal;
 pub mod goal_milestone;

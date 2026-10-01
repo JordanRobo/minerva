@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Minerva is an open source project-management platform for schools, organized goal/milestone-first. The backend's first milestone is done: the `domain` layer (Goal, Milestone, GoalMilestone, Task, TaskRelation, ProgressSnapshot, Status), all six Diesel migrations, and the application-layer repository ports with their Postgres implementations are in place and wired into the Actix composition root. The only real HTTP route is `GET /health`; the `/debug/*` routes are temporary, unauthenticated wiring-verification endpoints, not the real API surface. The license will be Elastic License 2.0; `LICENSE` is a placeholder until the real text is added.
+Minerva is an open source project-management platform for schools, organized goal/milestone-first. The backend has: the `domain` layer (Goal, Milestone, GoalMilestone, Task, TaskRelation, ProgressSnapshot, Status, User, Session, UserIdentity), nine Diesel migrations (the six core tables plus users/sessions and user_identities), application-layer repository ports with Postgres implementations, a Redis-backed session repository as an alternative to the Postgres one, email/password auth (Argon2id, cookie sessions) and OIDC sign-in behind the `OidcProvider` port, `/api/*` endpoints for auth, goals, milestones and tasks, and OpenAPI 3 with Swagger UI at `/api-docs`. The `/debug/*` routes are still temporary, unauthenticated wiring-verification endpoints, not the real API surface; most `/api` routes are not yet protected by auth (only `GET /api/auth/me` is). The license will be Elastic License 2.0; `LICENSE` is a placeholder until the real text is added.
 
 ## Commands
 
@@ -16,6 +16,8 @@ docker compose -f deploy/docker-compose.yml down         # stop
 ```
 
 Endpoints once running: web http://localhost:3000, API health http://localhost:3010/health, Postgres localhost:5432 (user/password/db all `minerva`), Redis localhost:6379, RustFS S3 API :9000 / dashboard :9001.
+
+Configuration lives in a repo-root `.env` (copy of `.env.example`); pass it explicitly with `docker compose --env-file .env -f deploy/docker-compose.yml up --build`, since compose resolves `.env` relative to `deploy/`. Every value is optional — OIDC sign-in stays off until `OIDC_ISSUER_URL` is set.
 
 ### Frontend (`apps/web`, SvelteKit + TypeScript)
 
@@ -38,7 +40,9 @@ cargo run -p interface   # Actix server on $PORT (default 8080); verify with cur
 
 The `interface` crate's binary is named `minerva-server`. For a local (non-Docker) run, point `DATABASE_URL` at a running Postgres; the compose file supplies all env vars to the container.
 
-Diesel migrations live in `server/migrations/` (currently empty). Generate one with the diesel CLI from `server/` with `DATABASE_URL` set: `diesel migration generate <name>`.
+Migrations are embedded in the binary and applied at server startup (`RUN_MIGRATIONS=false` skips them, e.g. when a dedicated migration job owns the schema). They live in `server/migrations/`; generate a new one with the diesel CLI from `server/` with `DATABASE_URL` set: `diesel migration generate <name>`.
+
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --all -- --check`, clippy with `-D warnings`, and `cargo test --workspace` against Postgres/Redis services, plus the web `check` and `build`.
 
 ## Architecture
 
@@ -46,15 +50,19 @@ Monorepo: `apps/web` (SvelteKit frontend), `server` (Rust backend), `deploy` (co
 
 The backend is a DDD-layered Cargo workspace; full details in `docs/architecture.md`:
 
-- `domain` — core business concepts/invariants, pure logic. **Zero external dependencies**; depends on nothing.
+- `domain` — core business concepts/invariants, pure logic. No I/O and no framework dependencies; `uuid`, `chrono` and `serde` are the allowed value-type exceptions (see `server/domain/Cargo.toml`).
 - `application` — use cases and orchestration. Depends only on `domain`.
-- `infrastructure` — adapters for Postgres (Diesel), Redis, and S3-compatible object storage (`object_store`).
+- `infrastructure` — adapters for Postgres (Diesel) and Redis; `object_store` is declared but the S3 adapter is not built yet (roadmap 7.1).
 - `interface` — Actix-web HTTP API and the composition root that wires the other crates together at startup.
 
 Rules to preserve when adding code:
 
 - Dependencies point inward toward `domain`; only `interface` may depend on actix-web, and HTTP types never leak into the other crates.
-- Redis and S3 are optional at runtime. All their configuration (`REDIS_URL`, `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`) is read from environment variables, with local-dev defaults in `deploy/docker-compose.yml` — never hardcoded in Rust source.
+- Redis is optional at runtime; S3 support lands with roadmap 7.1. `REDIS_URL` (and the future `S3_*` variables) is read from environment variables, with local-dev defaults in `deploy/docker-compose.yml` — never hardcoded in Rust source.
+
+## Roadmap
+
+`docs/roadmap.md` is the project checklist and the source of truth for scope. Tick an item when a change completes it, and do not build anything that is not in the roadmap — including its Future releases / Out of scope sections — without asking first.
 
 ### Docker build notes
 
