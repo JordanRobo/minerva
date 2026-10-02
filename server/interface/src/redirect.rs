@@ -345,7 +345,7 @@ mod tests {
         OidcAuthRequest, OidcClaims, OidcError, OidcProvider, PendingOidcLogin, SessionRepository,
         UserIdentityRepository, UserRepository,
     };
-    use domain::User;
+    use domain::{Role, User};
     use infrastructure::db::PgPool;
     use infrastructure::repositories::{
         PostgresSessionRepository, PostgresUserIdentityRepository, PostgresUserRepository,
@@ -1023,6 +1023,7 @@ mod tests {
             email: email.clone(),
             password_hash: Some("not-a-real-hash".into()),
             display_name: "Existing".into(),
+            role: Role::Admin,
             created_at: now,
             updated_at: now,
         };

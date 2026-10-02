@@ -12,8 +12,8 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use diesel::prelude::*;
 use domain::{
     Goal, GoalId, GoalMilestone, GoalStatus, Milestone, MilestoneId, ProgressSnapshot,
-    ProgressTarget, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationType, TaskStatus,
-    User, UserId, UserIdentity,
+    ProgressTarget, Role, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationType,
+    TaskStatus, User, UserId, UserIdentity,
 };
 
 /// `Utc::now()` has nanosecond precision but Postgres `timestamptz` only
@@ -382,6 +382,7 @@ async fn user_identity_repository_round_trip() {
         email: format!("identity-{}@example.com", Uuid::new_v4()),
         password_hash: None,
         display_name: "Identity test user".into(),
+        role: Role::ReadOnly,
         created_at: now,
         updated_at: now,
     };
@@ -434,11 +435,14 @@ async fn user_repository_round_trip() {
     let users = PostgresUserRepository::new(pool.clone());
     let now = now();
     let email = format!("user-{}@example.com", Uuid::new_v4());
+    // Staff on purpose: a non-default role proves the column round-trips its
+    // own value rather than a database default.
     let user = User {
         id: UserId::new(),
         email: email.clone(),
         password_hash: Some("not-a-real-hash".into()),
         display_name: "Round trip user".into(),
+        role: Role::Staff,
         created_at: now,
         updated_at: now,
     };
@@ -467,6 +471,7 @@ async fn user_repository_round_trip() {
         email: email.clone(),
         password_hash: None,
         display_name: "Duplicate".into(),
+        role: Role::ReadOnly,
         created_at: now,
         updated_at: now,
     };
@@ -475,9 +480,10 @@ async fn user_repository_round_trip() {
         Err(RepositoryError::Conflict(_))
     ));
 
-    // Update the row and read it back.
+    // Update the row (including its role) and read it back.
     let mut updated = created.clone();
     updated.display_name = "Updated name".into();
+    updated.role = Role::Admin;
     let updated = users.update(updated).await.expect("update");
     let reloaded = users
         .find_by_id(created.id)
@@ -493,6 +499,7 @@ async fn user_repository_round_trip() {
         email: format!("passwordless-{}@example.com", Uuid::new_v4()),
         password_hash: None,
         display_name: "Passwordless".into(),
+        role: Role::ReadOnly,
         created_at: now,
         updated_at: now,
     };
@@ -519,6 +526,7 @@ async fn user_repository_round_trip() {
         email: mixed_case_email.clone(),
         password_hash: None,
         display_name: "Mixed case".into(),
+        role: Role::ReadOnly,
         created_at: now,
         updated_at: now,
     };

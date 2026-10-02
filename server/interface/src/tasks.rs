@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+use crate::access::{EditAccess, ViewAccess};
 use crate::error::{ApiError, repo_error_response};
 use crate::openapi::TaskStatusDoc;
 
@@ -90,6 +91,7 @@ pub struct TaskListQuery {
 )]
 pub async fn create_task(
     tasks: web::Data<PostgresTaskRepository>,
+    _access: EditAccess,
     body: web::Json<TaskRequest>,
 ) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
@@ -132,6 +134,7 @@ pub async fn create_task(
 pub async fn list_tasks(
     query: web::Query<TaskListQuery>,
     tasks: web::Data<PostgresTaskRepository>,
+    _access: ViewAccess,
 ) -> Result<HttpResponse, ApiError> {
     let listed = match (query.milestone_id, query.unassigned) {
         (Some(milestone_id), None) => tasks.list_by_milestone(MilestoneId(milestone_id)).await,
@@ -165,6 +168,7 @@ pub async fn list_tasks(
 )]
 pub async fn get_task(
     tasks: web::Data<PostgresTaskRepository>,
+    _access: ViewAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match tasks.find_by_id(TaskId(*path)).await {
@@ -195,6 +199,7 @@ pub async fn get_task(
 )]
 pub async fn update_task(
     tasks: web::Data<PostgresTaskRepository>,
+    _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<TaskRequest>,
 ) -> Result<HttpResponse, ApiError> {
@@ -239,6 +244,7 @@ pub async fn update_task(
 )]
 pub async fn delete_task(
     tasks: web::Data<PostgresTaskRepository>,
+    _access: EditAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match tasks.delete(TaskId(*path)).await {

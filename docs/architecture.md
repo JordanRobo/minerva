@@ -95,6 +95,42 @@ construction in `interface/src/main.rs`. Nothing else changes — routing,
 cookies, session issuance, and the `/api/auth/providers` listing all follow
 from the registry.
 
+## Authorization
+
+Authentication answers "who is this?"; authorization answers "may they do
+this?". The policy lives in two layers:
+
+- `domain::Role` (`admin`, `staff`, `read_only`) and `domain::Permission`
+  (`ViewContent`, `EditContent`, `ManageUsers`), with an exhaustive,
+  wildcard-free `Role::allows` matrix that lists every (role, permission)
+  pair.
+- `application::authz::authorize(user, permission)` — the single place an
+  access decision is made. Future checks (deactivated accounts, ownership)
+  land here, so no handler or extractor compares roles itself.
+
+HTTP-level enforcement is three request extractors in
+`interface/src/access.rs`, each wrapping the `AuthenticatedUser` session
+extractor and asking `authz` for its permission:
+
+| Extractor | Permission | Used by |
+|---|---|---|
+| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes |
+| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes |
+| `AdminAccess` | `ManageUsers` | the temporary `/debug/*` routes (until 3.4/3.6 replace them) |
+
+A missing or invalid session is a 401; a valid session whose role lacks the
+permission is a 403 with the standard error envelope (`forbidden`). Handlers
+declare their required level in their signature — no inline role checks.
+`GET /api/auth/me` requires only a session (any role); signup, login,
+logout, providers, the redirect flow, `/health` and the API docs stay
+public. The public list is an explicit allowlist in
+`interface/src/access_tests.rs`: adding a route without an extractor or an
+allowlist entry fails the tests.
+
+Roles are stored on `users.role`; a change takes effect on the next request,
+because every authenticated request re-resolves the user row. Until the
+Users API exists (roadmap 2.4), roles are changed directly in the database.
+
 ## API documentation
 
 The `interface` crate generates an OpenAPI 3 document from code annotations

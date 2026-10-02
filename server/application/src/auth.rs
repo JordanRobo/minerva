@@ -110,7 +110,7 @@ mod tests {
         DeterministicTokens, InMemorySessionRepository, InMemoryUserRepository,
     };
     use crate::ports::UserRepository;
-    use domain::User;
+    use domain::{Role, User};
 
     /// A service over in-memory fakes with the given TTL.
     fn service(ttl: Duration) -> (SessionService, Arc<InMemorySessionRepository>) {
@@ -209,6 +209,7 @@ mod tests {
             email: "user@example.com".to_owned(),
             password_hash: None,
             display_name: "Test user".to_owned(),
+            role: Role::ReadOnly,
             created_at: now,
             updated_at: now,
         };

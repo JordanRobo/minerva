@@ -95,6 +95,15 @@ DATABASE_URL=postgresql://minerva:minerva@localhost:5432/minerva cargo run -p in
 The port is configurable via the `PORT` environment variable (default 8080).
 Verify with `curl http://localhost:8080/health`.
 
+> **Temporary (until roadmap 2.5):** a fresh database has no admin — every
+> account starts as `read_only`, and open signup only creates read-only
+> accounts. Promote an account directly in Postgres until the Users API
+> exists:
+>
+> ```sql
+> UPDATE users SET role = 'admin' WHERE email = 'you@example.com';
+> ```
+
 To run the compiled binary directly instead, build it and point it at a
 config file:
 

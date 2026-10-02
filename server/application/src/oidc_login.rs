@@ -8,7 +8,7 @@
 //! leaves room for group-to-role rules later without touching callers.
 
 use chrono::{DateTime, Utc};
-use domain::{User, UserId, UserIdentity};
+use domain::{DEFAULT_NEW_USER_ROLE, User, UserId, UserIdentity};
 
 use crate::ports::OidcClaims;
 
@@ -110,8 +110,8 @@ pub fn decide_login(
 
 /// Build a new passwordless [`User`] from OIDC claims.
 ///
-/// This is the single place where new SSO users are constructed, so a default
-/// role can be assigned here later without hunting down call sites.
+/// This is the single place where new SSO users are constructed, so changing
+/// the role they start with later means editing one line.
 pub fn new_user_from_claims(claims: &OidcClaims, now: DateTime<Utc>) -> User {
     // `decide_login` guarantees a verified, non-blank email before this runs.
     let email = claims
@@ -136,6 +136,7 @@ pub fn new_user_from_claims(claims: &OidcClaims, now: DateTime<Utc>) -> User {
         email,
         password_hash: None,
         display_name,
+        role: DEFAULT_NEW_USER_ROLE,
         created_at: now,
         updated_at: now,
     }
@@ -161,6 +162,7 @@ pub fn identity_from_claims(
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use domain::Role;
 
     use super::*;
 
@@ -190,6 +192,7 @@ mod tests {
             email: email.into(),
             password_hash: Some("hash".into()),
             display_name: "Existing user".into(),
+            role: Role::Admin,
             created_at: now,
             updated_at: now,
         }
@@ -358,6 +361,8 @@ mod tests {
         assert_eq!(new_user.email, "alice@example.com");
         assert_eq!(new_user.display_name, "alice");
         assert_eq!(new_user.password_hash, None);
+        // SSO-created accounts start with the default role.
+        assert_eq!(new_user.role, DEFAULT_NEW_USER_ROLE);
         assert_eq!(new_user.created_at, now);
         assert_eq!(new_user.updated_at, now);
     }

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::access::{EditAccess, ViewAccess};
 use crate::error::{ApiError, repo_error_response};
 use crate::openapi::GoalStatusDoc;
 
@@ -70,6 +71,7 @@ pub struct MilestoneRequest {
 )]
 pub async fn create_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
+    _access: EditAccess,
     body: web::Json<MilestoneRequest>,
 ) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
@@ -102,6 +104,7 @@ pub async fn create_milestone(
 )]
 pub async fn list_milestones(
     milestones: web::Data<PostgresMilestoneRepository>,
+    _access: ViewAccess,
 ) -> Result<HttpResponse, ApiError> {
     match milestones.list().await {
         Ok(milestones) => Ok(HttpResponse::Ok().json(
@@ -129,6 +132,7 @@ pub async fn list_milestones(
 )]
 pub async fn get_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
+    _access: ViewAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match milestones.find_by_id(MilestoneId(*path)).await {
@@ -155,6 +159,7 @@ pub async fn get_milestone(
 )]
 pub async fn update_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
+    _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<MilestoneRequest>,
 ) -> Result<HttpResponse, ApiError> {
@@ -198,6 +203,7 @@ pub async fn update_milestone(
 )]
 pub async fn delete_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
+    _access: EditAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match milestones.delete(MilestoneId(*path)).await {

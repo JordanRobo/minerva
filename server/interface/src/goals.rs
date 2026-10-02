@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::access::{EditAccess, ViewAccess};
 use crate::error::{ApiError, repo_error_response};
 use crate::openapi::GoalStatusDoc;
 
@@ -69,6 +70,7 @@ pub struct GoalRequest {
 )]
 pub async fn create_goal(
     goals: web::Data<PostgresGoalRepository>,
+    _access: EditAccess,
     body: web::Json<GoalRequest>,
 ) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
@@ -102,6 +104,7 @@ pub async fn create_goal(
 )]
 pub async fn list_goals(
     goals: web::Data<PostgresGoalRepository>,
+    _access: ViewAccess,
 ) -> Result<HttpResponse, ApiError> {
     match goals.list().await {
         Ok(goals) => {
@@ -126,6 +129,7 @@ pub async fn list_goals(
 )]
 pub async fn get_goal(
     goals: web::Data<PostgresGoalRepository>,
+    _access: ViewAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match goals.find_by_id(GoalId(*path)).await {
@@ -152,6 +156,7 @@ pub async fn get_goal(
 )]
 pub async fn update_goal(
     goals: web::Data<PostgresGoalRepository>,
+    _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<GoalRequest>,
 ) -> Result<HttpResponse, ApiError> {
@@ -195,6 +200,7 @@ pub async fn update_goal(
 )]
 pub async fn delete_goal(
     goals: web::Data<PostgresGoalRepository>,
+    _access: EditAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match goals.delete(GoalId(*path)).await {

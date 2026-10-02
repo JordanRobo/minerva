@@ -23,6 +23,15 @@ pub enum TaskStatusDoc {
     Done,
 }
 
+/// Wire shape of [`domain::Role`]: a snake_case string.
+#[derive(ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleDoc {
+    Admin,
+    Staff,
+    ReadOnly,
+}
+
 /// Wire shape of [`domain::Status`].
 #[derive(ToSchema)]
 pub enum StatusDoc {
@@ -101,6 +110,7 @@ pub struct GoalStatusDoc {
         crate::tasks::TaskRequest,
         crate::tasks::TaskResponse,
         GoalStatusDoc,
+        RoleDoc,
         StatusDoc,
         StatusSourceDoc,
         TaskStatusDoc,

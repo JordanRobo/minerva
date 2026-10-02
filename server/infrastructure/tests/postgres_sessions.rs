@@ -8,7 +8,7 @@
 use application::ports::{RepositoryError, SessionRepository, UserRepository};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use diesel::prelude::*;
-use domain::{Session, SessionId, User, UserId};
+use domain::{Role, Session, SessionId, User, UserId};
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{PostgresSessionRepository, PostgresUserRepository};
 use uuid::Uuid;
@@ -57,6 +57,7 @@ async fn create_user(pool: &PgPool) -> User {
         email: format!("sessions-{}@example.com", Uuid::new_v4()),
         password_hash: None,
         display_name: "Session test user".into(),
+        role: Role::ReadOnly,
         created_at: now,
         updated_at: now,
     };
