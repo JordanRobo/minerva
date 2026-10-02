@@ -511,13 +511,15 @@ mod tests {
     use actix_web::dev::Service;
     use actix_web::http::StatusCode;
     use actix_web::test::{TestRequest, init_service};
+    use application::auth::password::PasswordAuthProvider;
+    use application::auth::provider::AuthProviders;
     use application::ports::{OidcAuthRequest, SessionRepository};
     use domain::User;
-    use infrastructure::Sha256SessionTokens;
     use infrastructure::db::PgPool;
     use infrastructure::repositories::{
         PostgresSessionRepository, PostgresUserIdentityRepository, PostgresUserRepository,
     };
+    use infrastructure::{Argon2PasswordHasher, Sha256SessionTokens};
     use uuid::Uuid;
 
     // ---- pure unit tests (no DB) ----
@@ -729,18 +731,28 @@ mod tests {
             let sessions: Arc<dyn SessionRepository> =
                 Arc::new(PostgresSessionRepository::new(pool.clone()));
             let sessions_data: web::Data<dyn SessionRepository> = sessions.clone().into();
-            let users: web::Data<dyn UserRepository> = {
-                let repo: Arc<dyn UserRepository> =
-                    Arc::new(PostgresUserRepository::new(pool.clone()));
-                repo.into()
-            };
+            let users: Arc<dyn UserRepository> =
+                Arc::new(PostgresUserRepository::new(pool.clone()));
+            let users_data: web::Data<dyn UserRepository> = users.clone().into();
             let identities: web::Data<dyn UserIdentityRepository> = {
                 let repo: Arc<dyn UserIdentityRepository> =
                     Arc::new(PostgresUserIdentityRepository::new(pool));
                 repo.into()
             };
+            // Registered like `main.rs`; part 3 will serve
+            // `/api/auth/providers` from it.
+            let providers = web::Data::new(
+                AuthProviders::new(
+                    vec![Arc::new(PasswordAuthProvider::new(
+                        users.clone(),
+                        Arc::new(Argon2PasswordHasher),
+                    ))],
+                    Vec::new(),
+                )
+                .expect("static provider ids are valid and unique"),
+            );
             let app = App::new()
-                .app_data(users)
+                .app_data(users_data)
                 .app_data(identities)
                 .app_data(sessions_data)
                 .app_data(web::Data::new(SessionService::new(
@@ -748,6 +760,7 @@ mod tests {
                     Arc::new(Sha256SessionTokens),
                     SessionService::DEFAULT_SESSION_TTL,
                 )))
+                .app_data(providers)
                 .app_data(web::Data::new(auth::CookieSettings { secure: false }));
             let app = match oidc {
                 Some(auth) => app.app_data(web::Data::new(auth)),

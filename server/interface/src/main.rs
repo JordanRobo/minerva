@@ -10,6 +10,8 @@ mod tasks;
 
 use actix_web::{App, HttpResponse, HttpServer, web};
 use application::auth::SessionService;
+use application::auth::password::PasswordAuthProvider;
+use application::auth::provider::AuthProviders;
 use application::ports::{
     OidcProvider, PasswordHasher, SessionRepository, UserIdentityRepository, UserRepository,
 };
@@ -89,10 +91,8 @@ async fn main() -> std::io::Result<()> {
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
     // The auth handlers take ports, not concrete repositories, so these are
     // registered as trait objects (the same way sessions below are).
-    let users: web::Data<dyn UserRepository> = {
-        let repo: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
-        repo.into()
-    };
+    let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
+    let users_data: web::Data<dyn UserRepository> = users.clone().into();
     let user_identities: web::Data<dyn UserIdentityRepository> = {
         let repo: Arc<dyn UserIdentityRepository> =
             Arc::new(PostgresUserIdentityRepository::new(pool.clone()));
@@ -127,10 +127,21 @@ async fn main() -> std::io::Result<()> {
     ));
     // The password hasher holds no state; it is registered like the
     // repositories so handlers name their dependency in their signature.
-    let password_hasher: web::Data<dyn PasswordHasher> = {
-        let hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
-        hasher.into()
-    };
+    let password_hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
+    let password_hasher_data: web::Data<dyn PasswordHasher> = password_hasher.clone().into();
+    // Every sign-in method is a registered provider, looked up by id: adding
+    // one later means implementing a trait and extending this list, not
+    // touching session handling or the existing handlers.
+    let auth_providers = web::Data::new(
+        AuthProviders::new(
+            vec![Arc::new(PasswordAuthProvider::new(
+                users.clone(),
+                password_hasher.clone(),
+            ))],
+            Vec::new(),
+        )
+        .expect("static provider ids are valid and unique"),
+    );
     // Shared cookie attributes (the `Secure` flag) for the session and OIDC
     // state cookies, from server.cookie_secure.
     let cookies = web::Data::new(auth::CookieSettings {
@@ -183,11 +194,12 @@ async fn main() -> std::io::Result<()> {
             .app_data(tasks.clone())
             .app_data(task_relations.clone())
             .app_data(progress_snapshots.clone())
-            .app_data(users.clone())
+            .app_data(users_data.clone())
             .app_data(user_identities.clone())
             .app_data(sessions_data.clone())
             .app_data(session_service.clone())
-            .app_data(password_hasher.clone())
+            .app_data(auth_providers.clone())
+            .app_data(password_hasher_data.clone())
             .app_data(cookies.clone());
         // Registered only when OIDC is configured; the OIDC handlers take it
         // as an `Option` extractor and treat its absence as "OIDC off".

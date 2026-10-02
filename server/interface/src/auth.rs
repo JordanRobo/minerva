@@ -9,6 +9,8 @@
 use actix_web::cookie::{Cookie, SameSite, time::OffsetDateTime};
 use actix_web::dev::Payload;
 use actix_web::{FromRequest, HttpRequest, HttpResponse, web};
+use application::auth::password::PASSWORD_PROVIDER_ID;
+use application::auth::provider::{AuthError, AuthProviders, Credentials};
 use application::auth::{SessionService, normalize_email};
 use application::ports::{PasswordHasher, UserRepository};
 use chrono::{DateTime, Utc};
@@ -243,34 +245,35 @@ pub async fn signup(
     )
 )]
 pub async fn login(
-    users: web::Data<dyn UserRepository>,
+    providers: web::Data<AuthProviders>,
     session_service: web::Data<SessionService>,
-    password_hasher: web::Data<dyn PasswordHasher>,
     cookies: web::Data<CookieSettings>,
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, ApiError> {
-    let email = normalize_email(&body.email);
-    let user = users
-        .find_by_email(email)
-        .await
-        .map_err(repo_error_response)?;
-    // "No such user", "wrong password", and "account has no password" all
-    // fall through to the same 401: the response must not reveal that a
-    // passwordless account (one that can only sign in via an external
-    // identity provider) exists.
-    let Some(user) = user else {
-        return Err(ApiError::unauthorized());
+    // The handler only translates the request into provider terms; every
+    // check happens in the registered provider.
+    let LoginRequest { email, password } = body.into_inner();
+    let credentials = Credentials {
+        identifier: email,
+        secret: password,
     };
-    let Some(password_hash) = user.password_hash.clone() else {
-        return Err(ApiError::unauthorized());
+    let Some(provider) = providers.credential(PASSWORD_PROVIDER_ID) else {
+        return Err(ApiError::internal_error());
     };
-    let valid = password_hasher
-        .verify(&body.password, &password_hash)
+    let user = provider
+        .authenticate(credentials)
         .await
-        .map_err(|_| ApiError::internal_error())?;
-    if !valid {
-        return Err(ApiError::unauthorized());
-    }
+        .map_err(|error| match error {
+            // Every rejection renders as the same generic 401: the response must
+            // not reveal whether the email exists or which check failed.
+            AuthError::InvalidCredentials
+            | AuthError::Rejected { .. }
+            | AuthError::Failed { .. } => ApiError::unauthorized(),
+            AuthError::Internal(detail) => {
+                eprintln!("password login failed: {detail}");
+                ApiError::internal_error()
+            }
+        })?;
     let cookie = issue_session(session_service.get_ref(), user.id, &cookies).await?;
     Ok(HttpResponse::Ok()
         .cookie(cookie)
@@ -326,6 +329,7 @@ mod tests {
     use actix_web::dev::{Service, ServiceResponse};
     use actix_web::http::{StatusCode, header};
     use actix_web::test::{TestRequest, init_service, read_body};
+    use application::auth::password::PasswordAuthProvider;
     use application::ports::{SessionRepository, SessionTokens};
     use chrono::Duration;
     use diesel::prelude::*;
@@ -377,25 +381,33 @@ mod tests {
             let sessions: Arc<dyn SessionRepository> =
                 Arc::new(PostgresSessionRepository::new(pool.clone()));
             let sessions_data: web::Data<dyn SessionRepository> = sessions.clone().into();
-            let users: web::Data<dyn UserRepository> = {
-                let repo: Arc<dyn UserRepository> =
-                    Arc::new(PostgresUserRepository::new(pool.clone()));
-                repo.into()
-            };
-            let hasher: web::Data<dyn PasswordHasher> = {
-                let h: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
-                h.into()
-            };
+            let users: Arc<dyn UserRepository> =
+                Arc::new(PostgresUserRepository::new(pool.clone()));
+            let users_data: web::Data<dyn UserRepository> = users.clone().into();
+            let hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
+            let hasher_data: web::Data<dyn PasswordHasher> = hasher.clone().into();
+            // The login handler resolves providers by id, mirroring `main.rs`.
+            let providers = web::Data::new(
+                AuthProviders::new(
+                    vec![Arc::new(PasswordAuthProvider::new(
+                        users.clone(),
+                        hasher.clone(),
+                    ))],
+                    Vec::new(),
+                )
+                .expect("static provider ids are valid and unique"),
+            );
             init_service(
                 App::new()
-                    .app_data(users)
+                    .app_data(users_data)
                     .app_data(sessions_data)
                     .app_data(web::Data::new(SessionService::new(
                         sessions,
                         Arc::new(Sha256SessionTokens),
                         SessionService::DEFAULT_SESSION_TTL,
                     )))
-                    .app_data(hasher)
+                    .app_data(providers)
+                    .app_data(hasher_data)
                     .app_data(web::Data::new(CookieSettings { secure: false }))
                     .route("/api/auth/signup", web::post().to(signup))
                     .route("/api/auth/login", web::post().to(login))
