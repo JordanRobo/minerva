@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 use crate::ports::{RepositoryError, SessionRepository, SessionTokens};
 
+pub mod password;
+pub mod provider;
+
 #[cfg(test)]
 mod fakes;
 

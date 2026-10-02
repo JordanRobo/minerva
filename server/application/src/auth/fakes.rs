@@ -7,7 +7,10 @@ use std::sync::{Mutex, MutexGuard};
 use chrono::{DateTime, Utc};
 use domain::{Session, SessionId, User, UserId};
 
-use crate::ports::{RepositoryError, SessionRepository, SessionTokens, UserRepository};
+use crate::ports::{
+    PasswordHashError, PasswordHasher, RepositoryError, SessionRepository, SessionTokens,
+    UserRepository,
+};
 
 /// A [`SessionRepository`] that keeps sessions in a `HashMap`.
 #[derive(Default)]
@@ -142,5 +145,58 @@ impl SessionTokens for DeterministicTokens {
 
     fn hash(&self, token: &str) -> String {
         format!("hash-of-{token}")
+    }
+}
+
+/// A [`PasswordHasher`] for tests: it accepts a password exactly when the
+/// stored hash is `"hash-of-{password}"`, so tests control right and wrong
+/// per user without Argon2.
+pub struct FakePasswordHasher;
+
+#[async_trait::async_trait]
+impl PasswordHasher for FakePasswordHasher {
+    async fn hash(&self, password: &str) -> Result<String, PasswordHashError> {
+        Ok(format!("hash-of-{password}"))
+    }
+
+    async fn verify(&self, password: &str, hash: &str) -> Result<bool, PasswordHashError> {
+        Ok(hash == format!("hash-of-{password}"))
+    }
+}
+
+/// A [`UserRepository`] whose operations always fail, for testing the error
+/// paths of services that wrap it.
+pub struct FailingUserRepository;
+
+#[async_trait::async_trait]
+impl UserRepository for FailingUserRepository {
+    async fn create(&self, _user: User) -> Result<User, RepositoryError> {
+        Err(RepositoryError::Unexpected(
+            "faking a repository failure".to_owned(),
+        ))
+    }
+
+    async fn find_by_id(&self, _id: UserId) -> Result<Option<User>, RepositoryError> {
+        Err(RepositoryError::Unexpected(
+            "faking a repository failure".to_owned(),
+        ))
+    }
+
+    async fn find_by_email(&self, _email: String) -> Result<Option<User>, RepositoryError> {
+        Err(RepositoryError::Unexpected(
+            "faking a repository failure".to_owned(),
+        ))
+    }
+
+    async fn list(&self) -> Result<Vec<User>, RepositoryError> {
+        Err(RepositoryError::Unexpected(
+            "faking a repository failure".to_owned(),
+        ))
+    }
+
+    async fn update(&self, _user: User) -> Result<User, RepositoryError> {
+        Err(RepositoryError::Unexpected(
+            "faking a repository failure".to_owned(),
+        ))
     }
 }
