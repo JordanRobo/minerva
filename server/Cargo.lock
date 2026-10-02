@@ -264,6 +264,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "domain",
+ "tokio",
 ]
 
 [[package]]
@@ -1649,6 +1650,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "url",
  "uuid",
@@ -1677,7 +1679,6 @@ dependencies = [
  "infrastructure",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tokio",
  "url",
  "utoipa",

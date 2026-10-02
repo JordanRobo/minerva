@@ -19,11 +19,13 @@ impl std::fmt::Display for PasswordHashError {
 
 impl std::error::Error for PasswordHashError {}
 
-/// Hashes and verifies user passwords.
+/// Hashes and verifies user passwords. The operations are async because the
+/// implementations run CPU-bound work off the async runtime's worker threads.
+#[async_trait::async_trait]
 pub trait PasswordHasher: Send + Sync {
     /// Hash a plaintext password into its stored representation.
-    fn hash(&self, password: &str) -> Result<String, PasswordHashError>;
+    async fn hash(&self, password: &str) -> Result<String, PasswordHashError>;
 
     /// Check a plaintext password against a stored hash.
-    fn verify(&self, password: &str, hash: &str) -> Result<bool, PasswordHashError>;
+    async fn verify(&self, password: &str, hash: &str) -> Result<bool, PasswordHashError>;
 }

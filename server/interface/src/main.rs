@@ -9,8 +9,12 @@ mod openapi;
 mod tasks;
 
 use actix_web::{App, HttpResponse, HttpServer, web};
-use application::ports::{OidcProvider, SessionRepository};
+use application::auth::SessionService;
+use application::ports::{
+    OidcProvider, PasswordHasher, SessionRepository, UserIdentityRepository, UserRepository,
+};
 use infrastructure::Argon2PasswordHasher;
+use infrastructure::Sha256SessionTokens;
 use infrastructure::db::build_pool;
 use infrastructure::migrations::run_migrations;
 use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
@@ -83,31 +87,50 @@ async fn main() -> std::io::Result<()> {
     let tasks = web::Data::new(PostgresTaskRepository::new(pool.clone()));
     let task_relations = web::Data::new(PostgresTaskRelationRepository::new(pool.clone()));
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
-    let users = web::Data::new(PostgresUserRepository::new(pool.clone()));
-    let user_identities = web::Data::new(PostgresUserIdentityRepository::new(pool.clone()));
+    // The auth handlers take ports, not concrete repositories, so these are
+    // registered as trait objects (the same way sessions below are).
+    let users: web::Data<dyn UserRepository> = {
+        let repo: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
+        repo.into()
+    };
+    let user_identities: web::Data<dyn UserIdentityRepository> = {
+        let repo: Arc<dyn UserIdentityRepository> =
+            Arc::new(PostgresUserIdentityRepository::new(pool.clone()));
+        repo.into()
+    };
     // Sessions are the swappable storage: Redis when redis.url is configured,
     // Postgres otherwise. A missing URL is not an error — it just means "use
     // Postgres for sessions" (see docs/architecture.md). A present but
     // unreachable one fails fast, like database.url does. The URL may carry
     // credentials, so it stays out of the log line.
-    let sessions: web::Data<dyn SessionRepository> = match config.redis.url.expose().trim() {
+    let sessions: Arc<dyn SessionRepository> = match config.redis.url.expose().trim() {
         "" => {
             println!("redis not configured; using Postgres for session storage");
-            let repo: Arc<dyn SessionRepository> = Arc::new(PostgresSessionRepository::new(pool));
-            repo.into()
+            Arc::new(PostgresSessionRepository::new(pool))
         }
         redis_url => {
             println!("using Redis for session storage");
-            let repo: Arc<dyn SessionRepository> = Arc::new(
+            Arc::new(
                 RedisSessionRepository::connect(redis_url)
                     .expect("redis.url is set but could not connect to Redis"),
-            );
-            repo.into()
+            )
         }
     };
+    // The raw repository stays registered alongside the service: handlers go
+    // through the service (the TTL is the fixed 30 days), but code that needs
+    // session storage directly can still extract the port.
+    let sessions_data: web::Data<dyn SessionRepository> = sessions.clone().into();
+    let session_service = web::Data::new(SessionService::new(
+        sessions,
+        Arc::new(Sha256SessionTokens),
+        SessionService::DEFAULT_SESSION_TTL,
+    ));
     // The password hasher holds no state; it is registered like the
     // repositories so handlers name their dependency in their signature.
-    let password_hasher = web::Data::new(Argon2PasswordHasher);
+    let password_hasher: web::Data<dyn PasswordHasher> = {
+        let hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
+        hasher.into()
+    };
     // Shared cookie attributes (the `Secure` flag) for the session and OIDC
     // state cookies, from server.cookie_secure.
     let cookies = web::Data::new(auth::CookieSettings {
@@ -162,7 +185,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(progress_snapshots.clone())
             .app_data(users.clone())
             .app_data(user_identities.clone())
-            .app_data(sessions.clone())
+            .app_data(sessions_data.clone())
+            .app_data(session_service.clone())
             .app_data(password_hasher.clone())
             .app_data(cookies.clone());
         // Registered only when OIDC is configured; the OIDC handlers take it

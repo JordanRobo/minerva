@@ -18,7 +18,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # `serde` (derive) + `uuid` (serde) are for the API DTOs; both are already in
 # the dependency tree via serde_json and domain.
 serde = { version = "1", features = ["derive"] }
-sha2 = { workspace = true }
 uuid = { version = "1", features = ["serde"] }
 # Typed configuration: layering (defaults < minerva.toml < env overrides) and
 # TOML parsing; extraction is plain serde. The `env` feature is deliberately

@@ -10,24 +10,38 @@ use argon2::password_hash::PasswordHasher as _;
 /// [`PasswordHasher`] backed by the `argon2` crate.
 ///
 /// Uses `Argon2::default()` — Argon2id with the crate's default cost
-/// parameters (19 MiB, 2 iterations), the OWASP-recommended baseline.
+/// parameters (19 MiB, 2 iterations), the OWASP-recommended baseline. The
+/// CPU-bound work runs on a blocking thread so it cannot stall the async
+/// runtime's worker threads.
 pub struct Argon2PasswordHasher;
 
+#[async_trait::async_trait]
 impl PasswordHasher for Argon2PasswordHasher {
-    fn hash(&self, password: &str) -> Result<String, PasswordHashError> {
-        let salt = SaltString::generate(&mut OsRng);
-        Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
-            .map(|hashed| hashed.to_string())
-            .map_err(|err| PasswordHashError::OperationFailed(err.to_string()))
+    async fn hash(&self, password: &str) -> Result<String, PasswordHashError> {
+        let password = password.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let salt = SaltString::generate(&mut OsRng);
+            Argon2::default()
+                .hash_password(password.as_bytes(), &salt)
+                .map(|hashed| hashed.to_string())
+                .map_err(|err| PasswordHashError::OperationFailed(err.to_string()))
+        })
+        .await
+        .map_err(|err| PasswordHashError::OperationFailed(err.to_string()))?
     }
 
-    fn verify(&self, password: &str, hash: &str) -> Result<bool, PasswordHashError> {
-        let parsed = PasswordHash::new(hash).map_err(|err| {
-            PasswordHashError::OperationFailed(format!("unparseable stored hash: {err}"))
-        })?;
-        Ok(Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .is_ok())
+    async fn verify(&self, password: &str, hash: &str) -> Result<bool, PasswordHashError> {
+        let password = password.to_owned();
+        let hash = hash.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let parsed = PasswordHash::new(&hash).map_err(|err| {
+                PasswordHashError::OperationFailed(format!("unparseable stored hash: {err}"))
+            })?;
+            Ok(Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok())
+        })
+        .await
+        .map_err(|err| PasswordHashError::OperationFailed(err.to_string()))?
     }
 }
