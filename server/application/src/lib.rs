@@ -2,5 +2,6 @@
 //!
 //! Use cases and orchestration over the domain. Depends only on `domain`.
 
+pub mod auth;
 pub mod oidc_login;
 pub mod ports;

@@ -20,16 +20,16 @@ use actix_web::cookie::time::Duration as CookieDuration;
 use actix_web::cookie::{Cookie, CookieJar, Key, SameSite};
 use actix_web::http::header;
 use actix_web::{HttpRequest, HttpResponse, web};
+use application::auth::{SessionService, normalize_email};
 use application::oidc_login::{
     LoginDecision, LoginPolicy, decide_login, identity_from_claims, new_user_from_claims,
 };
 use application::ports::{
-    OidcClaims, OidcError, OidcProvider, PendingOidcLogin, RepositoryError, SessionRepository,
-    UserIdentityRepository, UserRepository,
+    OidcClaims, OidcError, OidcProvider, PendingOidcLogin, RepositoryError, UserIdentityRepository,
+    UserRepository,
 };
 use chrono::{DateTime, Duration, Utc};
 use domain::UserId;
-use infrastructure::repositories::{PostgresUserIdentityRepository, PostgresUserRepository};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
@@ -303,9 +303,9 @@ pub async fn oidc_callback(
     req: HttpRequest,
     query: web::Query<OidcCallbackQuery>,
     oidc: Option<web::Data<OidcAuth>>,
-    users: web::Data<PostgresUserRepository>,
-    identities: web::Data<PostgresUserIdentityRepository>,
-    sessions: web::Data<dyn SessionRepository>,
+    users: web::Data<dyn UserRepository>,
+    identities: web::Data<dyn UserIdentityRepository>,
+    session_service: web::Data<SessionService>,
     cookies: web::Data<auth::CookieSettings>,
 ) -> Result<HttpResponse, ApiError> {
     let Some(auth_data) = oidc else {
@@ -388,7 +388,7 @@ pub async fn oidc_callback(
 
     let user_with_email = match (&identity, &claims.email) {
         (None, Some(email)) if claims.email_verified => {
-            let email = email.trim().to_lowercase();
+            let email = normalize_email(email);
             if email.is_empty() {
                 None
             } else {
@@ -417,7 +417,7 @@ pub async fn oidc_callback(
     ) {
         LoginDecision::ExistingIdentity { user_id } => user_id,
         LoginDecision::LinkToExistingUser { user_id } => {
-            match create_identity(&identities, user_id, &claims, now).await {
+            match create_identity(identities.get_ref(), user_id, &claims, now).await {
                 Ok(()) => user_id,
                 Err(reason) => {
                     return Ok(fail_redirect(auth, &cookies, "oidc_login_failed", &reason));
@@ -442,7 +442,7 @@ pub async fn oidc_callback(
             // passwordless user stays behind and the next login re-links it
             // via its verified email. Belongs in an application-layer unit of
             // work when one exists.
-            match create_identity(&identities, user.id, &claims, now).await {
+            match create_identity(identities.get_ref(), user.id, &claims, now).await {
                 Ok(()) => user.id,
                 Err(reason) => {
                     return Ok(fail_redirect(auth, &cookies, "oidc_login_failed", &reason));
@@ -459,7 +459,7 @@ pub async fn oidc_callback(
         }
     };
 
-    let cookie = match issue_session(&sessions, user_id, &cookies).await {
+    let cookie = match issue_session(session_service.get_ref(), user_id, &cookies).await {
         Ok(cookie) => cookie,
         Err(err) => {
             return Ok(fail_redirect(
@@ -481,7 +481,7 @@ pub async fn oidc_callback(
 /// callback for the same provider identity won the race; re-look it up and
 /// carry on.
 async fn create_identity(
-    identities: &PostgresUserIdentityRepository,
+    identities: &dyn UserIdentityRepository,
     user_id: UserId,
     claims: &OidcClaims,
     now: DateTime<Utc>,
@@ -511,10 +511,13 @@ mod tests {
     use actix_web::dev::Service;
     use actix_web::http::StatusCode;
     use actix_web::test::{TestRequest, init_service};
-    use application::ports::OidcAuthRequest;
+    use application::ports::{OidcAuthRequest, SessionRepository};
     use domain::User;
+    use infrastructure::Sha256SessionTokens;
     use infrastructure::db::PgPool;
-    use infrastructure::repositories::PostgresSessionRepository;
+    use infrastructure::repositories::{
+        PostgresSessionRepository, PostgresUserIdentityRepository, PostgresUserRepository,
+    };
     use uuid::Uuid;
 
     // ---- pure unit tests (no DB) ----
@@ -720,16 +723,31 @@ mod tests {
         ($oidc:expr, $url:expr) => {{
             let pool = test_pool($url);
             let oidc: Option<OidcAuth> = $oidc;
-            // The handler takes the trait object, so register it as one —
-            // `Data<PostgresSessionRepository>` would not satisfy the
-            // extractor (a missing required Data is a 500).
-            let session_repo: Arc<dyn SessionRepository> =
+            // The handlers take ports, so register trait objects — a missing
+            // required Data is a 500. Sessions are registered both raw and
+            // via the service, mirroring `main.rs`.
+            let sessions: Arc<dyn SessionRepository> =
                 Arc::new(PostgresSessionRepository::new(pool.clone()));
-            let sessions: web::Data<dyn SessionRepository> = session_repo.into();
+            let sessions_data: web::Data<dyn SessionRepository> = sessions.clone().into();
+            let users: web::Data<dyn UserRepository> = {
+                let repo: Arc<dyn UserRepository> =
+                    Arc::new(PostgresUserRepository::new(pool.clone()));
+                repo.into()
+            };
+            let identities: web::Data<dyn UserIdentityRepository> = {
+                let repo: Arc<dyn UserIdentityRepository> =
+                    Arc::new(PostgresUserIdentityRepository::new(pool));
+                repo.into()
+            };
             let app = App::new()
-                .app_data(web::Data::new(PostgresUserRepository::new(pool.clone())))
-                .app_data(web::Data::new(PostgresUserIdentityRepository::new(pool)))
-                .app_data(sessions)
+                .app_data(users)
+                .app_data(identities)
+                .app_data(sessions_data)
+                .app_data(web::Data::new(SessionService::new(
+                    sessions,
+                    Arc::new(Sha256SessionTokens),
+                    SessionService::DEFAULT_SESSION_TTL,
+                )))
                 .app_data(web::Data::new(auth::CookieSettings { secure: false }));
             let app = match oidc {
                 Some(auth) => app.app_data(web::Data::new(auth)),

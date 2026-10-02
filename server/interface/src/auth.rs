@@ -9,13 +9,11 @@
 use actix_web::cookie::{Cookie, SameSite, time::OffsetDateTime};
 use actix_web::dev::Payload;
 use actix_web::{FromRequest, HttpRequest, HttpResponse, web};
-use application::ports::{PasswordHashError, PasswordHasher, SessionRepository, UserRepository};
-use chrono::{DateTime, Duration, Utc};
-use domain::{Session, SessionId, User, UserId};
-use infrastructure::Argon2PasswordHasher;
-use infrastructure::repositories::PostgresUserRepository;
+use application::auth::{SessionService, normalize_email};
+use application::ports::{PasswordHasher, UserRepository};
+use chrono::{DateTime, Utc};
+use domain::{User, UserId};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::pin::Pin;
 use utoipa::ToSchema;
@@ -35,9 +33,6 @@ pub struct CookieSettings {
 
 /// Name of the session cookie.
 const COOKIE_NAME: &str = "minerva_session";
-
-/// How long a session stays valid after it is created.
-const SESSION_TTL: Duration = Duration::days(30);
 
 /// JSON shape of a user in auth responses. Deliberately omits
 /// `password_hash` — it is server-side only and must never cross the wire.
@@ -93,11 +88,11 @@ impl FromRequest for AuthenticatedUser {
         // (cheap: headers + extensions).
         let req = req.clone();
         Box::pin(async move {
-            let sessions = req
-                .app_data::<web::Data<dyn SessionRepository>>()
+            let service = req
+                .app_data::<web::Data<SessionService>>()
                 .ok_or_else(ApiError::internal_error)?;
             let users = req
-                .app_data::<web::Data<PostgresUserRepository>>()
+                .app_data::<web::Data<dyn UserRepository>>()
                 .ok_or_else(ApiError::internal_error)?;
 
             // Every failure mode (no cookie, unknown token, expired session,
@@ -105,11 +100,11 @@ impl FromRequest for AuthenticatedUser {
             let Some(cookie) = req.cookie(COOKIE_NAME) else {
                 return Err(ApiError::unauthorized());
             };
-            let session = sessions
-                .find_by_token_hash(hash_token(cookie.value()))
+            let session = service
+                .resolve(cookie.value())
                 .await
                 .map_err(repo_error_response)?;
-            let Some(session) = session.filter(|s| !s.is_expired(Utc::now())) else {
+            let Some(session) = session else {
                 return Err(ApiError::unauthorized());
             };
             let user = users
@@ -124,52 +119,21 @@ impl FromRequest for AuthenticatedUser {
     }
 }
 
-/// Hash a raw session token for storage and lookup. One-way (SHA-256) is all
-/// that is needed: the threat is a leaked database revealing live tokens, not
-/// an attacker computing hashes to compare.
-fn hash_token(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// Run a (CPU-bound) password hash or verify off the async runtime's worker
-/// threads, mirroring `run_on_postgres`/`run_on_redis` in infrastructure.
-async fn run_hasher<T, F>(hasher: web::Data<Argon2PasswordHasher>, op: F) -> Result<T, ApiError>
-where
-    T: Send + 'static,
-    F: FnOnce(&Argon2PasswordHasher) -> Result<T, PasswordHashError> + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || op(hasher.get_ref()))
-        .await
-        .map_err(|_| ApiError::internal_error())?
-        .map_err(|_| ApiError::internal_error())
-}
-
 /// Create a session for `user_id` and return the cookie carrying its raw
 /// token. Only the token's hash is stored; from here on the raw token exists
 /// only in the response cookie. Shared with the OIDC callback so sessions are
 /// indistinguishable regardless of how the user signed in.
 pub(crate) async fn issue_session(
-    sessions: &web::Data<dyn SessionRepository>,
+    service: &SessionService,
     user_id: UserId,
     cookies: &CookieSettings,
 ) -> Result<Cookie<'static>, ApiError> {
-    let now = Utc::now();
-    let expires_at = now + SESSION_TTL;
-    let token = Uuid::new_v4().to_string();
-    let session = Session {
-        id: SessionId::new(),
-        user_id,
-        token_hash: hash_token(&token),
-        created_at: now,
-        expires_at,
-        last_seen_at: now,
-    };
-    sessions
-        .create(session)
-        .await
-        .map_err(repo_error_response)?;
-    Ok(session_cookie(&token, expires_at, cookies))
+    let issued = service.issue(user_id).await.map_err(repo_error_response)?;
+    Ok(session_cookie(
+        &issued.token,
+        issued.session.expires_at,
+        cookies,
+    ))
 }
 
 /// Build the session cookie: HttpOnly so JavaScript cannot read it,
@@ -227,15 +191,15 @@ fn apply_session_attributes(cookie: &mut Cookie<'_>, cookies: &CookieSettings) {
     )
 )]
 pub async fn signup(
-    users: web::Data<PostgresUserRepository>,
-    sessions: web::Data<dyn SessionRepository>,
-    password_hasher: web::Data<Argon2PasswordHasher>,
+    users: web::Data<dyn UserRepository>,
+    session_service: web::Data<SessionService>,
+    password_hasher: web::Data<dyn PasswordHasher>,
     cookies: web::Data<CookieSettings>,
     body: web::Json<SignupRequest>,
 ) -> Result<HttpResponse, ApiError> {
     // Normalize once at the boundary: lookups are case-insensitive, so the
     // stored email must be too or duplicate detection would miss "Foo@x.com".
-    let email = body.email.trim().to_lowercase();
+    let email = normalize_email(&body.email);
     if email.is_empty() {
         return Err(ApiError::bad_request("email must not be empty"));
     }
@@ -244,8 +208,10 @@ pub async fn signup(
             "password must be at least 8 characters long",
         ));
     }
-    let password = body.password.clone();
-    let password_hash = run_hasher(password_hasher.clone(), move |h| h.hash(&password)).await?;
+    let password_hash = password_hasher
+        .hash(&body.password)
+        .await
+        .map_err(|_| ApiError::internal_error())?;
     let now = Utc::now();
     let user = User {
         id: UserId::new(),
@@ -256,7 +222,7 @@ pub async fn signup(
         updated_at: now,
     };
     let user = users.create(user).await.map_err(repo_error_response)?;
-    let cookie = issue_session(&sessions, user.id, &cookies).await?;
+    let cookie = issue_session(session_service.get_ref(), user.id, &cookies).await?;
     Ok(HttpResponse::Created()
         .cookie(cookie)
         .json(UserResponse::from(&user)))
@@ -277,13 +243,13 @@ pub async fn signup(
     )
 )]
 pub async fn login(
-    users: web::Data<PostgresUserRepository>,
-    sessions: web::Data<dyn SessionRepository>,
-    password_hasher: web::Data<Argon2PasswordHasher>,
+    users: web::Data<dyn UserRepository>,
+    session_service: web::Data<SessionService>,
+    password_hasher: web::Data<dyn PasswordHasher>,
     cookies: web::Data<CookieSettings>,
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, ApiError> {
-    let email = body.email.trim().to_lowercase();
+    let email = normalize_email(&body.email);
     let user = users
         .find_by_email(email)
         .await
@@ -298,15 +264,14 @@ pub async fn login(
     let Some(password_hash) = user.password_hash.clone() else {
         return Err(ApiError::unauthorized());
     };
-    let password = body.password.clone();
-    let valid = run_hasher(password_hasher.clone(), move |h| {
-        h.verify(&password, &password_hash)
-    })
-    .await?;
+    let valid = password_hasher
+        .verify(&body.password, &password_hash)
+        .await
+        .map_err(|_| ApiError::internal_error())?;
     if !valid {
         return Err(ApiError::unauthorized());
     }
-    let cookie = issue_session(&sessions, user.id, &cookies).await?;
+    let cookie = issue_session(session_service.get_ref(), user.id, &cookies).await?;
     Ok(HttpResponse::Ok()
         .cookie(cookie)
         .json(UserResponse::from(&user)))
@@ -324,20 +289,14 @@ pub async fn login(
 )]
 pub async fn logout(
     req: HttpRequest,
-    sessions: web::Data<dyn SessionRepository>,
+    session_service: web::Data<SessionService>,
     cookies: web::Data<CookieSettings>,
 ) -> Result<HttpResponse, ApiError> {
     if let Some(cookie) = req.cookie(COOKIE_NAME) {
-        let session = sessions
-            .find_by_token_hash(hash_token(cookie.value()))
+        session_service
+            .revoke(cookie.value())
             .await
             .map_err(repo_error_response)?;
-        if let Some(session) = session {
-            sessions
-                .delete(session.id)
-                .await
-                .map_err(repo_error_response)?;
-        }
     }
     Ok(HttpResponse::NoContent()
         .cookie(clear_cookie(&cookies))
@@ -367,9 +326,13 @@ mod tests {
     use actix_web::dev::{Service, ServiceResponse};
     use actix_web::http::{StatusCode, header};
     use actix_web::test::{TestRequest, init_service, read_body};
+    use application::ports::{SessionRepository, SessionTokens};
+    use chrono::Duration;
     use diesel::prelude::*;
+    use domain::{Session, SessionId};
     use infrastructure::db::PgPool;
-    use infrastructure::repositories::PostgresSessionRepository;
+    use infrastructure::repositories::{PostgresSessionRepository, PostgresUserRepository};
+    use infrastructure::{Argon2PasswordHasher, Sha256SessionTokens};
     use std::sync::Arc;
 
     /// The `DATABASE_URL` the tests run against, or `None` to skip.
@@ -408,14 +371,31 @@ mod tests {
     macro_rules! test_app {
         ($url:expr) => {{
             let pool = test_pool($url);
-            let session_repo: Arc<dyn SessionRepository> =
+            // The handlers take ports, so register trait objects — a missing
+            // required Data is a 500. Sessions are registered both raw and
+            // via the service, mirroring `main.rs`.
+            let sessions: Arc<dyn SessionRepository> =
                 Arc::new(PostgresSessionRepository::new(pool.clone()));
-            let sessions: web::Data<dyn SessionRepository> = session_repo.into();
+            let sessions_data: web::Data<dyn SessionRepository> = sessions.clone().into();
+            let users: web::Data<dyn UserRepository> = {
+                let repo: Arc<dyn UserRepository> =
+                    Arc::new(PostgresUserRepository::new(pool.clone()));
+                repo.into()
+            };
+            let hasher: web::Data<dyn PasswordHasher> = {
+                let h: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
+                h.into()
+            };
             init_service(
                 App::new()
-                    .app_data(web::Data::new(PostgresUserRepository::new(pool.clone())))
-                    .app_data(sessions)
-                    .app_data(web::Data::new(Argon2PasswordHasher))
+                    .app_data(users)
+                    .app_data(sessions_data)
+                    .app_data(web::Data::new(SessionService::new(
+                        sessions,
+                        Arc::new(Sha256SessionTokens),
+                        SessionService::DEFAULT_SESSION_TTL,
+                    )))
+                    .app_data(hasher)
                     .app_data(web::Data::new(CookieSettings { secure: false }))
                     .route("/api/auth/signup", web::post().to(signup))
                     .route("/api/auth/login", web::post().to(login))
@@ -495,6 +475,7 @@ mod tests {
         let now = Utc::now();
         let password_hash = Argon2PasswordHasher
             .hash("password123")
+            .await
             .expect("hash password");
         let user = User {
             id: UserId::new(),
@@ -825,12 +806,13 @@ mod tests {
         // still returns it, so the 401 must come from the extractor's
         // `is_expired` check.
         let sessions = PostgresSessionRepository::new(pool.clone());
+        let tokens = Sha256SessionTokens;
         let now = Utc::now();
         sessions
             .create(Session {
                 id: SessionId::new(),
                 user_id: user.id,
-                token_hash: hash_token("expired-token"),
+                token_hash: tokens.hash("expired-token"),
                 created_at: now - Duration::hours(2),
                 expires_at: now - Duration::hours(1),
                 last_seen_at: now - Duration::hours(2),
