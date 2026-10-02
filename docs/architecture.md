@@ -56,13 +56,44 @@ diesel migration generate add_first_table
 
 ## Sessions and authentication
 
-Email/password sign-in issues a cookie session (`minerva_session`); the
-server stores only the SHA-256 hash of the token, never the raw value.
-Sessions sit behind the `SessionRepository` port: Redis when a Redis URL is
-configured (`redis.url`, via `REDIS_URL` or `minerva.toml`), Postgres
-otherwise. OIDC sign-in sits behind the `OidcProvider` port
-(`OpenIdConnectProvider` implements it) and is fully disabled unless
-`oidc.issuer_url` is set — see `minerva.example.toml` for all the settings.
+Every sign-in method is an *auth provider* registered at startup in the
+`AuthProviders` registry (`application/src/auth/provider.rs`). There are two
+kinds:
+
+- **Credential providers** verify credentials submitted to a login form.
+  Today: `password` (Argon2id email/password).
+- **Redirect providers** send the browser to an external identity provider
+  and back through a callback route. Today: `oidc`, registered only when
+  `oidc.issuer_url` is set — see `minerva.example.toml` for all the settings.
+
+Any successful sign-in, from any provider, ends in the same cookie session
+(`minerva_session`) issued by the `SessionService`; the server stores only
+the SHA-256 hash of the token, never the raw value. Sessions sit behind the
+`SessionRepository` port: Redis when a Redis URL is configured (`redis.url`,
+via `REDIS_URL` or `minerva.toml`), Postgres otherwise.
+
+The redirect flow (`interface/src/redirect.rs`) is generic over providers:
+
+- `GET /api/auth/{provider}/login?next=` asks the provider for its
+  authorization URL, stores the provider's pending state (plus the validated
+  `next` destination) in an encrypted, HttpOnly state cookie scoped to that
+  provider's path, and sends the browser off.
+- `GET /api/auth/{provider}/callback` verifies the state cookie (signature,
+  expiry, and that it was issued for *this* provider), hands every callback
+  query parameter to the provider's `complete`, and on success issues the
+  session cookie and redirects to `next`. Every failure redirects to the
+  login page with a stable error code; the detail goes to the log only.
+
+The OIDC protocol itself sits behind the `OidcProvider` port
+(`OpenIdConnectProvider` implements it); `OidcAuthProvider` wraps that port
+in the redirect-provider contract, including user lookup/linking decisions
+and identity creation.
+
+**Adding a provider:** implement `CredentialProvider` or
+`RedirectProvider` in `application`, add an instance to the registry
+construction in `interface/src/main.rs`. Nothing else changes — routing,
+cookies, session issuance, and the `/api/auth/providers` listing all follow
+from the registry.
 
 ## API documentation
 

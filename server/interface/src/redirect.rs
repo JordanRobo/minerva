@@ -1,92 +1,64 @@
-//! OIDC sign-in HTTP surface: `/api/auth/providers` plus the authorization
-//! code flow at `/api/auth/oidc/login` and `/api/auth/oidc/callback`.
+//! Generic redirect-login HTTP surface: `/api/auth/{provider}/login` and
+//! `/api/auth/{provider}/callback`, for any registered [`RedirectProvider`].
 //!
 //! The browser-facing half of the flow rides on a short-lived state cookie:
-//! `login` asks the provider for an authorization URL, stores the one-time
-//! {state, nonce, PKCE verifier, redirect target, expiry} in an
+//! `login` asks the provider for an authorization URL, stores the provider's
+//! opaque pending state, the validated redirect target and an expiry in an
 //! authenticated-encrypted cookie (the cookie crate's private jar), and 302s
-//! the browser to the IdP. `callback` refuses to run without a valid,
-//! unexpired copy of that cookie — which is what makes a forged callback URL
-//! useless (login CSRF) — then hands the code to the provider, asks
-//! [`decide_login`] who is logging in, and ends in the same session-issuing
-//! path as password login.
+//! the browser away. `callback` refuses to run without a valid, unexpired
+//! copy of that cookie whose provider matches the route — which is what makes
+//! a forged callback URL useless (login CSRF) — then hands every query
+//! parameter to the provider's `complete`, issues a session and ends in the
+//! same redirect path as password login.
 //!
 //! Every failure is a browser navigation: a 302 to
-//! `{server.web_base_url}/login?error=<code>` with the state cookie
-//! cleared. The real reason goes to the server log only; the redirect carries just the
+//! `{server.web_base_url}/login?error=<code>` with the state cookie cleared.
+//! The real reason goes to the server log only; the redirect carries just the
 //! stable code, never tokens, codes, or secrets.
 
 use actix_web::cookie::time::Duration as CookieDuration;
 use actix_web::cookie::{Cookie, CookieJar, Key, SameSite};
 use actix_web::http::header;
 use actix_web::{HttpRequest, HttpResponse, web};
-use application::auth::{SessionService, normalize_email};
-use application::oidc_login::{
-    LoginDecision, LoginPolicy, decide_login, identity_from_claims, new_user_from_claims,
-};
-use application::ports::{
-    OidcClaims, OidcError, OidcProvider, PendingOidcLogin, RepositoryError, UserIdentityRepository,
-    UserRepository,
-};
+use application::auth::SessionService;
+use application::auth::provider::{AuthError, AuthProviders, CallbackParams, PendingLogin};
 use chrono::{DateTime, Duration, Utc};
-use domain::UserId;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::BTreeMap;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::{self, issue_session};
-use crate::config;
 use crate::error::ApiError;
 
-/// Name of the short-lived OIDC state cookie.
-const STATE_COOKIE: &str = "minerva_oidc_state";
+/// Name of the short-lived redirect-login state cookie.
+const STATE_COOKIE: &str = "minerva_auth_state";
 
 /// How long an unused authorization attempt stays valid.
 const STATE_TTL: Duration = Duration::minutes(10);
 
-/// Everything the OIDC routes need, registered as a single `web::Data` only
-/// when OIDC is enabled. Handlers take it as `Option<web::Data<OidcAuth>>`:
-/// `None` means "OIDC off" (404 on the flow routes, `null` in the providers
-/// response).
-pub struct OidcAuth {
-    pub provider: Arc<dyn OidcProvider>,
+/// Everything the redirect routes need, registered as a single `web::Data`
+/// when at least one redirect provider exists. Handlers take it as
+/// `Option<web::Data<RedirectFlow>>`: `None` means "no redirect providers"
+/// (404 on the flow routes).
+pub struct RedirectFlow {
     /// Key for the authenticated-encrypted state cookie, derived from
     /// `oidc.state_secret`.
     pub key: Key,
     /// `server.web_base_url` with any trailing slash stripped; every redirect
     /// is built as `{base_url}{path}` where the path starts with '/'.
     pub base_url: String,
-    pub policy: LoginPolicy,
-}
-
-impl OidcAuth {
-    /// Build the shared route config from validated configuration values. The
-    /// composition root has already checked that `base_url` is an absolute
-    /// http(s) URL without a trailing slash and that `state_secret` is at
-    /// least 32 bytes (see the config module), so this cannot fail.
-    pub fn new(
-        provider: Arc<dyn OidcProvider>,
-        base_url: String,
-        state_secret: &config::Secret,
-        auto_create_users: bool,
-    ) -> Self {
-        Self {
-            provider,
-            key: Key::derive_from(state_secret.expose().as_bytes()),
-            base_url,
-            policy: LoginPolicy { auto_create_users },
-        }
-    }
 }
 
 /// What the login route promises the callback route, carried in the state
 /// cookie. The private jar encrypts it, so a client can neither read nor
 /// forge it; a tampered value simply fails to decrypt and is treated as absent.
 #[derive(Debug, Serialize, Deserialize)]
-struct OidcState {
-    state: String,
-    nonce: String,
-    pkce_verifier: String,
+struct RedirectState {
+    /// The provider this attempt was started for; the callback route must
+    /// match it, so a cookie from one flow cannot feed another.
+    provider: String,
+    /// The provider's opaque pending state, verbatim.
+    pending: BTreeMap<String, String>,
     next: String,
     expires_at: DateTime<Utc>,
 }
@@ -94,14 +66,15 @@ struct OidcState {
 /// Build the Set-Cookie for a fresh state (value encrypted with the private jar).
 fn set_state_cookie(
     key: &Key,
-    state: &OidcState,
+    state: &RedirectState,
+    provider: &str,
     cookies: &auth::CookieSettings,
 ) -> Cookie<'static> {
     let mut cookie = Cookie::new(
         STATE_COOKIE,
         serde_json::to_string(state).expect("state is serializable"),
     );
-    apply_state_attributes(&mut cookie, cookies);
+    apply_state_attributes(&mut cookie, provider, cookies);
     let mut jar = CookieJar::new();
     jar.private_mut(key).add(cookie);
     jar.get(STATE_COOKIE)
@@ -112,27 +85,27 @@ fn set_state_cookie(
 /// Decrypt and check a raw state cookie. `None` when the cookie is missing,
 /// tampered with, unparsable, or expired — all of which the callback treats
 /// the same.
-fn read_state(raw: Option<Cookie<'static>>, key: &Key) -> Option<OidcState> {
+fn read_state(raw: Option<Cookie<'static>>, key: &Key) -> Option<RedirectState> {
     let mut jar = CookieJar::new();
     jar.add_original(raw?);
     let cookie = jar.private(key).get(STATE_COOKIE)?;
-    let state: OidcState = serde_json::from_str(cookie.value()).ok()?;
+    let state: RedirectState = serde_json::from_str(cookie.value()).ok()?;
     (state.expires_at > Utc::now()).then_some(state)
 }
 
 /// A Set-Cookie that makes the browser drop the state cookie.
-fn clear_state_cookie(cookies: &auth::CookieSettings) -> Cookie<'static> {
+fn clear_state_cookie(provider: &str, cookies: &auth::CookieSettings) -> Cookie<'static> {
     let mut cookie = Cookie::new(STATE_COOKIE, "");
-    apply_state_attributes(&mut cookie, cookies);
+    apply_state_attributes(&mut cookie, provider, cookies);
     cookie.make_removal();
     cookie
 }
 
-/// Scoped to the OIDC routes (narrower than the session cookie's `/`),
+/// Scoped to the provider's routes (narrower than the session cookie's `/`),
 /// HttpOnly so script cannot read it, SameSite=Lax like the session cookie,
 /// and `Secure` under the same configuration opt-in as the session cookie.
-fn apply_state_attributes(cookie: &mut Cookie<'_>, cookies: &auth::CookieSettings) {
-    cookie.set_path("/api/auth/oidc");
+fn apply_state_attributes(cookie: &mut Cookie<'_>, provider: &str, cookies: &auth::CookieSettings) {
+    cookie.set_path(format!("/api/auth/{provider}"));
     cookie.set_http_only(true);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_max_age(CookieDuration::minutes(10));
@@ -154,354 +127,207 @@ fn validated_next(next: &str) -> &str {
     }
 }
 
-/// Every OIDC failure is a browser navigation back to the login page with a
-/// stable error code, plus a cleared state cookie. The real reason goes to
-/// the log only — never into the redirect (no tokens, codes, or secrets).
+/// The stable code a failed login redirects with: the one carried by the
+/// provider's rejection or failure, or `login_failed` for interface-level
+/// failures (a missing state cookie, a provider mismatch, an internal error)
+/// that no provider named.
+fn error_code(error: &AuthError) -> &'static str {
+    match error {
+        &AuthError::Rejected { code } | &AuthError::Failed { code, .. } => code,
+        AuthError::InvalidCredentials | AuthError::Internal(_) => "login_failed",
+    }
+}
+
+/// Every redirect-login failure is a browser navigation back to the login
+/// page with a stable error code, plus a cleared state cookie. The real
+/// reason goes to the log only — never into the redirect (no tokens, codes,
+/// or secrets).
 fn fail_redirect(
-    auth: &OidcAuth,
+    flow: &RedirectFlow,
+    provider: &str,
     cookies: &auth::CookieSettings,
     code: &str,
     reason: &str,
 ) -> HttpResponse {
-    eprintln!("oidc login failed ({code}): {reason}");
+    eprintln!("login via {provider} failed ({code}): {reason}");
     HttpResponse::Found()
         .insert_header((
             header::LOCATION,
-            format!("{}/login?error={}", auth.base_url, code),
+            format!("{}/login?error={}", flow.base_url, code),
         ))
-        .cookie(clear_state_cookie(cookies))
+        .cookie(clear_state_cookie(provider, cookies))
         .finish()
 }
 
-/// Wire shape of `GET /api/auth/providers`.
-#[derive(Serialize, ToSchema)]
-pub struct AuthProvidersResponse {
-    /// Email/password sign-in is always available.
-    pub password: bool,
-    /// The configured OIDC provider, or null when OIDC is disabled.
-    pub oidc: Option<OidcProviderInfo>,
-}
-
-/// The OIDC provider's display name, for the login screen.
-#[derive(Serialize, ToSchema)]
-pub struct OidcProviderInfo {
-    /// Provider name as configured on the server.
-    pub display_name: String,
-}
-
-/// Query params for `GET /api/auth/oidc/login`.
+/// Path parameter for the redirect routes.
 #[derive(Deserialize, ToSchema, IntoParams)]
-pub struct OidcLoginQuery {
+pub struct ProviderPath {
+    /// The id of a registered redirect provider (e.g. `oidc`).
+    pub provider: String,
+}
+
+/// Query params for `GET /api/auth/{provider}/login`.
+#[derive(Deserialize, ToSchema, IntoParams)]
+pub struct RedirectLoginQuery {
     /// Site-relative path to return to after sign-in; anything that is not a
     /// plain relative path is ignored and "/" is used.
     pub next: Option<String>,
 }
 
-/// Query params for `GET /api/auth/oidc/callback`.
-#[derive(Deserialize, ToSchema, IntoParams)]
-pub struct OidcCallbackQuery {
-    /// Authorization code from the provider.
-    pub code: Option<String>,
-    /// State value echoed back by the provider.
-    pub state: Option<String>,
-    /// Set by the provider when the user denies the flow or it fails.
-    pub error: Option<String>,
-    /// Human-readable detail of the provider error.
-    pub error_description: Option<String>,
-}
-
-/// Auth Providers
+/// Redirect Login
 ///
-/// Which sign-in methods this deployment offers. `oidc` is null when the
-/// server was started without OIDC configuration.
+/// Start a redirect sign-in (e.g. OIDC): stores a short-lived state cookie
+/// and redirects the browser to the provider's authorization page. If the
+/// provider cannot be reached, the browser is sent to the login page with an
+/// error code.
 #[utoipa::path(
     get,
-    path = "/api/auth/providers",
+    path = "/api/auth/{provider}/login",
     tags = ["auth"],
-    responses((status = 200, description = "The available sign-in methods", body = AuthProvidersResponse))
-)]
-pub async fn list_auth_providers(oidc: Option<web::Data<OidcAuth>>) -> HttpResponse {
-    let response = AuthProvidersResponse {
-        password: true,
-        oidc: oidc.as_ref().map(|auth| OidcProviderInfo {
-            display_name: auth.provider.display_name().to_owned(),
-        }),
-    };
-    HttpResponse::Ok().json(response)
-}
-
-/// OIDC Login
-///
-/// Start an OIDC sign-in: stores a short-lived state cookie and redirects the
-/// browser to the provider's authorization page. If the provider cannot be
-/// reached, the browser is sent to the login page with error `oidc_unavailable`.
-#[utoipa::path(
-    get,
-    path = "/api/auth/oidc/login",
-    tags = ["auth"],
-    params(OidcLoginQuery),
+    params(ProviderPath, RedirectLoginQuery),
     responses(
         (status = 302, description = "Redirect to the provider's authorization page; state cookie set"),
-        (status = 404, description = "OIDC is not enabled on this server", body = ApiError)
+        (status = 404, description = "No redirect provider is registered under this id", body = ApiError)
     )
 )]
-pub async fn oidc_login(
-    query: web::Query<OidcLoginQuery>,
-    oidc: Option<web::Data<OidcAuth>>,
+pub async fn redirect_login(
+    path: web::Path<ProviderPath>,
+    query: web::Query<RedirectLoginQuery>,
+    flow: Option<web::Data<RedirectFlow>>,
+    providers: web::Data<AuthProviders>,
     cookies: web::Data<auth::CookieSettings>,
 ) -> Result<HttpResponse, ApiError> {
-    let Some(auth) = oidc else {
+    let Some(flow_data) = flow else {
         return Err(ApiError::not_found());
     };
-    let request = match auth.provider.authorization_request().await {
-        Ok(request) => request,
-        Err(err) => {
-            let code = if matches!(err, OidcError::Unavailable) {
-                "oidc_unavailable"
-            } else {
-                "oidc_login_failed"
-            };
+    let provider = match providers.get_ref().redirect(&path.provider) {
+        Some(provider) => provider,
+        None => return Err(ApiError::not_found()),
+    };
+    let start = match provider.begin().await {
+        Ok(start) => start,
+        Err(error) => {
             return Ok(fail_redirect(
-                auth.get_ref(),
+                flow_data.get_ref(),
+                &path.provider,
                 &cookies,
-                code,
-                &err.to_string(),
+                error_code(&error),
+                &error.to_string(),
             ));
         }
     };
-    let state = OidcState {
-        state: request.pending.csrf_state,
-        nonce: request.pending.nonce,
-        pkce_verifier: request.pending.pkce_verifier,
+    let state = RedirectState {
+        provider: path.provider.clone(),
+        pending: start.pending.0,
         next: validated_next(query.next.as_deref().unwrap_or("/")).to_owned(),
         expires_at: Utc::now() + STATE_TTL,
     };
     Ok(HttpResponse::Found()
-        .insert_header((header::LOCATION, request.authorization_url))
-        .cookie(set_state_cookie(&auth.key, &state, &cookies))
+        .insert_header((header::LOCATION, start.redirect_url))
+        .cookie(set_state_cookie(
+            &flow_data.key,
+            &state,
+            &path.provider,
+            &cookies,
+        ))
         .finish())
 }
 
-/// OIDC Callback
+/// Redirect Callback
 ///
 /// The provider redirects back here after the user signs in. Requires the
-/// state cookie set by the login route — a callback without it is rejected,
-/// which is what keeps forged callback URLs from logging anyone in. Success
-/// ends in a redirect into the app with a session cookie; every failure ends
-/// in a redirect to the login page with an error code.
+/// state cookie set by the login route — a callback without it (or with one
+/// issued for a different provider) is rejected, which is what keeps forged
+/// callback URLs from logging anyone in. Success ends in a redirect into the
+/// app with a session cookie; every failure ends in a redirect to the login
+/// page with an error code.
 #[utoipa::path(
     get,
-    path = "/api/auth/oidc/callback",
+    path = "/api/auth/{provider}/callback",
     tags = ["auth"],
-    params(OidcCallbackQuery),
+    params(ProviderPath),
     responses(
         (status = 302, description = "Redirect into the app with a session cookie on success, or to the login page with an error code on failure"),
-        (status = 404, description = "OIDC is not enabled on this server", body = ApiError)
+        (status = 404, description = "No redirect provider is registered under this id", body = ApiError)
     )
 )]
-pub async fn oidc_callback(
+pub async fn redirect_callback(
     req: HttpRequest,
-    query: web::Query<OidcCallbackQuery>,
-    oidc: Option<web::Data<OidcAuth>>,
-    users: web::Data<dyn UserRepository>,
-    identities: web::Data<dyn UserIdentityRepository>,
+    path: web::Path<ProviderPath>,
+    flow: Option<web::Data<RedirectFlow>>,
+    providers: web::Data<AuthProviders>,
     session_service: web::Data<SessionService>,
     cookies: web::Data<auth::CookieSettings>,
 ) -> Result<HttpResponse, ApiError> {
-    let Some(auth_data) = oidc else {
+    let Some(flow_data) = flow else {
         return Err(ApiError::not_found());
     };
-    let auth = auth_data.get_ref();
+    let flow = flow_data.get_ref();
+    let provider = match providers.get_ref().redirect(&path.provider) {
+        Some(provider) => provider,
+        None => return Err(ApiError::not_found()),
+    };
 
     // Login CSRF protection: no valid state cookie, no login. Missing,
     // tampered, and expired are indistinguishable on purpose.
-    let Some(state) = read_state(req.cookie(STATE_COOKIE), &auth.key) else {
+    let Some(state) = read_state(req.cookie(STATE_COOKIE), &flow.key) else {
         return Ok(fail_redirect(
-            auth,
+            flow,
+            &path.provider,
             &cookies,
-            "oidc_login_failed",
+            "login_failed",
             "state cookie missing, invalid, or expired",
         ));
     };
 
-    // The provider reported a failure before we ever got a code.
-    if let Some(error) = &query.error {
-        let detail = query
-            .error_description
-            .as_deref()
-            .unwrap_or("no description");
+    // A state cookie is scoped to the provider it was issued for; one from
+    // another flow must not feed this route.
+    if state.provider != path.provider {
         return Ok(fail_redirect(
-            auth,
+            flow,
+            &path.provider,
             &cookies,
-            "oidc_provider_error",
-            &format!("provider error {error}: {detail}"),
+            "login_failed",
+            &format!("state cookie was issued for provider {}", state.provider),
         ));
     }
 
-    let (Some(code), Some(returned_state)) = (&query.code, &query.state) else {
-        return Ok(fail_redirect(
-            auth,
-            &cookies,
-            "oidc_login_failed",
-            "callback is missing the code or state parameter",
-        ));
-    };
+    // Every query parameter goes to the provider; it knows which ones its
+    // flow uses (code, state, error, ...).
+    let params: CallbackParams = url::form_urlencoded::parse(req.query_string().as_bytes())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
 
-    let pending = PendingOidcLogin {
-        csrf_state: state.state,
-        nonce: state.nonce,
-        pkce_verifier: state.pkce_verifier,
-    };
-    let claims = match auth
-        .provider
-        .complete_login(code.clone(), returned_state.clone(), pending)
-        .await
-    {
-        Ok(claims) => claims,
-        Err(err) => {
-            let code = if matches!(err, OidcError::Unavailable) {
-                "oidc_unavailable"
-            } else {
-                "oidc_login_failed"
-            };
-            return Ok(fail_redirect(auth, &cookies, code, &err.to_string()));
-        }
-    };
-
-    // Who is logging in? The identity lookup always runs; the email lookup
-    // only when it could matter (no known identity and a verified, non-blank
-    // email claim), mirroring decide_login's rule order.
-    let identity = match identities
-        .find_by_issuer_and_subject(claims.issuer.clone(), claims.subject.clone())
-        .await
-    {
-        Ok(identity) => identity,
-        Err(err) => {
+    let user = match provider.complete(params, PendingLogin(state.pending)).await {
+        Ok(user) => user,
+        Err(error) => {
             return Ok(fail_redirect(
-                auth,
+                flow,
+                &path.provider,
                 &cookies,
-                "oidc_login_failed",
-                &format!("identity lookup failed: {err}"),
+                error_code(&error),
+                &error.to_string(),
             ));
         }
     };
 
-    let user_with_email = match (&identity, &claims.email) {
-        (None, Some(email)) if claims.email_verified => {
-            let email = normalize_email(email);
-            if email.is_empty() {
-                None
-            } else {
-                match users.find_by_email(email).await {
-                    Ok(user) => user,
-                    Err(err) => {
-                        return Ok(fail_redirect(
-                            auth,
-                            &cookies,
-                            "oidc_login_failed",
-                            &format!("user lookup failed: {err}"),
-                        ));
-                    }
-                }
-            }
-        }
-        _ => None,
-    };
-
-    let now = Utc::now();
-    let user_id = match decide_login(
-        auth.policy,
-        &claims,
-        identity.as_ref(),
-        user_with_email.as_ref(),
-    ) {
-        LoginDecision::ExistingIdentity { user_id } => user_id,
-        LoginDecision::LinkToExistingUser { user_id } => {
-            match create_identity(identities.get_ref(), user_id, &claims, now).await {
-                Ok(()) => user_id,
-                Err(reason) => {
-                    return Ok(fail_redirect(auth, &cookies, "oidc_login_failed", &reason));
-                }
-            }
-        }
-        LoginDecision::CreateUser => {
-            let user = new_user_from_claims(&claims, now);
-            let user = match users.create(user).await {
-                Ok(user) => user,
-                Err(err) => {
-                    return Ok(fail_redirect(
-                        auth,
-                        &cookies,
-                        "oidc_login_failed",
-                        &format!("user creation failed: {err}"),
-                    ));
-                }
-            };
-            // ponytail: creating the user and its identity is two repository
-            // calls with no cross-repo transaction; if the second fails, a
-            // passwordless user stays behind and the next login re-links it
-            // via its verified email. Belongs in an application-layer unit of
-            // work when one exists.
-            match create_identity(identities.get_ref(), user.id, &claims, now).await {
-                Ok(()) => user.id,
-                Err(reason) => {
-                    return Ok(fail_redirect(auth, &cookies, "oidc_login_failed", &reason));
-                }
-            }
-        }
-        LoginDecision::Reject(rejection) => {
-            return Ok(fail_redirect(
-                auth,
-                &cookies,
-                rejection.code(),
-                rejection.code(),
-            ));
-        }
-    };
-
-    let cookie = match issue_session(session_service.get_ref(), user_id, &cookies).await {
+    let cookie = match issue_session(session_service.get_ref(), user.id, &cookies).await {
         Ok(cookie) => cookie,
-        Err(err) => {
+        Err(error) => {
             return Ok(fail_redirect(
-                auth,
+                flow,
+                &path.provider,
                 &cookies,
-                "oidc_login_failed",
-                &format!("session creation failed: {err}"),
+                "login_failed",
+                &format!("session creation failed: {error}"),
             ));
         }
     };
     Ok(HttpResponse::Found()
-        .insert_header((header::LOCATION, format!("{}{}", auth.base_url, state.next)))
+        .insert_header((header::LOCATION, format!("{}{}", flow.base_url, state.next)))
         .cookie(cookie)
-        .cookie(clear_state_cookie(&cookies))
+        .cookie(clear_state_cookie(&path.provider, &cookies))
         .finish())
-}
-
-/// Create the (issuer, subject) -> user link. A `Conflict` means a concurrent
-/// callback for the same provider identity won the race; re-look it up and
-/// carry on.
-async fn create_identity(
-    identities: &dyn UserIdentityRepository,
-    user_id: UserId,
-    claims: &OidcClaims,
-    now: DateTime<Utc>,
-) -> Result<(), String> {
-    match identities
-        .create(identity_from_claims(user_id, claims, now))
-        .await
-    {
-        Ok(_identity) => Ok(()),
-        Err(RepositoryError::Conflict(_)) => {
-            match identities
-                .find_by_issuer_and_subject(claims.issuer.clone(), claims.subject.clone())
-                .await
-            {
-                Ok(Some(_identity)) => Ok(()),
-                _ => Err("identity creation raced and the re-lookup failed".to_owned()),
-            }
-        }
-        Err(err) => Err(format!("identity creation failed: {err}")),
-    }
 }
 
 #[cfg(test)]
@@ -511,15 +337,21 @@ mod tests {
     use actix_web::dev::Service;
     use actix_web::http::StatusCode;
     use actix_web::test::{TestRequest, init_service};
+    use application::auth::oidc::OidcAuthProvider;
     use application::auth::password::PasswordAuthProvider;
-    use application::auth::provider::AuthProviders;
-    use application::ports::{OidcAuthRequest, SessionRepository};
+    use application::auth::provider::{AuthProvider, RedirectProvider, RedirectStart};
+    use application::oidc_login::LoginPolicy;
+    use application::ports::{
+        OidcAuthRequest, OidcClaims, OidcError, OidcProvider, PendingOidcLogin, SessionRepository,
+        UserIdentityRepository, UserRepository,
+    };
     use domain::User;
     use infrastructure::db::PgPool;
     use infrastructure::repositories::{
         PostgresSessionRepository, PostgresUserIdentityRepository, PostgresUserRepository,
     };
     use infrastructure::{Argon2PasswordHasher, Sha256SessionTokens};
+    use std::sync::Arc;
     use uuid::Uuid;
 
     // ---- pure unit tests (no DB) ----
@@ -532,12 +364,15 @@ mod tests {
         auth::CookieSettings { secure: false }
     }
 
-    fn state(next: &str, expires_at: DateTime<Utc>) -> OidcState {
-        OidcState {
-            state: "csrf-1".into(),
-            nonce: "nonce-1".into(),
-            pkce_verifier: "verifier-1".into(),
-            next: next.into(),
+    fn state(provider: &str, next: &str, expires_at: DateTime<Utc>) -> RedirectState {
+        let mut pending = BTreeMap::new();
+        pending.insert("csrf_state".to_owned(), "csrf-1".to_owned());
+        pending.insert("nonce".to_owned(), "nonce-1".to_owned());
+        pending.insert("pkce_verifier".to_owned(), "verifier-1".to_owned());
+        RedirectState {
+            provider: provider.to_owned(),
+            pending,
+            next: next.to_owned(),
             expires_at,
         }
     }
@@ -570,22 +405,28 @@ mod tests {
     #[test]
     fn state_cookie_round_trips() {
         let key = test_key(7);
-        let expected = state("/dashboard", Utc::now() + STATE_TTL);
-        let cookie = set_state_cookie(&key, &expected, &test_cookies());
+        let expected = state("oidc", "/dashboard", Utc::now() + STATE_TTL);
+        let cookie = set_state_cookie(&key, &expected, "oidc", &test_cookies());
         let loaded =
             read_state(state_cookie_header(cookie.value()), &key).expect("state should round-trip");
-        assert_eq!(loaded.state, "csrf-1");
-        assert_eq!(loaded.nonce, "nonce-1");
-        assert_eq!(loaded.pkce_verifier, "verifier-1");
+        assert_eq!(loaded.provider, "oidc");
+        assert_eq!(loaded.pending.get("csrf_state").unwrap(), "csrf-1");
+        assert_eq!(loaded.pending.get("nonce").unwrap(), "nonce-1");
+        assert_eq!(loaded.pending.get("pkce_verifier").unwrap(), "verifier-1");
         assert_eq!(loaded.next, "/dashboard");
     }
 
     #[test]
     fn state_cookie_is_rejected_when_tampered_or_wrong_key() {
         let key = test_key(7);
-        let value = set_state_cookie(&key, &state("/", Utc::now() + STATE_TTL), &test_cookies())
-            .value()
-            .to_owned();
+        let value = set_state_cookie(
+            &key,
+            &state("oidc", "/", Utc::now() + STATE_TTL),
+            "oidc",
+            &test_cookies(),
+        )
+        .value()
+        .to_owned();
 
         // A different key cannot decrypt the cookie.
         assert!(read_state(state_cookie_header(&value), &test_key(8)).is_none());
@@ -607,10 +448,12 @@ mod tests {
     #[test]
     fn expired_or_missing_state_cookie_is_rejected() {
         let key = test_key(7);
-        let expired = state("/", Utc::now() - Duration::seconds(1));
+        let expired = state("oidc", "/", Utc::now() - Duration::seconds(1));
         assert!(
             read_state(
-                state_cookie_header(set_state_cookie(&key, &expired, &test_cookies()).value()),
+                state_cookie_header(
+                    set_state_cookie(&key, &expired, "oidc", &test_cookies()).value()
+                ),
                 &key
             )
             .is_none()
@@ -622,7 +465,8 @@ mod tests {
     fn state_cookie_carries_the_expected_attributes() {
         let cookie = set_state_cookie(
             &test_key(7),
-            &state("/", Utc::now() + STATE_TTL),
+            &state("oidc", "/", Utc::now() + STATE_TTL),
+            "oidc",
             &test_cookies(),
         );
         assert_eq!(cookie.name(), STATE_COOKIE);
@@ -668,6 +512,43 @@ mod tests {
         }
     }
 
+    /// A second, non-OIDC [`RedirectProvider`]: proves the routes dispatch by
+    /// registered id rather than hardcoding OIDC. It never completes a flow.
+    struct FakeRedirect;
+
+    impl AuthProvider for FakeRedirect {
+        fn id(&self) -> &str {
+            "fake"
+        }
+
+        fn display_name(&self) -> &str {
+            "Fake redirect"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RedirectProvider for FakeRedirect {
+        async fn begin(&self) -> Result<RedirectStart, AuthError> {
+            Ok(RedirectStart {
+                redirect_url: "https://fake.example/authorize".to_owned(),
+                pending: PendingLogin(BTreeMap::from([(
+                    "csrf_state".to_owned(),
+                    "fake-csrf-1".to_owned(),
+                )])),
+            })
+        }
+
+        async fn complete(
+            &self,
+            _callback: CallbackParams,
+            _pending: PendingLogin,
+        ) -> Result<User, AuthError> {
+            Err(AuthError::Internal(
+                "test fake does not complete flows".to_owned(),
+            ))
+        }
+    }
+
     fn claims(subject: &str, email: Option<&str>, verified: bool) -> OidcClaims {
         OidcClaims {
             issuer: "https://idp.example".into(),
@@ -679,13 +560,31 @@ mod tests {
         }
     }
 
-    fn test_auth(provider: FakeProvider, auto_create_users: bool) -> OidcAuth {
-        OidcAuth {
-            provider: Arc::new(provider),
+    /// The shared flow config the test app registers (same key and base URL
+    /// as before the abstraction, so cookie assertions keep their values).
+    fn test_flow() -> web::Data<RedirectFlow> {
+        web::Data::new(RedirectFlow {
             key: test_key(7),
             base_url: "http://localhost:9999".to_owned(),
-            policy: LoginPolicy { auto_create_users },
-        }
+        })
+    }
+
+    /// A Postgres-backed OIDC redirect provider over the given claims.
+    fn oidc_redirect(
+        url: &str,
+        claims: OidcClaims,
+        auto_create_users: bool,
+    ) -> Arc<dyn RedirectProvider> {
+        let pool = test_pool(url);
+        let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
+        let identities: Arc<dyn UserIdentityRepository> =
+            Arc::new(PostgresUserIdentityRepository::new(pool));
+        Arc::new(OidcAuthProvider::new(
+            Arc::new(FakeProvider { claims }),
+            users,
+            identities,
+            LoginPolicy { auto_create_users },
+        ))
     }
 
     /// The `DATABASE_URL` the tests run against, or `None` to skip.
@@ -695,13 +594,13 @@ mod tests {
             .filter(|url| !url.is_empty());
         // In CI these tests must run: a green build that skipped them proves nothing.
         if url.is_none() && std::env::var_os("CI").is_some() {
-            panic!("DATABASE_URL is not set; refusing to skip OIDC tests in CI");
+            panic!("DATABASE_URL is not set; refusing to skip redirect-login tests in CI");
         }
         url
     }
 
     /// A one-connection pool: the default settings (max_size 10, min_idle =
-    /// max_size) times the ~14 parallel handler-test pools would exceed local
+    /// max_size) times the parallel handler-test pools would exceed local
     /// Postgres's `max_connections`. Pending migrations are applied once per
     /// process first, so the tests are self-sufficient against a fresh
     /// database.
@@ -718,42 +617,33 @@ mod tests {
         pool
     }
 
-    /// Build the test app (real Postgres repositories, optional OIDC) and
-    /// initialize it. A macro because `init_service`'s service type is opaque
-    /// and cannot be named in a helper's signature.
+    /// Build the test app (real Postgres session storage, the given redirect
+    /// providers) and initialize it. A macro because `init_service`'s service
+    /// type is opaque and cannot be named in a helper's signature.
     macro_rules! test_app {
-        ($oidc:expr, $url:expr) => {{
+        ($redirects:expr, $url:expr) => {{
             let pool = test_pool($url);
-            let oidc: Option<OidcAuth> = $oidc;
-            // The handlers take ports, so register trait objects — a missing
-            // required Data is a 500. Sessions are registered both raw and
-            // via the service, mirroring `main.rs`.
+            // Sessions are registered both raw and via the service, mirroring
+            // `main.rs`.
             let sessions: Arc<dyn SessionRepository> =
                 Arc::new(PostgresSessionRepository::new(pool.clone()));
             let sessions_data: web::Data<dyn SessionRepository> = sessions.clone().into();
-            let users: Arc<dyn UserRepository> =
-                Arc::new(PostgresUserRepository::new(pool.clone()));
-            let users_data: web::Data<dyn UserRepository> = users.clone().into();
-            let identities: web::Data<dyn UserIdentityRepository> = {
-                let repo: Arc<dyn UserIdentityRepository> =
-                    Arc::new(PostgresUserIdentityRepository::new(pool));
-                repo.into()
-            };
-            // Registered like `main.rs`; part 3 will serve
-            // `/api/auth/providers` from it.
+            let redirects: Vec<Arc<dyn RedirectProvider>> = $redirects;
+            // Registered like `main.rs`: the providers list drives
+            // `/api/auth/providers`, and the shared flow config exists exactly
+            // when at least one redirect provider is registered.
+            let flow: Option<web::Data<RedirectFlow>> = (!redirects.is_empty()).then(test_flow);
             let providers = web::Data::new(
                 AuthProviders::new(
                     vec![Arc::new(PasswordAuthProvider::new(
-                        users.clone(),
+                        Arc::new(PostgresUserRepository::new(pool)),
                         Arc::new(Argon2PasswordHasher),
                     ))],
-                    Vec::new(),
+                    redirects,
                 )
                 .expect("static provider ids are valid and unique"),
             );
             let app = App::new()
-                .app_data(users_data)
-                .app_data(identities)
                 .app_data(sessions_data)
                 .app_data(web::Data::new(SessionService::new(
                     sessions,
@@ -762,14 +652,20 @@ mod tests {
                 )))
                 .app_data(providers)
                 .app_data(web::Data::new(auth::CookieSettings { secure: false }));
-            let app = match oidc {
-                Some(auth) => app.app_data(web::Data::new(auth)),
+            let app = match flow {
+                Some(flow) => app.app_data(flow),
                 None => app,
             };
             init_service(
-                app.route("/api/auth/providers", web::get().to(list_auth_providers))
-                    .route("/api/auth/oidc/login", web::get().to(oidc_login))
-                    .route("/api/auth/oidc/callback", web::get().to(oidc_callback)),
+                app.route(
+                    "/api/auth/providers",
+                    web::get().to(crate::auth::list_auth_providers),
+                )
+                .route("/api/auth/{provider}/login", web::get().to(redirect_login))
+                .route(
+                    "/api/auth/{provider}/callback",
+                    web::get().to(redirect_callback),
+                ),
             )
             .await
         }};
@@ -804,16 +700,13 @@ mod tests {
                 .split(';')
                 .next()
                 .unwrap()
-                .trim_start_matches("minerva_oidc_state=")
+                .trim_start_matches(&format!("{STATE_COOKIE}="))
                 .to_owned();
             let callback = $app
                 .call(
                     TestRequest::get()
                         .uri("/api/auth/oidc/callback?code=abc&state=csrf-1")
-                        .insert_header((
-                            header::COOKIE,
-                            format!("minerva_oidc_state={state_cookie}"),
-                        ))
+                        .insert_header((header::COOKIE, format!("{STATE_COOKIE}={state_cookie}")))
                         .to_request(),
                 )
                 .await
@@ -834,35 +727,12 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn providers_reports_oidc_null_when_disabled() {
+    async fn providers_lists_only_password_when_no_redirect_provider_is_registered() {
         let Some(url) = database_url() else {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
-        let app = test_app!(None, &url);
-        let res = app
-            .call(TestRequest::get().uri("/api/auth/providers").to_request())
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let body = actix_web::test::read_body(res).await;
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json, serde_json::json!({ "password": true, "oidc": null }));
-    }
-
-    #[actix_web::test]
-    async fn providers_reports_the_oidc_provider_when_enabled() {
-        let Some(url) = database_url() else {
-            eprintln!("skipping: DATABASE_URL not set");
-            return;
-        };
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims("sub-1", None, false),
-            },
-            true,
-        );
-        let app = test_app!(Some(auth), &url);
+        let app = test_app!(vec![], &url);
         let res = app
             .call(TestRequest::get().uri("/api/auth/providers").to_request())
             .await
@@ -872,20 +742,92 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "password": true, "oidc": { "display_name": "Fake IdP" } })
+            serde_json::json!({
+                "providers": [{
+                    "id": "password",
+                    "display_name": "Email and password",
+                    "kind": "credentials",
+                    "login_url": "/api/auth/login"
+                }]
+            })
         );
     }
 
     #[actix_web::test]
-    async fn flow_routes_404_when_oidc_is_disabled() {
+    async fn providers_lists_password_and_oidc_when_oidc_is_enabled() {
         let Some(url) = database_url() else {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
-        let app = test_app!(None, &url);
+        let app = test_app!(
+            vec![oidc_redirect(&url, claims("sub-1", None, false), true)],
+            &url
+        );
+        let res = app
+            .call(TestRequest::get().uri("/api/auth/providers").to_request())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = actix_web::test::read_body(res).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "providers": [
+                    {
+                        "id": "password",
+                        "display_name": "Email and password",
+                        "kind": "credentials",
+                        "login_url": "/api/auth/login"
+                    },
+                    {
+                        "id": "oidc",
+                        "display_name": "Fake IdP",
+                        "kind": "redirect",
+                        "login_url": "/api/auth/oidc/login"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[actix_web::test]
+    async fn flow_routes_404_when_no_redirect_provider_is_registered() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let app = test_app!(vec![], &url);
         for uri in [
             "/api/auth/oidc/login",
             "/api/auth/oidc/callback?code=x&state=y",
+        ] {
+            let res = app
+                .call(TestRequest::get().uri(uri).to_request())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri}");
+            let body = actix_web::test::read_body(res).await;
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["error"]["code"], "not_found", "{uri}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn flow_routes_404_for_unknown_or_non_redirect_providers() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let app = test_app!(
+            vec![oidc_redirect(&url, claims("sub-1", None, false), true)],
+            &url
+        );
+        // An unregistered id, and a registered provider of the other kind.
+        for uri in [
+            "/api/auth/nope/login",
+            "/api/auth/password/login",
+            "/api/auth/password/callback?code=x&state=y",
         ] {
             let res = app
                 .call(TestRequest::get().uri(uri).to_request())
@@ -904,13 +846,10 @@ mod tests {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims("sub-1", None, false),
-            },
-            true,
+        let app = test_app!(
+            vec![oidc_redirect(&url, claims("sub-1", None, false), true)],
+            &url
         );
-        let app = test_app!(Some(auth), &url);
         let res = app
             .call(
                 TestRequest::get()
@@ -936,9 +875,10 @@ mod tests {
             .split(';')
             .next()
             .unwrap()
-            .trim_start_matches("minerva_oidc_state=");
+            .trim_start_matches(&format!("{STATE_COOKIE}="));
         let loaded =
             read_state(state_cookie_header(value), &test_key(7)).expect("state cookie decrypts");
+        assert_eq!(loaded.provider, "oidc");
         assert_eq!(loaded.next, "/dashboard");
     }
 
@@ -948,13 +888,10 @@ mod tests {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims("sub-1", None, false),
-            },
-            true,
+        let app = test_app!(
+            vec![oidc_redirect(&url, claims("sub-1", None, false), true)],
+            &url
         );
-        let app = test_app!(Some(auth), &url);
         for next in ["//evil.com", "https://evil.com", "/\\evil"] {
             let res = app
                 .call(
@@ -971,7 +908,7 @@ mod tests {
                 .split(';')
                 .next()
                 .unwrap()
-                .trim_start_matches("minerva_oidc_state=");
+                .trim_start_matches(&format!("{STATE_COOKIE}="));
             let loaded = read_state(state_cookie_header(value), &test_key(7))
                 .expect("state cookie decrypts");
             assert_eq!(loaded.next, "/", "next {next:?} should be dropped");
@@ -986,14 +923,15 @@ mod tests {
         };
         let subject = format!("sub-{}", Uuid::new_v4());
         let email = format!("oidc-{}@example.com", Uuid::new_v4());
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims(&subject, Some(&email), true),
-            },
-            true,
-        );
 
-        let app = test_app!(Some(auth), &url);
+        let app = test_app!(
+            vec![oidc_redirect(
+                &url,
+                claims(&subject, Some(&email), true),
+                true
+            )],
+            &url
+        );
         let (_login, callback) = login_and_callback!(app, None);
         assert_eq!(callback.status(), StatusCode::FOUND);
         assert_eq!(redirect_location(&callback), "http://localhost:9999/");
@@ -1033,14 +971,15 @@ mod tests {
         };
         let subject = format!("sub-{}", Uuid::new_v4());
         let email = format!("oidc-{}@example.com", Uuid::new_v4());
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims(&subject, Some(&email), true),
-            },
-            true,
-        );
 
-        let app = test_app!(Some(auth), &url);
+        let app = test_app!(
+            vec![oidc_redirect(
+                &url,
+                claims(&subject, Some(&email), true),
+                true
+            )],
+            &url
+        );
         let (_login, first) = login_and_callback!(app, None);
         assert_eq!(first.status(), StatusCode::FOUND);
         assert_eq!(redirect_location(&first), "http://localhost:9999/");
@@ -1089,13 +1028,14 @@ mod tests {
         };
         let existing = users.create(user).await.unwrap();
 
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims(&subject, Some(&email), true),
-            },
-            true,
+        let app = test_app!(
+            vec![oidc_redirect(
+                &url,
+                claims(&subject, Some(&email), true),
+                true
+            )],
+            &url
         );
-        let app = test_app!(Some(auth), &url);
         let (_login, callback) = login_and_callback!(app, None);
         assert_eq!(callback.status(), StatusCode::FOUND);
         assert_eq!(redirect_location(&callback), "http://localhost:9999/");
@@ -1119,13 +1059,14 @@ mod tests {
             return;
         };
         let email = format!("oidc-{}@example.com", Uuid::new_v4());
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims("sub-unverified", Some(&email), false),
-            },
-            true,
+        let app = test_app!(
+            vec![oidc_redirect(
+                &url,
+                claims("sub-unverified", Some(&email), false),
+                true
+            )],
+            &url
         );
-        let app = test_app!(Some(auth), &url);
         let (_login, callback) = login_and_callback!(app, None);
         assert_eq!(callback.status(), StatusCode::FOUND);
         assert_eq!(
@@ -1140,13 +1081,14 @@ mod tests {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims("sub-no-email", None, true),
-            },
-            true,
+        let app = test_app!(
+            vec![oidc_redirect(
+                &url,
+                claims("sub-no-email", None, true),
+                true
+            )],
+            &url
         );
-        let app = test_app!(Some(auth), &url);
         let (_login, callback) = login_and_callback!(app, None);
         assert_eq!(callback.status(), StatusCode::FOUND);
         assert_eq!(
@@ -1162,13 +1104,14 @@ mod tests {
             return;
         };
         let email = format!("oidc-{}@example.com", Uuid::new_v4());
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims("sub-nosignup", Some(&email), true),
-            },
-            false,
+        let app = test_app!(
+            vec![oidc_redirect(
+                &url,
+                claims("sub-nosignup", Some(&email), true),
+                false
+            )],
+            &url
         );
-        let app = test_app!(Some(auth), &url);
         let (_login, callback) = login_and_callback!(app, None);
         assert_eq!(callback.status(), StatusCode::FOUND);
         assert_eq!(
@@ -1183,15 +1126,13 @@ mod tests {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims("sub-1", None, false),
-            },
-            true,
+        let app = test_app!(
+            vec![oidc_redirect(&url, claims("sub-1", None, false), true)],
+            &url
         );
-        let app = test_app!(Some(auth), &url);
         // A forged callback URL: code and state look right, but there is
-        // no state cookie behind them.
+        // no state cookie behind them. This is an interface-level failure,
+        // so it redirects with the generic `login_failed` code.
         let res = app
             .call(
                 TestRequest::get()
@@ -1205,7 +1146,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::FOUND);
         assert_eq!(
             redirect_location(&res),
-            "http://localhost:9999/login?error=oidc_login_failed"
+            "http://localhost:9999/login?error=login_failed"
         );
     }
 
@@ -1215,14 +1156,12 @@ mod tests {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims("sub-1", None, false),
-            },
-            true,
+        let app = test_app!(
+            vec![oidc_redirect(&url, claims("sub-1", None, false), true)],
+            &url
         );
-        let app = test_app!(Some(auth), &url);
-        // Valid cookie, but the provider echoed a different state back.
+        // Valid cookie, but the provider echoed a different state back: the
+        // mismatch is the OIDC provider's finding, so it keeps its own code.
         let login = app
             .call(TestRequest::get().uri("/api/auth/oidc/login").to_request())
             .await
@@ -1234,7 +1173,7 @@ mod tests {
             .split(';')
             .next()
             .unwrap()
-            .trim_start_matches("minerva_oidc_state=")
+            .trim_start_matches(&format!("{STATE_COOKIE}="))
             .to_owned();
         let res = app
             .call(
@@ -1260,13 +1199,10 @@ mod tests {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
-        let auth = test_auth(
-            FakeProvider {
-                claims: claims("sub-1", None, false),
-            },
-            true,
+        let app = test_app!(
+            vec![oidc_redirect(&url, claims("sub-1", None, false), true)],
+            &url
         );
-        let app = test_app!(Some(auth), &url);
         // The user denied the flow at the IdP: it redirects back with
         // ?error= and no code.
         let login = app
@@ -1280,7 +1216,7 @@ mod tests {
             .split(';')
             .next()
             .unwrap()
-            .trim_start_matches("minerva_oidc_state=")
+            .trim_start_matches(&format!("{STATE_COOKIE}="))
             .to_owned();
         let res = app
             .call(
@@ -1297,6 +1233,85 @@ mod tests {
         assert_eq!(
             redirect_location(&res),
             "http://localhost:9999/login?error=oidc_provider_error"
+        );
+    }
+
+    #[actix_web::test]
+    async fn a_second_redirect_provider_is_dispatched_by_id() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let redirects = vec![
+            oidc_redirect(&url, claims("sub-1", None, false), true),
+            Arc::new(FakeRedirect),
+        ];
+        let app = test_app!(redirects, &url);
+        // The generic route dispatches by registered id, not by hardcoding
+        // OIDC: the fake provider's login route works with no other change.
+        let res = app
+            .call(TestRequest::get().uri("/api/auth/fake/login").to_request())
+            .await
+            .unwrap()
+            .into_parts()
+            .1;
+        assert_eq!(res.status(), StatusCode::FOUND);
+        assert_eq!(redirect_location(&res), "https://fake.example/authorize");
+
+        // The state cookie is scoped to the provider that started the flow.
+        let set = set_cookie(&res, STATE_COOKIE).expect("state cookie set");
+        assert!(set.contains("Path=/api/auth/fake"));
+        let value = set
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches(&format!("{STATE_COOKIE}="));
+        let loaded =
+            read_state(state_cookie_header(value), &test_key(7)).expect("state cookie decrypts");
+        assert_eq!(loaded.provider, "fake");
+    }
+
+    #[actix_web::test]
+    async fn a_state_cookie_for_one_provider_is_rejected_by_another() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let redirects = vec![
+            oidc_redirect(&url, claims("sub-1", None, false), true),
+            Arc::new(FakeRedirect),
+        ];
+        let app = test_app!(redirects, &url);
+        // A state cookie issued for the OIDC flow...
+        let login = app
+            .call(TestRequest::get().uri("/api/auth/oidc/login").to_request())
+            .await
+            .unwrap()
+            .into_parts()
+            .1;
+        let state_cookie = set_cookie(&login, STATE_COOKIE)
+            .expect("state cookie set")
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches(&format!("{STATE_COOKIE}="))
+            .to_owned();
+        // ...must not be accepted by the fake provider's callback.
+        let res = app
+            .call(
+                TestRequest::get()
+                    .uri("/api/auth/fake/callback?code=abc&state=csrf-1")
+                    .insert_header((header::COOKIE, format!("{STATE_COOKIE}={state_cookie}")))
+                    .to_request(),
+            )
+            .await
+            .unwrap()
+            .into_parts()
+            .1;
+        assert_eq!(res.status(), StatusCode::FOUND);
+        assert_eq!(
+            redirect_location(&res),
+            "http://localhost:9999/login?error=login_failed"
         );
     }
 }

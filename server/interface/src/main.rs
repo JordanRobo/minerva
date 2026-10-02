@@ -4,14 +4,17 @@ mod debug;
 mod error;
 mod goals;
 mod milestones;
-mod oidc;
 mod openapi;
+mod redirect;
 mod tasks;
 
+use actix_web::cookie::Key;
 use actix_web::{App, HttpResponse, HttpServer, web};
 use application::auth::SessionService;
+use application::auth::oidc::OidcAuthProvider;
 use application::auth::password::PasswordAuthProvider;
-use application::auth::provider::AuthProviders;
+use application::auth::provider::{AuthProviders, RedirectProvider};
+use application::oidc_login::LoginPolicy;
 use application::ports::{
     OidcProvider, PasswordHasher, SessionRepository, UserIdentityRepository, UserRepository,
 };
@@ -31,8 +34,8 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::error::ApiError;
-use crate::oidc::OidcAuth;
 use crate::openapi::ApiDoc;
+use crate::redirect::RedirectFlow;
 
 async fn health() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
@@ -93,11 +96,12 @@ async fn main() -> std::io::Result<()> {
     // registered as trait objects (the same way sessions below are).
     let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
     let users_data: web::Data<dyn UserRepository> = users.clone().into();
-    let user_identities: web::Data<dyn UserIdentityRepository> = {
-        let repo: Arc<dyn UserIdentityRepository> =
-            Arc::new(PostgresUserIdentityRepository::new(pool.clone()));
-        repo.into()
-    };
+    // The OIDC provider below also takes these ports, so the Arcs stay
+    // around instead of being converted straight to `web::Data`.
+    let user_identities: Arc<dyn UserIdentityRepository> =
+        Arc::new(PostgresUserIdentityRepository::new(pool.clone()));
+    let user_identities_data: web::Data<dyn UserIdentityRepository> =
+        user_identities.clone().into();
     // Sessions are the swappable storage: Redis when redis.url is configured,
     // Postgres otherwise. A missing URL is not an error — it just means "use
     // Postgres for sessions" (see docs/architecture.md). A present but
@@ -129,32 +133,13 @@ async fn main() -> std::io::Result<()> {
     // repositories so handlers name their dependency in their signature.
     let password_hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
     let password_hasher_data: web::Data<dyn PasswordHasher> = password_hasher.clone().into();
-    // Every sign-in method is a registered provider, looked up by id: adding
-    // one later means implementing a trait and extending this list, not
-    // touching session handling or the existing handlers.
-    let auth_providers = web::Data::new(
-        AuthProviders::new(
-            vec![Arc::new(PasswordAuthProvider::new(
-                users.clone(),
-                password_hasher.clone(),
-            ))],
-            Vec::new(),
-        )
-        .expect("static provider ids are valid and unique"),
-    );
-    // Shared cookie attributes (the `Secure` flag) for the session and OIDC
-    // state cookies, from server.cookie_secure.
-    let cookies = web::Data::new(auth::CookieSettings {
-        secure: config.server.cookie_secure,
-    });
-
     // OIDC sign-in is optional: without oidc.issuer_url the server behaves
-    // exactly as before and nothing OIDC-related is registered. With it, an
-    // unreachable/misconfigured IdP that answers 4xx fails startup like
+    // exactly as before and nothing redirect-related is registered. With it,
+    // an unreachable/misconfigured IdP that answers 4xx fails startup like
     // database.url does; a merely unreachable IdP only warns (discovery
     // retries lazily on first use). The configuration has already validated
     // every URL and secret, so the parses below cannot fail.
-    let oidc: Option<web::Data<OidcAuth>> = if config.oidc_enabled() {
+    let (redirect_providers, redirect_flow) = if config.oidc_enabled() {
         let provider_config = OidcConfig {
             issuer_url: url::Url::parse(&config.oidc.issuer_url)
                 .expect("validated by the configuration"),
@@ -166,22 +151,55 @@ async fn main() -> std::io::Result<()> {
             scopes: config.oidc.scopes.clone(),
             groups_claim: config.oidc.groups_claim.clone(),
         };
-        let provider: Arc<dyn OidcProvider> = Arc::new(
+        let protocol: Arc<dyn OidcProvider> = Arc::new(
             OpenIdConnectProvider::connect(provider_config)
                 .await
                 .unwrap_or_else(|err| panic!("{err}")),
         );
         println!("OIDC enabled (issuer {})", config.oidc.issuer_url);
-        Some(web::Data::new(OidcAuth::new(
-            provider,
-            config.server.web_base_url.clone(),
-            &config.oidc.state_secret,
-            config.oidc.auto_create_users,
-        )))
+        // The protocol provider is wrapped in the login-policy provider and
+        // registered like any other redirect provider.
+        let oidc: Arc<dyn RedirectProvider> = Arc::new(OidcAuthProvider::new(
+            protocol,
+            users.clone(),
+            user_identities.clone(),
+            LoginPolicy {
+                auto_create_users: config.oidc.auto_create_users,
+            },
+        ));
+        (
+            vec![oidc],
+            // The state cookie is shared by all redirect providers, so it is
+            // registered exactly when at least one exists; its key still comes
+            // from oidc.state_secret (the only secret of the right size today).
+            Some(web::Data::new(RedirectFlow {
+                key: Key::derive_from(config.oidc.state_secret.expose().as_bytes()),
+                base_url: config.server.web_base_url.clone(),
+            })),
+        )
     } else {
         println!("OIDC not configured");
-        None
+        (Vec::new(), None)
     };
+
+    // Every sign-in method is a registered provider, looked up by id: adding
+    // one later means implementing a trait and extending this list, not
+    // touching session handling or the existing handlers.
+    let auth_providers = web::Data::new(
+        AuthProviders::new(
+            vec![Arc::new(PasswordAuthProvider::new(
+                users.clone(),
+                password_hasher.clone(),
+            ))],
+            redirect_providers,
+        )
+        .expect("static provider ids are valid and unique"),
+    );
+    // Shared cookie attributes (the `Secure` flag) for the session and
+    // redirect-state cookies, from server.cookie_secure.
+    let cookies = web::Data::new(auth::CookieSettings {
+        secure: config.server.cookie_secure,
+    });
 
     println!("minerva-server listening on 0.0.0.0:{port}");
 
@@ -195,16 +213,17 @@ async fn main() -> std::io::Result<()> {
             .app_data(task_relations.clone())
             .app_data(progress_snapshots.clone())
             .app_data(users_data.clone())
-            .app_data(user_identities.clone())
+            .app_data(user_identities_data.clone())
             .app_data(sessions_data.clone())
             .app_data(session_service.clone())
             .app_data(auth_providers.clone())
             .app_data(password_hasher_data.clone())
             .app_data(cookies.clone());
-        // Registered only when OIDC is configured; the OIDC handlers take it
-        // as an `Option` extractor and treat its absence as "OIDC off".
-        if let Some(oidc) = oidc.clone() {
-            app = app.app_data(oidc);
+        // Registered only when at least one redirect provider exists; the
+        // flow handlers take it as an `Option` extractor and treat its
+        // absence as "no redirect login" (404 on the flow routes).
+        if let Some(flow) = redirect_flow.clone() {
+            app = app.app_data(flow);
         }
         app.route("/health", web::get().to(health))
             // The real API surface, built endpoint-group by endpoint-group.
@@ -240,9 +259,15 @@ async fn main() -> std::io::Result<()> {
                     .route("/auth/login", web::post().to(auth::login))
                     .route("/auth/logout", web::post().to(auth::logout))
                     .route("/auth/me", web::get().to(auth::me))
-                    .route("/auth/providers", web::get().to(oidc::list_auth_providers))
-                    .route("/auth/oidc/login", web::get().to(oidc::oidc_login))
-                    .route("/auth/oidc/callback", web::get().to(oidc::oidc_callback)),
+                    .route("/auth/providers", web::get().to(auth::list_auth_providers))
+                    .route(
+                        "/auth/{provider}/login",
+                        web::get().to(redirect::redirect_login),
+                    )
+                    .route(
+                        "/auth/{provider}/callback",
+                        web::get().to(redirect::redirect_callback),
+                    ),
             )
             // TEMPORARY: verifies repository wiring end-to-end; unauthenticated
             // and not meant to ship. Remove this scope before /debug is a real API.
