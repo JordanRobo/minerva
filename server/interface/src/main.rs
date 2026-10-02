@@ -1,4 +1,5 @@
 mod auth;
+mod config;
 mod debug;
 mod error;
 mod goals;
@@ -33,33 +34,42 @@ async fn health() -> HttpResponse {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(8080);
+    // All file and environment access happens in the config module; it layers
+    // defaults, minerva.toml and environment overrides, and reports every
+    // problem together instead of failing one fix at a time.
+    let config = match config::load() {
+        Ok(config) => config,
+        Err(errors) => {
+            eprintln!("configuration error(s):");
+            for error in &errors {
+                eprintln!("  - {error}");
+            }
+            std::process::exit(1);
+        }
+    };
+
+    let port = config.server.port;
 
     // Fail fast if the primary datastore is missing or unreachable: a server
     // without its database has no meaningful degraded mode. `build_pool` also
     // checks one connection, so an unreachable Postgres panics here at startup
     // rather than on the first request.
-    let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run minerva-server");
+    let database_url = config.database.url.expose().to_owned();
     let pool = build_pool(&database_url);
 
     // Apply pending migrations so a fresh database is usable without a
     // separate migration step. Several nodes can start at once (the API
     // scales horizontally), and `run_migrations` serializes them with a
-    // Postgres advisory lock. RUN_MIGRATIONS=false opts out, e.g. when a
-    // dedicated migration job owns the schema.
-    match std::env::var("RUN_MIGRATIONS") {
-        Ok(value) if value.eq_ignore_ascii_case("false") => {
-            println!("RUN_MIGRATIONS=false; skipping migrations");
-        }
-        _ => match run_migrations(&pool) {
+    // Postgres advisory lock. server.run_migrations = false opts out, e.g.
+    // when a dedicated migration job owns the schema.
+    if config.server.run_migrations {
+        match run_migrations(&pool) {
             Ok(applied) if applied.is_empty() => println!("no pending migrations"),
             Ok(applied) => println!("applied {} migration(s)", applied.len()),
             Err(err) => panic!("{err}"),
-        },
+        }
+    } else {
+        println!("run_migrations is false; skipping migrations");
     }
 
     // One shared pool, nine repositories. Each is registered as its own
@@ -75,53 +85,68 @@ async fn main() -> std::io::Result<()> {
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
     let users = web::Data::new(PostgresUserRepository::new(pool.clone()));
     let user_identities = web::Data::new(PostgresUserIdentityRepository::new(pool.clone()));
-    // Sessions are the swappable storage: Redis when REDIS_URL is configured,
-    // Postgres otherwise. A missing REDIS_URL is not an error — it just means
-    // "use Postgres for sessions" (see docs/architecture.md). A present but
-    // unreachable one fails fast, like DATABASE_URL does.
-    let sessions: web::Data<dyn SessionRepository> = match std::env::var("REDIS_URL") {
-        Ok(redis_url) => {
-            println!("using Redis for session storage ({redis_url})");
-            let repo: Arc<dyn SessionRepository> = Arc::new(
-                RedisSessionRepository::connect(&redis_url)
-                    .expect("REDIS_URL is set but could not connect to Redis"),
-            );
+    // Sessions are the swappable storage: Redis when redis.url is configured,
+    // Postgres otherwise. A missing URL is not an error — it just means "use
+    // Postgres for sessions" (see docs/architecture.md). A present but
+    // unreachable one fails fast, like database.url does. The URL may carry
+    // credentials, so it stays out of the log line.
+    let sessions: web::Data<dyn SessionRepository> = match config.redis.url.expose().trim() {
+        "" => {
+            println!("redis not configured; using Postgres for session storage");
+            let repo: Arc<dyn SessionRepository> = Arc::new(PostgresSessionRepository::new(pool));
             repo.into()
         }
-        Err(_) => {
-            println!("REDIS_URL not set; using Postgres for session storage");
-            let repo: Arc<dyn SessionRepository> = Arc::new(PostgresSessionRepository::new(pool));
+        redis_url => {
+            println!("using Redis for session storage");
+            let repo: Arc<dyn SessionRepository> = Arc::new(
+                RedisSessionRepository::connect(redis_url)
+                    .expect("redis.url is set but could not connect to Redis"),
+            );
             repo.into()
         }
     };
     // The password hasher holds no state; it is registered like the
     // repositories so handlers name their dependency in their signature.
     let password_hasher = web::Data::new(Argon2PasswordHasher);
+    // Shared cookie attributes (the `Secure` flag) for the session and OIDC
+    // state cookies, from server.cookie_secure.
+    let cookies = web::Data::new(auth::CookieSettings {
+        secure: config.server.cookie_secure,
+    });
 
-    // OIDC sign-in is optional: without OIDC_ISSUER_URL the server behaves
-    // exactly as before and nothing OIDC-related is registered (the
-    // OIDC_STATE_SECRET / WEB_BASE_URL / OIDC_AUTO_CREATE_USERS variables are
-    // not even read). With it, a missing or invalid one of those, or an
-    // unreachable/misconfigured IdP that answers 4xx, fails startup like
-    // DATABASE_URL does; a merely unreachable IdP only warns (discovery
-    // retries lazily on first use).
-    let oidc: Option<web::Data<OidcAuth>> = match OidcConfig::from_env() {
-        Ok(Some(config)) => {
-            let issuer = config.issuer_url.clone();
-            let provider: Arc<dyn OidcProvider> = Arc::new(
-                OpenIdConnectProvider::connect(config)
-                    .await
-                    .unwrap_or_else(|err| panic!("{err}")),
-            );
-            let auth = OidcAuth::from_env(provider).unwrap_or_else(|message| panic!("{message}"));
-            println!("OIDC enabled (issuer {issuer})");
-            Some(web::Data::new(auth))
-        }
-        Ok(None) => {
-            println!("OIDC not configured");
-            None
-        }
-        Err(message) => panic!("{message}"),
+    // OIDC sign-in is optional: without oidc.issuer_url the server behaves
+    // exactly as before and nothing OIDC-related is registered. With it, an
+    // unreachable/misconfigured IdP that answers 4xx fails startup like
+    // database.url does; a merely unreachable IdP only warns (discovery
+    // retries lazily on first use). The configuration has already validated
+    // every URL and secret, so the parses below cannot fail.
+    let oidc: Option<web::Data<OidcAuth>> = if config.oidc_enabled() {
+        let provider_config = OidcConfig {
+            issuer_url: url::Url::parse(&config.oidc.issuer_url)
+                .expect("validated by the configuration"),
+            client_id: config.oidc.client_id.clone(),
+            client_secret: config.oidc.client_secret.expose().to_owned(),
+            redirect_url: url::Url::parse(&config.oidc.redirect_url)
+                .expect("validated by the configuration"),
+            display_name: config.oidc.display_name.clone(),
+            scopes: config.oidc.scopes.clone(),
+            groups_claim: config.oidc.groups_claim.clone(),
+        };
+        let provider: Arc<dyn OidcProvider> = Arc::new(
+            OpenIdConnectProvider::connect(provider_config)
+                .await
+                .unwrap_or_else(|err| panic!("{err}")),
+        );
+        println!("OIDC enabled (issuer {})", config.oidc.issuer_url);
+        Some(web::Data::new(OidcAuth::new(
+            provider,
+            config.server.web_base_url.clone(),
+            &config.oidc.state_secret,
+            config.oidc.auto_create_users,
+        )))
+    } else {
+        println!("OIDC not configured");
+        None
     };
 
     println!("minerva-server listening on 0.0.0.0:{port}");
@@ -138,7 +163,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(users.clone())
             .app_data(user_identities.clone())
             .app_data(sessions.clone())
-            .app_data(password_hasher.clone());
+            .app_data(password_hasher.clone())
+            .app_data(cookies.clone());
         // Registered only when OIDC is configured; the OIDC handlers take it
         // as an `Option` extractor and treat its absence as "OIDC off".
         if let Some(oidc) = oidc.clone() {

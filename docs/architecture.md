@@ -10,8 +10,8 @@ communicates with the backend over HTTP only.
 |---|---|---|---|
 | `domain` | lib | Core business concepts and invariants (goals, milestones, ...). Pure logic, no I/O. | nothing but the `uuid`, `chrono`, `serde` value-type exceptions |
 | `application` | lib | Use cases: orchestrate domain objects to fulfill a request. Transaction boundaries live here. | `domain` |
-| `infrastructure` | lib | Adapters for external systems: Postgres (Diesel), Redis; S3 (`object_store`) declared but not yet implemented (roadmap 7.1). Configuration is read from environment variables. | `domain`, `application` (ports) |
-| `interface` | bin | HTTP API server (Actix-web). Routing and request/response mapping; the composition root that wires the other crates together at startup. | all of the above |
+| `infrastructure` | lib | Adapters for external systems: Postgres (Diesel), Redis; S3 (`object_store`) declared but not yet implemented (roadmap 7.1). Receives ready-made configuration values; reads no files or environment itself. | `domain`, `application` (ports) |
+| `interface` | bin | HTTP API server (Actix-web). Routing and request/response mapping; the composition root that wires the other crates together at startup. Owns all configuration: typed, validated settings from an optional `minerva.toml` layered with environment variables (`src/config.rs`). | all of the above |
 
 ## Dependency direction
 
@@ -32,17 +32,20 @@ Rules:
 - `infrastructure` implements the storage/cache traits (ports) declared by
   the inner layers and is swapped in at startup from the composition root in
   `interface`.
-- Redis is optional at runtime; S3 support lands with roadmap 7.1. Their
-  configuration (`REDIS_URL`, `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`,
-  `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`) comes from environment
-  variables, with local-dev defaults provided in `deploy/docker-compose.yml`
-  — never hardcoded in Rust source.
+- Redis is optional at runtime; S3 support lands with roadmap 7.1. All
+  configuration is loaded by the `interface` crate's config module (defaults,
+  then an optional `minerva.toml`, then the `DATABASE_URL`/`REDIS_URL`/`PORT`
+  aliases, then `MINERVA_`-prefixed environment variables), with local-dev
+  defaults provided in `deploy/docker-compose.yml` — never hardcoded in Rust
+  source. The future `S3_*` settings will arrive through the same layering.
 
 ## Database migrations
 
 Diesel migrations live in `server/migrations/` and are embedded in the
 binary; the server applies any pending ones at startup (skip with
-`RUN_MIGRATIONS=false`, e.g. when a dedicated migration job owns the schema).
+`server.run_migrations = false` in `minerva.toml`, or
+`MINERVA_SERVER__RUN_MIGRATIONS=false`, e.g. when a dedicated migration job
+owns the schema).
 Concurrent startups are safe — application is serialized on a Postgres
 advisory lock. Generate a new migration using the diesel CLI:
 
@@ -55,10 +58,11 @@ diesel migration generate add_first_table
 
 Email/password sign-in issues a cookie session (`minerva_session`); the
 server stores only the SHA-256 hash of the token, never the raw value.
-Sessions sit behind the `SessionRepository` port: Redis when `REDIS_URL` is
-set, Postgres otherwise. OIDC sign-in sits behind the `OidcProvider` port
+Sessions sit behind the `SessionRepository` port: Redis when a Redis URL is
+configured (`redis.url`, via `REDIS_URL` or `minerva.toml`), Postgres
+otherwise. OIDC sign-in sits behind the `OidcProvider` port
 (`OpenIdConnectProvider` implements it) and is fully disabled unless
-`OIDC_ISSUER_URL` is set — see `.env.example` for all the variables.
+`oidc.issuer_url` is set — see `minerva.example.toml` for all the settings.
 
 ## API documentation
 

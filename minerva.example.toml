@@ -1,0 +1,89 @@
+# Minerva server configuration example.
+#
+# Copy to `minerva.toml` at the repo root (or point `--config` /
+# MINERVA_CONFIG at this file) and uncomment what you need. Every key is
+# optional: built-in defaults fill in what is missing, and environment
+# variables override the file. Precedence, lowest to highest:
+#   defaults < minerva.toml < DATABASE_URL/REDIS_URL/PORT < MINERVA_* env vars
+# (see README.md, "Configuration"). An empty or whitespace-only value counts
+# as unset.
+
+[server]
+# Port to listen on (default 8080).
+#port = 8080
+
+# Mark session and OIDC state cookies Secure; set true once the deployment is
+# served over https (default false).
+#cookie_secure = false
+
+# Apply pending database migrations at startup (default true); set false when
+# a dedicated migration job owns the schema.
+#run_migrations = true
+
+# Absolute public URL of the API origin, no trailing slash (default: none).
+# Required when OIDC is enabled; post-login and error redirects are built
+# from it. Dev compose stack: http://localhost:3010
+#web_base_url = "http://localhost:3010"
+
+[database]
+# Postgres connection string. REQUIRED — the server will not start without
+# it. It contains credentials, so set it via the DATABASE_URL environment
+# variable (or url_file) rather than in a committed file.
+#url = "postgresql://minerva:minerva@postgres:5432/minerva"
+
+# Path to a file containing the connection string instead (contents trimmed).
+# An error if both `url` and `url_file` are set.
+#url_file = "/run/secrets/database-url"
+
+[redis]
+# Redis URL for session storage; blank means sessions live in Postgres
+# (default: none). Prefer the REDIS_URL environment variable or url_file.
+#url = "redis://redis:6379"
+
+#url_file = "/run/secrets/redis-url"
+
+[oidc]
+# OIDC sign-in is disabled while issuer_url is blank: the /api/auth/oidc/*
+# routes return 404 and none of the other oidc keys are even read. Set it to
+# your provider's issuer URL — the base of its
+# /.well-known/openid-configuration, e.g. https://auth.example.com/application/o/minerva/
+#issuer_url = "https://auth.example.com"
+
+# --- Required once issuer_url is set; startup fails naming each missing one ---
+
+# Client ID of the OIDC application registered at your provider.
+#client_id = "minerva"
+
+# Client secret of that application. Never commit a real one: set it via the
+# MINERVA_OIDC__CLIENT_SECRET environment variable or client_secret_file.
+#client_secret = "change-me"
+
+#client_secret_file = "/run/secrets/oidc-client-secret"
+
+# Redirect URI registered at the provider — it must match exactly. It is the
+# API base URL plus /api/auth/oidc/callback; dev compose stack:
+#   http://localhost:3010/api/auth/oidc/callback
+#redirect_url = "http://localhost:3010/api/auth/oidc/callback"
+
+# Key for the encrypted OIDC state cookie; at least 32 bytes. Generate one
+# with: openssl rand -hex 32. Set it via the MINERVA_OIDC__STATE_SECRET
+# environment variable or state_secret_file.
+#state_secret = "change-me"
+
+#state_secret_file = "/run/secrets/oidc-state-secret"
+
+# --- Optional once issuer_url is set (defaults in parentheses) ---
+
+# Name shown for the SSO option (default: "Single sign-on").
+#display_name = "Single sign-on"
+
+# Scopes to request, as a real array; "openid" is always included
+# (default: ["openid", "email", "profile"]).
+#scopes = ["openid", "email", "profile"]
+
+# ID-token claim holding the user's groups (default: "groups").
+#groups_claim = "groups"
+
+# Create an account for first-time SSO logins (default: true); set false to
+# only allow sign-in with existing accounts.
+#auto_create_users = true

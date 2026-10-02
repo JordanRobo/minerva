@@ -12,8 +12,8 @@
 //! path as password login.
 //!
 //! Every failure is a browser navigation: a 302 to
-//! `{WEB_BASE_URL}/login?error=<code>` with the state cookie cleared. The
-//! real reason goes to the server log only; the redirect carries just the
+//! `{server.web_base_url}/login?error=<code>` with the state cookie
+//! cleared. The real reason goes to the server log only; the redirect carries just the
 //! stable code, never tokens, codes, or secrets.
 
 use actix_web::cookie::time::Duration as CookieDuration;
@@ -34,7 +34,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::auth::issue_session;
+use crate::auth::{self, issue_session};
+use crate::config;
 use crate::error::ApiError;
 
 /// Name of the short-lived OIDC state cookie.
@@ -50,63 +51,32 @@ const STATE_TTL: Duration = Duration::minutes(10);
 pub struct OidcAuth {
     pub provider: Arc<dyn OidcProvider>,
     /// Key for the authenticated-encrypted state cookie, derived from
-    /// `OIDC_STATE_SECRET`.
+    /// `oidc.state_secret`.
     pub key: Key,
-    /// `WEB_BASE_URL` with any trailing slash stripped; every redirect is
-    /// built as `{base_url}{path}` where the path starts with '/'.
+    /// `server.web_base_url` with any trailing slash stripped; every redirect
+    /// is built as `{base_url}{path}` where the path starts with '/'.
     pub base_url: String,
     pub policy: LoginPolicy,
 }
 
 impl OidcAuth {
-    /// Validate the OIDC-specific environment variables and build the shared
-    /// route config. Called only when OIDC is enabled (i.e.
-    /// `OIDC_ISSUER_URL` was set); as everywhere else on this server, an
-    /// empty string counts as unset.
-    pub fn from_env(provider: Arc<dyn OidcProvider>) -> Result<Self, String> {
-        let state_secret = required_env("OIDC_STATE_SECRET")?;
-        if state_secret.len() < 32 {
-            return Err("OIDC_STATE_SECRET must be at least 32 bytes".to_owned());
-        }
-        let base_url = required_env("WEB_BASE_URL")?;
-        let base_url = valid_base_url(&base_url).ok_or_else(|| {
-            "WEB_BASE_URL must be an absolute http(s) URL, e.g. https://minerva.example.com"
-                .to_owned()
-        })?;
-        // `bool`'s parser accepts exactly "true"/"false" — strict by default.
-        let auto_create_users = match std::env::var("OIDC_AUTO_CREATE_USERS") {
-            Ok(value) if !value.is_empty() => value
-                .parse::<bool>()
-                .map_err(|_| "OIDC_AUTO_CREATE_USERS must be \"true\" or \"false\"".to_owned())?,
-            _ => true,
-        };
-        Ok(Self {
+    /// Build the shared route config from validated configuration values. The
+    /// composition root has already checked that `base_url` is an absolute
+    /// http(s) URL without a trailing slash and that `state_secret` is at
+    /// least 32 bytes (see the config module), so this cannot fail.
+    pub fn new(
+        provider: Arc<dyn OidcProvider>,
+        base_url: String,
+        state_secret: &config::Secret,
+        auto_create_users: bool,
+    ) -> Self {
+        Self {
             provider,
-            key: Key::derive_from(state_secret.as_bytes()),
+            key: Key::derive_from(state_secret.expose().as_bytes()),
             base_url,
             policy: LoginPolicy { auto_create_users },
-        })
+        }
     }
-}
-
-/// Read a required environment variable; an empty value counts as unset.
-fn required_env(name: &str) -> Result<String, String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("{name} must be set (OIDC is enabled)"))
-}
-
-/// An absolute http(s) URL with any trailing slash stripped, so redirects can
-/// be built as `{base}{path}` where `path` always starts with '/'.
-fn valid_base_url(raw: &str) -> Option<String> {
-    let host = raw
-        .strip_prefix("http://")
-        .or_else(|| raw.strip_prefix("https://"))?;
-    if host.is_empty() || host.starts_with('/') {
-        return None;
-    }
-    Some(raw.trim_end_matches('/').to_owned())
 }
 
 /// What the login route promises the callback route, carried in the state
@@ -122,12 +92,16 @@ struct OidcState {
 }
 
 /// Build the Set-Cookie for a fresh state (value encrypted with the private jar).
-fn set_state_cookie(key: &Key, state: &OidcState) -> Cookie<'static> {
+fn set_state_cookie(
+    key: &Key,
+    state: &OidcState,
+    cookies: &auth::CookieSettings,
+) -> Cookie<'static> {
     let mut cookie = Cookie::new(
         STATE_COOKIE,
         serde_json::to_string(state).expect("state is serializable"),
     );
-    apply_state_attributes(&mut cookie);
+    apply_state_attributes(&mut cookie, cookies);
     let mut jar = CookieJar::new();
     jar.private_mut(key).add(cookie);
     jar.get(STATE_COOKIE)
@@ -147,22 +121,22 @@ fn read_state(raw: Option<Cookie<'static>>, key: &Key) -> Option<OidcState> {
 }
 
 /// A Set-Cookie that makes the browser drop the state cookie.
-fn clear_state_cookie() -> Cookie<'static> {
+fn clear_state_cookie(cookies: &auth::CookieSettings) -> Cookie<'static> {
     let mut cookie = Cookie::new(STATE_COOKIE, "");
-    apply_state_attributes(&mut cookie);
+    apply_state_attributes(&mut cookie, cookies);
     cookie.make_removal();
     cookie
 }
 
 /// Scoped to the OIDC routes (narrower than the session cookie's `/`),
 /// HttpOnly so script cannot read it, SameSite=Lax like the session cookie,
-/// and `Secure` under the same `COOKIE_SECURE` opt-in.
-fn apply_state_attributes(cookie: &mut Cookie<'_>) {
+/// and `Secure` under the same configuration opt-in as the session cookie.
+fn apply_state_attributes(cookie: &mut Cookie<'_>, cookies: &auth::CookieSettings) {
     cookie.set_path("/api/auth/oidc");
     cookie.set_http_only(true);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_max_age(CookieDuration::minutes(10));
-    if std::env::var("COOKIE_SECURE").is_ok_and(|value| value.eq_ignore_ascii_case("true")) {
+    if cookies.secure {
         cookie.set_secure(true);
     }
 }
@@ -183,14 +157,19 @@ fn validated_next(next: &str) -> &str {
 /// Every OIDC failure is a browser navigation back to the login page with a
 /// stable error code, plus a cleared state cookie. The real reason goes to
 /// the log only — never into the redirect (no tokens, codes, or secrets).
-fn fail_redirect(auth: &OidcAuth, code: &str, reason: &str) -> HttpResponse {
+fn fail_redirect(
+    auth: &OidcAuth,
+    cookies: &auth::CookieSettings,
+    code: &str,
+    reason: &str,
+) -> HttpResponse {
     eprintln!("oidc login failed ({code}): {reason}");
     HttpResponse::Found()
         .insert_header((
             header::LOCATION,
             format!("{}/login?error={}", auth.base_url, code),
         ))
-        .cookie(clear_state_cookie())
+        .cookie(clear_state_cookie(cookies))
         .finish()
 }
 
@@ -269,6 +248,7 @@ pub async fn list_auth_providers(oidc: Option<web::Data<OidcAuth>>) -> HttpRespo
 pub async fn oidc_login(
     query: web::Query<OidcLoginQuery>,
     oidc: Option<web::Data<OidcAuth>>,
+    cookies: web::Data<auth::CookieSettings>,
 ) -> Result<HttpResponse, ApiError> {
     let Some(auth) = oidc else {
         return Err(ApiError::not_found());
@@ -281,7 +261,12 @@ pub async fn oidc_login(
             } else {
                 "oidc_login_failed"
             };
-            return Ok(fail_redirect(auth.get_ref(), code, &err.to_string()));
+            return Ok(fail_redirect(
+                auth.get_ref(),
+                &cookies,
+                code,
+                &err.to_string(),
+            ));
         }
     };
     let state = OidcState {
@@ -293,7 +278,7 @@ pub async fn oidc_login(
     };
     Ok(HttpResponse::Found()
         .insert_header((header::LOCATION, request.authorization_url))
-        .cookie(set_state_cookie(&auth.key, &state))
+        .cookie(set_state_cookie(&auth.key, &state, &cookies))
         .finish())
 }
 
@@ -321,6 +306,7 @@ pub async fn oidc_callback(
     users: web::Data<PostgresUserRepository>,
     identities: web::Data<PostgresUserIdentityRepository>,
     sessions: web::Data<dyn SessionRepository>,
+    cookies: web::Data<auth::CookieSettings>,
 ) -> Result<HttpResponse, ApiError> {
     let Some(auth_data) = oidc else {
         return Err(ApiError::not_found());
@@ -332,6 +318,7 @@ pub async fn oidc_callback(
     let Some(state) = read_state(req.cookie(STATE_COOKIE), &auth.key) else {
         return Ok(fail_redirect(
             auth,
+            &cookies,
             "oidc_login_failed",
             "state cookie missing, invalid, or expired",
         ));
@@ -345,6 +332,7 @@ pub async fn oidc_callback(
             .unwrap_or("no description");
         return Ok(fail_redirect(
             auth,
+            &cookies,
             "oidc_provider_error",
             &format!("provider error {error}: {detail}"),
         ));
@@ -353,6 +341,7 @@ pub async fn oidc_callback(
     let (Some(code), Some(returned_state)) = (&query.code, &query.state) else {
         return Ok(fail_redirect(
             auth,
+            &cookies,
             "oidc_login_failed",
             "callback is missing the code or state parameter",
         ));
@@ -375,7 +364,7 @@ pub async fn oidc_callback(
             } else {
                 "oidc_login_failed"
             };
-            return Ok(fail_redirect(auth, code, &err.to_string()));
+            return Ok(fail_redirect(auth, &cookies, code, &err.to_string()));
         }
     };
 
@@ -390,6 +379,7 @@ pub async fn oidc_callback(
         Err(err) => {
             return Ok(fail_redirect(
                 auth,
+                &cookies,
                 "oidc_login_failed",
                 &format!("identity lookup failed: {err}"),
             ));
@@ -407,6 +397,7 @@ pub async fn oidc_callback(
                     Err(err) => {
                         return Ok(fail_redirect(
                             auth,
+                            &cookies,
                             "oidc_login_failed",
                             &format!("user lookup failed: {err}"),
                         ));
@@ -428,7 +419,9 @@ pub async fn oidc_callback(
         LoginDecision::LinkToExistingUser { user_id } => {
             match create_identity(&identities, user_id, &claims, now).await {
                 Ok(()) => user_id,
-                Err(reason) => return Ok(fail_redirect(auth, "oidc_login_failed", &reason)),
+                Err(reason) => {
+                    return Ok(fail_redirect(auth, &cookies, "oidc_login_failed", &reason));
+                }
             }
         }
         LoginDecision::CreateUser => {
@@ -438,6 +431,7 @@ pub async fn oidc_callback(
                 Err(err) => {
                     return Ok(fail_redirect(
                         auth,
+                        &cookies,
                         "oidc_login_failed",
                         &format!("user creation failed: {err}"),
                     ));
@@ -450,19 +444,27 @@ pub async fn oidc_callback(
             // work when one exists.
             match create_identity(&identities, user.id, &claims, now).await {
                 Ok(()) => user.id,
-                Err(reason) => return Ok(fail_redirect(auth, "oidc_login_failed", &reason)),
+                Err(reason) => {
+                    return Ok(fail_redirect(auth, &cookies, "oidc_login_failed", &reason));
+                }
             }
         }
         LoginDecision::Reject(rejection) => {
-            return Ok(fail_redirect(auth, rejection.code(), rejection.code()));
+            return Ok(fail_redirect(
+                auth,
+                &cookies,
+                rejection.code(),
+                rejection.code(),
+            ));
         }
     };
 
-    let cookie = match issue_session(&sessions, user_id).await {
+    let cookie = match issue_session(&sessions, user_id, &cookies).await {
         Ok(cookie) => cookie,
         Err(err) => {
             return Ok(fail_redirect(
                 auth,
+                &cookies,
                 "oidc_login_failed",
                 &format!("session creation failed: {err}"),
             ));
@@ -471,7 +473,7 @@ pub async fn oidc_callback(
     Ok(HttpResponse::Found()
         .insert_header((header::LOCATION, format!("{}{}", auth.base_url, state.next)))
         .cookie(cookie)
-        .cookie(clear_state_cookie())
+        .cookie(clear_state_cookie(&cookies))
         .finish())
 }
 
@@ -521,6 +523,10 @@ mod tests {
         Key::derive_from(&[seed; 32])
     }
 
+    fn test_cookies() -> auth::CookieSettings {
+        auth::CookieSettings { secure: false }
+    }
+
     fn state(next: &str, expires_at: DateTime<Utc>) -> OidcState {
         OidcState {
             state: "csrf-1".into(),
@@ -557,36 +563,10 @@ mod tests {
     }
 
     #[test]
-    fn valid_base_url_requires_an_absolute_http_or_https_url() {
-        assert_eq!(
-            valid_base_url("https://minerva.example.com").as_deref(),
-            Some("https://minerva.example.com")
-        );
-        // Trailing slashes are stripped so `{base}{path}` never doubles them.
-        assert_eq!(
-            valid_base_url("https://minerva.example.com/").as_deref(),
-            Some("https://minerva.example.com")
-        );
-        assert_eq!(
-            valid_base_url("http://localhost:3010").as_deref(),
-            Some("http://localhost:3010")
-        );
-        for bad in [
-            "",
-            "minerva.example.com",
-            "ftp://x",
-            "https://",
-            "https:///x",
-        ] {
-            assert!(valid_base_url(bad).is_none(), "{bad:?} should be rejected");
-        }
-    }
-
-    #[test]
     fn state_cookie_round_trips() {
         let key = test_key(7);
         let expected = state("/dashboard", Utc::now() + STATE_TTL);
-        let cookie = set_state_cookie(&key, &expected);
+        let cookie = set_state_cookie(&key, &expected, &test_cookies());
         let loaded =
             read_state(state_cookie_header(cookie.value()), &key).expect("state should round-trip");
         assert_eq!(loaded.state, "csrf-1");
@@ -598,7 +578,7 @@ mod tests {
     #[test]
     fn state_cookie_is_rejected_when_tampered_or_wrong_key() {
         let key = test_key(7);
-        let value = set_state_cookie(&key, &state("/", Utc::now() + STATE_TTL))
+        let value = set_state_cookie(&key, &state("/", Utc::now() + STATE_TTL), &test_cookies())
             .value()
             .to_owned();
 
@@ -625,7 +605,7 @@ mod tests {
         let expired = state("/", Utc::now() - Duration::seconds(1));
         assert!(
             read_state(
-                state_cookie_header(set_state_cookie(&key, &expired).value()),
+                state_cookie_header(set_state_cookie(&key, &expired, &test_cookies()).value()),
                 &key
             )
             .is_none()
@@ -635,7 +615,11 @@ mod tests {
 
     #[test]
     fn state_cookie_carries_the_expected_attributes() {
-        let cookie = set_state_cookie(&test_key(7), &state("/", Utc::now() + STATE_TTL));
+        let cookie = set_state_cookie(
+            &test_key(7),
+            &state("/", Utc::now() + STATE_TTL),
+            &test_cookies(),
+        );
         assert_eq!(cookie.name(), STATE_COOKIE);
         assert_eq!(cookie.path().unwrap(), "/api/auth/oidc");
         assert_eq!(cookie.http_only(), Some(true));
@@ -745,7 +729,8 @@ mod tests {
             let app = App::new()
                 .app_data(web::Data::new(PostgresUserRepository::new(pool.clone())))
                 .app_data(web::Data::new(PostgresUserIdentityRepository::new(pool)))
-                .app_data(sessions);
+                .app_data(sessions)
+                .app_data(web::Data::new(auth::CookieSettings { secure: false }));
             let app = match oidc {
                 Some(auth) => app.app_data(web::Data::new(auth)),
                 None => app,

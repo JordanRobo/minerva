@@ -4,4 +4,8 @@ server/target
 **/*.log
 .git
 
+# Local server configuration; the container gets its settings via environment
+# variables or a mounted file, never from the build context
+minerva.toml
+
 graphify-out

@@ -1,0 +1,311 @@
+# Minerva Roadmap
+
+Living checklist for the Minerva build. This is the source of truth for what is done, what is next, what is deferred, and what is out of scope. Update it whenever work lands or scope changes, and log every change in the [Change log](#change-log).
+
+_Last updated: 2026-10-02_
+
+---
+
+## How to use this doc
+
+**Status markers**
+
+- `[x]` done and merged
+- `[ ]` not started
+- A `Partial:` note after an unchecked item means some of it exists; the note says what is left.
+
+**Tags**
+
+- `(orig #N)`: one of the 32 tasks in the original breakdown, numbered globally across milestones (so "Auth provider abstraction" is orig #7).
+- `(new)`: added after the repo review on 2026-10-01.
+- `(moved)`: moved from a different milestone; the note says where from.
+- `(D#)`: shaped by an entry in the [Decisions log](#decisions-log).
+
+**Rules for scope changes**
+
+1. Anything not in this doc is not planned. If it comes up, add it here (or to Future releases / Out of scope) before any worker prompt is written for it.
+2. Anything deferred must either name the milestone that will pick it up or live in [Future releases](#future-releases).
+3. Each worker prompt should reference the roadmap item it completes; tick the box when it merges.
+
+---
+
+## Current position
+
+| Milestone | State |
+|---|---|
+| M0 Foundations (new) | Done: 0.1 to 0.7 merged |
+| M1 Core Domain & Persistence | Done |
+| M2 Authentication & Authorization | In progress: basic auth and OIDC done, #7 is next |
+| M3 API Layer | In progress: CRUD, errors and OpenAPI done; most non-CRUD endpoints outstanding |
+| M4 Frontend: Goal & Task Management | Not started |
+| M5 Frontend: Reporting Dashboard | Not started |
+| M6 Frontend: Application Shell & UX | Not started |
+| M7 Infrastructure & Deployment | Partial: Redis-backed sessions done |
+| M8 v1 Release Polish | Not started |
+
+**Next up:** M2 #7 (auth provider abstraction).
+
+All planning decisions (D1 to D14) are resolved; see the [Decisions log](#decisions-log).
+
+---
+
+## Recommended execution order
+
+Milestone numbers are kept stable for reference, but the work is not executed strictly in numeric order.
+
+1. **M0** Foundations: migrations on startup, CI, auth characterization tests, config/docs cleanup, then the `minerva.toml` configuration system (0.7) so the auth work that follows lands on it.
+2. **M2** finish: #7 provider abstraction, roles & permissions with route protection, first-admin bootstrap and closing open signup, invite/reset links, SSO group mapping, session hardening.
+3. **M3** finish: non-CRUD endpoints, assignees/owners, comments, pagination, then status computation, snapshots and the dashboard API.
+4. **M6** app shell, design system and auth UI. The board needs somewhere to live and login is required to use anything.
+5. **M4** goal and task management UI.
+6. **M5** reporting dashboard UI.
+7. **M7** remaining infrastructure (storage, email delivery, production deployment).
+8. **M8** release polish.
+
+---
+
+## Milestone 0: Foundations & Hygiene (new)
+
+Goal: a fresh clone runs end to end, is tested in CI, and the docs match reality. Small items that would otherwise block or undermine later work.
+
+- [x] **0.1 Run migrations on startup** (new): embed Diesel migrations in the server and apply them at boot (opt-out via config flag). A fresh `docker compose up` currently yields an empty schema.
+- [x] **0.2 CI pipeline** (moved from M7, orig #28): build, test and lint on PRs for both `server` and `apps/web`; Postgres and Redis service containers so the skipped-without-env tests actually run.
+- [x] **0.3 Auth characterization tests** (new): tests for signup/login/logout/me and the `AuthenticatedUser` extractor; a `PostgresSessionRepository` round-trip test (only Redis has one today). Written before #7 refactors this code.
+- [x] **0.4 Config completeness** (new): OIDC and related variables documented in `.env.example` and passed through compose; bundled Authentik service intentionally not added (see 8.2). Superseded in part by 0.7, which moves server configuration into `minerva.toml`.
+- [x] **0.5 Docs drift** (new): update `CLAUDE.md` (migrations exist, routes beyond `/health`, `domain` dependency note), `docs/architecture.md` (migrations, sessions on Postgres or Redis, OIDC, same-origin deployment) and the stale "Milestone 3" comment in `main.rs`.
+- [x] **0.6 Contributor-friendly tooling config** (new): `.claude/settings.json` hardcodes `/home/jordan/.local/bin/graphify`; move to `settings.local.json` or make it optional.
+- [x] **0.7 Configuration system** (new, D13): typed, validated server configuration read from an optional `minerva.toml`, layered with environment overrides.
+  - [x] Precedence: built-in defaults, then `minerva.toml`, then environment variables. The file is optional; with no file the server runs from defaults plus required settings.
+  - [x] File discovery: `--config <path>` or `MINERVA_CONFIG`, then `./minerva.toml`, then `/etc/minerva/minerva.toml`. An explicitly named file that is missing is an error.
+  - [x] Typed sections with real arrays (for example `oidc.scopes`); unknown keys are rejected; all validation errors are reported together at startup
+  - [x] Environment overrides use the `MINERVA_` prefix with `__` for nesting (for example `MINERVA_OIDC__ISSUER_URL`); `DATABASE_URL`, `REDIS_URL` and `PORT` stay as aliases
+  - [x] Secrets (database URL credentials, OIDC client and state secrets, and later S3 keys and the bootstrap admin password) can come from an env var or a `*_file` path, are documented as not belonging in the TOML, and never appear in logs or `Debug` output
+  - [x] Only bootstrap and infrastructure settings live in config; runtime-managed settings (for example the SSO group mapping, D8) stay in the database
+  - [x] All existing environment reads move onto it (`main.rs`, OIDC config, `COOKIE_SECURE`, `RUN_MIGRATIONS`); `minerva.example.toml` committed, `minerva.toml` git-ignored, `.env.example` reduced to compose-level variables, compose and docs updated
+
+---
+
+## Milestone 1: Core Domain & Persistence (done)
+
+Goal: the data model exists and can be read/written from Postgres.
+
+- [x] **1.1 Task domain model** (orig #1): `Task`, extensible `TaskRelationType` (`#[non_exhaustive]`), link to Milestone
+- [x] **1.2 Diesel schema & migrations** (orig #2): goals, milestones, goal_milestones, progress_snapshots, tasks, task_relations (plus users, sessions, user_identities under M2)
+- [x] **1.3 Repository traits (ports)** (orig #3): in `application`
+- [x] **1.4 Postgres repository implementations** (orig #4): Diesel-backed, with round-trip tests
+
+Carry-over notes (tracked in later milestones, not gaps in M1):
+
+- `Goal::compute_status_from_milestones` exists but is never called (see 3.13).
+- The `TODO(application)` in `task_relation.rs` about `Blocks`/`BlockedBy` pairs is resolved by D4 (see 3.6).
+
+---
+
+## Milestone 2: Authentication & Authorization
+
+Goal: users can sign in via either method; single-tenant, so no org/school switching.
+
+- [x] **2.1 Basic auth** (orig #5): signup/login/logout/me, Argon2id, cookie sessions stored in Postgres or Redis. (Open signup is removed by 2.5.)
+- [x] **2.2 OIDC/OAuth support** (orig #6): discovery, PKCE, nonce, link/create user policy, encrypted state cookie, handler tests with a fake provider. Partial: live validation against a real Authentik instance is pending 0.4.
+- [ ] **2.3 Auth provider abstraction** (orig #7): a common provider contract in `application` so password and OIDC (and future providers) sit behind it without touching session handling.
+  - [ ] Provider trait/contract lives in `application`; password and OIDC implement it
+  - [ ] `AuthenticatedUser` extractor depends on the `UserRepository` port, not `PostgresUserRepository`
+  - [ ] Orchestration (email normalisation, token hashing, session issuing) moves out of `interface` handlers into application services
+  - [ ] `/api/auth/providers` response driven by the registered providers
+  - [ ] Existing behaviour preserved (covered by 0.3)
+  - Note: the pre-hijacking fix is no longer a blocker (D1, D2). Password accounts can only come from an invite, the configured bootstrap admin or SSO, so nobody can pre-register an address they do not control. Keep the existing rule that SSO linking requires `email_verified`.
+- [ ] **2.4 Roles & permissions** (orig #8): Admin / Staff / Read-only, app-wide.
+  - [ ] Role on the user (domain, migration, mapping)
+  - [ ] Authorization checks in the application layer; route protection on every `/api/*` endpoint (currently only `/api/auth/me` is protected)
+  - [ ] Remove or lock down `/debug/*`
+  - [ ] Users API (new): list users, change role, deactivate; admin only
+  - [ ] OpenAPI documents the auth requirements
+- [ ] **2.5 First-admin bootstrap & invite-only signup** (new, D1)
+  - [ ] Owner/admin account created from configuration at startup (a `minerva.toml` section, with the password supplied via env var or `*_file`), only when no users exist yet
+  - [ ] Remove the open `POST /api/auth/signup` endpoint (and update its tests and OpenAPI entry)
+  - [ ] SSO logins keep auto-creating accounts (behind `oidc.auto_create_users`); new SSO accounts get the fallback role from 2.7 (Read-only)
+- [ ] **2.6 Invite & password reset links** (orig #9, D2, D3): basic-auth accounts only, using one token-link mechanism.
+  - [ ] Invite: admin creates an invite (email, role); token is single-use, expiring and stored hashed; invitee follows the link and sets a password
+  - [ ] Invite management: list, revoke, re-issue
+  - [ ] Password reset uses the same mechanism
+  - [ ] If SMTP is configured the link is emailed (delivery arrives via 7.3); otherwise the admin gets a link to copy and share. The flow works fully without SMTP.
+  - [ ] Edge case to cover in design: an invited email that signs in via SSO before accepting the invite
+- [ ] **2.7 SSO group-to-role mapping** (new, D8): mapping is configured by admins in the Admin settings UI, not env vars.
+  - [ ] Settings storage and admin-only API for group-to-role rules (UI is 6.5)
+  - [ ] Fallback role is Read-only: a user with no matching rule (or a misconfigured mapping) can still sign in and must ask an admin to correct it
+  - [ ] If several groups match, the **least permissive** role wins; permissions are the admin's decision and fixes happen in the IdP
+  - [ ] When rules exist, the role is recomputed at every SSO login (IdP is source of truth); those users are flagged "managed by SSO" so their role cannot be edited by hand in Minerva
+  - [ ] When no rules exist, roles are never touched
+  - [ ] To confirm in the prompt: the owner/admin account created in 2.5 is exempt from SSO role recomputation so nobody is locked out of administration
+- [ ] **2.8 Session & login hardening** (new)
+  - [ ] Sliding expiry: call `touch_last_seen` on authenticated requests
+  - [ ] Purge expired sessions in Postgres when Redis is absent
+  - [ ] Make Redis session `create` atomic (MULTI/pipeline)
+  - [ ] Equalise login timing for unknown and passwordless accounts (dummy Argon2 verify)
+  - [ ] Rate limiting on login and reset/invite endpoints (Redis when present; Postgres counters or documented per-node limits when absent, since in-process counters break horizontal scaling)
+
+---
+
+## Milestone 3: API Layer
+
+Goal: a documented, consistent HTTP API in front of the domain, complete enough that the frontend milestones never need backend changes mid-flight.
+
+### Finish the resource APIs
+
+- [x] **3.1 Goals CRUD** (orig #10, part)
+- [ ] **3.2 Goal and milestone status override endpoints** (orig #10, part; D12): set a manual override and clear it ("return to automatic").
+  - Overrides are **sticky**: they hold until explicitly cleared; recomputation never overwrites them.
+  - Setting or clearing an override triggers an immediate progress snapshot (3.14).
+  - No audit history in v1 (see Future releases); the override only records that the status source is manual.
+- [x] **3.3 Milestones CRUD** (orig #11, part)
+- [ ] **3.4 Goal↔Milestone linkage endpoints** (orig #11, part): link, unlink, list milestones for a goal and goals for a milestone. Partial: `goal_milestones` repository exists; no routes.
+- [x] **3.5 Tasks CRUD** (orig #12, part)
+- [ ] **3.6 Task relation endpoints** (orig #12, part; D4): create, delete, list for a task.
+  - One canonical row per relationship. The API still accepts `blocks`, `blocked_by` and `relates_to`; `blocked_by` is normalised on write to a `blocks` row with the endpoints swapped, and the other view is derived when reading.
+  - Reject self-relations, duplicate pairs (unique constraint on the normalised pair; `relates_to` ordered consistently) and direct reverse loops. Longer cycle detection is not in v1.
+  - Fix `Task::is_blocked` so a blocker that is `Done` no longer counts as blocking.
+  - Partial: repository exists; no routes.
+- [ ] **3.7 Board-state transitions** (orig #12, part; D6): `PATCH /api/tasks/{id}/status` changing only the column. Any column to any column (no workflow restrictions in v1); a blocked task is a UI warning, not a hard stop.
+- [x] **3.8 API error handling & response conventions** (orig #13): `{"error": {"code", "message"}}` envelope
+- [x] **3.9 API documentation** (orig #14): OpenAPI + Swagger UI. **Standing rule:** every new endpoint ships with its `#[utoipa::path]` annotation.
+
+### Gaps found in review (new)
+
+- [ ] **3.10 Pagination & filtering** on list endpoints, agreed before the UI depends on the current shape
+- [ ] **3.11 Assignees and owners:** task assignee; goal and milestone owner (domain, migration, API)
+- [ ] **3.12 Task comments:** domain type, table, endpoints (needed by the task detail view)
+- [ ] **3.13 Status computation** (D12): Milestone status from task completion, percent complete and target dates; Goal status from its milestones (wire up `compute_status_from_milestones`).
+  - Always compute the automatic status, even when an override is active, and expose both the effective status and the computed status so the UI can show "manually set to At Risk (automatic: On Track)".
+  - A goal's rollup uses its milestones' **effective** status (what people see, including overrides).
+- [ ] **3.14 Progress snapshots** (D5): daily scheduled sweep plus an immediate snapshot whenever staff manually change a status.
+  - The sweep runs inside the API process and is guarded by a Postgres advisory lock so only one node runs it (no Redis or extra worker container needed).
+  - Snapshots record the effective status; no per-task-edit snapshots.
+- [ ] **3.15 Dashboard API:** rollup counts by status, progress trend series from snapshots, timeline data (goals and milestones against target dates); flags items whose status is manually set
+- [ ] **3.16 Pagination-safe list ordering:** deterministic default ordering for tasks (target date, then created date), since v1 has no manual card ordering
+
+---
+
+## Milestone 4: Frontend: Goal & Task Management
+
+Goal: teaching staff can manage day-to-day work. Built on the M6 shell.
+
+- [ ] **4.1 Task board UI** (orig #15): Backlog / To Do / In Progress / Done, drag and drop using the status `PATCH` (3.7); cards ordered by target date then created date; blocked tasks show a warning
+- [ ] **4.2 Task detail view** (orig #16): edit fields, assignee, relations, comments
+- [ ] **4.3 Milestone view** (orig #17): list and detail with linked tasks and goals
+- [ ] **4.4 Goals list/detail and status override UI** (new): create and edit goals, link milestones, set or clear a status override, show automatic vs effective status
+- [ ] **4.5 "My tasks" view** (new): tasks assigned to the signed-in user, answering "what do I need to do today"
+
+---
+
+## Milestone 5: Frontend: Reporting Dashboard
+
+Goal: leadership and board audiences get the goal-progress view this project is built around.
+
+- [ ] **5.1 Status rollup view** (orig #18): On Track / At Risk / Off Track / Complete counts at a glance, with manually set statuses flagged
+- [ ] **5.2 Progress trend charts** (orig #19): from `ProgressSnapshot` history
+- [ ] **5.3 Timeline view** (orig #20): goals and milestones against target dates
+
+---
+
+## Milestone 6: Frontend: Application Shell & UX
+
+Goal: replace the SvelteKit scaffold with a real app a non-technical user can navigate. Executed before M4.
+
+- [ ] **6.1 Same-origin browser-to-API setup** (new, D7): one public origin; the reverse proxy routes `/api/*` to the server and everything else to the web container.
+  - Vite dev proxy for `bun run dev`
+  - SvelteKit server-side loads call the API over the internal URL and forward the session cookie
+  - `server.web_base_url` is the public origin; the OIDC redirect URL is that origin plus `/api/auth/oidc/callback`
+- [ ] **6.2 Design system baseline** (orig #23): typography, colour, component conventions; includes an accessibility and mobile baseline (new)
+- [ ] **6.3 Navigation & app shell** (orig #22): real layout replacing the scaffold
+- [ ] **6.4 Auth UI** (orig #21): login, accept-invite and password-reset screens, plus the OIDC option alongside password (driven by `/api/auth/providers`). No public signup screen (D1).
+- [ ] **6.5 Admin screens** (new): user list and role management, invite creation with copyable link (2.6), SSO group-to-role mapping (2.7), showing "managed by SSO" roles as read-only
+
+---
+
+## Milestone 7: Infrastructure & Deployment
+
+Goal: easy to self-host and scales horizontally.
+
+- [ ] **7.1 Object storage integration** (orig #24): S3 trait abstraction, RustFS default, works unmodified against AWS S3, MinIO, R2
+  - [ ] Attachment domain type, table and endpoints (new; nothing models attachments yet)
+- [x] **7.2 Redis-backed caching** (orig #25): closed. Sessions are done (Redis or Postgres, see 2.1). Query caching is not needed for v1 and moved to Future releases (D11). Redis also backs rate limiting (2.8).
+- [ ] **7.3 Email delivery** (orig #26): swappable SMTP/provider abstraction used to send invite and reset links. Optional: the app works fully without SMTP (D3). Status-change alerts are a later addition on top of the same abstraction.
+- [ ] **7.4 Production Docker Compose / Helm chart** (orig #27): beyond the dev compose file; includes a reference Caddy service doing same-origin routing (6.1), `server.cookie_secure = true` guidance, and an example of mounting `minerva.toml` (Swarm config / Kubernetes ConfigMap) with secrets via env or `*_file`
+- [ ] ~~CI pipeline~~ (orig #28): moved to **0.2**
+- [ ] **7.5 Backup & restore documentation** (new): Postgres and object storage, for self-hosters
+
+---
+
+## Milestone 8: v1 Release Polish
+
+Goal: ship it.
+
+- [ ] **8.1 Elastic License 2.0 text finalised** (orig #29): replace the `LICENSE` placeholder
+- [ ] **8.2 Onboarding / first-run setup flow** (orig #30): minimise config friction (`minerva.toml`, bootstrap admin, SMTP, S3, Redis, OIDC), including guided Authentik and generic OIDC setup docs
+- [ ] **8.3 Seed / demo data script** (orig #31): for evaluators and school IT staff
+- [ ] **8.4 Test coverage targets** (orig #32): decide what "enough" looks like per layer
+- [ ] **8.5 Security review pass** (new): cookie flags in production, CSRF posture (SameSite=Lax plus JSON-only endpoints, same-origin), rate limits, dependency audit, removal of all `/debug` code
+
+---
+
+## Future releases
+
+Good ideas that are deliberately **not** in v1. Nothing here is planned work until it is moved into a milestone. Add new ideas as they come up.
+
+- **Activity / audit history** (deferred from D9): who changed a status, override, assignment or role, and when
+- **Export / printable reports** (deferred from D10): PDF or CSV board packs from the dashboard
+- **Query caching** (deferred from D11): revisit only if profiling shows a real need
+- **Manual card ordering within board columns** (from D6): needs a rank column; v1 sorts by target date then created date
+- **Web UI as a standalone executable** (from D14): at the UI stage, investigate whether Bun (for example `bun build --compile`) can package the SvelteKit UI as a single executable. The UI stays a separate service from the API either way.
+- **Configurable CORS allowlist** (`CORS_ALLOWED_ORIGINS`) for alternate frontends on other origins (from D7)
+
+---
+
+## Decisions log
+
+All planning decisions so far. Record new decisions here with their outcome.
+
+| ID | Decision | Outcome |
+|---|---|---|
+| D1 | Signup policy | **Invite-only.** The first account (admin/owner) is created from configuration (originally specified as environment variables; see D13). SSO users simply sign in via the IdP and their account is created automatically. |
+| D2 | Email verification / invites | Email is only used to send an invite link carrying an embedded token tied to that user's invite. No separate signup verification. |
+| D3 | Email delivery without SMTP | If no SMTP credentials are set, an Admin can generate an invite link to share any way they like. |
+| D4 | Blocks / BlockedBy consistency | **Store one canonical row** and derive the other view when reading. |
+| D5 | Snapshot cadence | **Daily scheduled sweep plus an immediate snapshot** on any manual status change. |
+| D6 | Board transitions | **Dedicated `PATCH /api/tasks/{id}/status`** changing only the column. |
+| D7 | Browser-to-API strategy | **Same-origin** behind the reverse proxy (recommendation accepted). |
+| D8 | OIDC groups to roles | **In v1.** Mapping configured by admins in the Admin settings UI. Fallback role is Read-only. If multiple groups match, the least permissive role wins. |
+| D9 | Audit / activity history | **Deferred** to a future release. |
+| D10 | Export / printable reports | **Deferred** to a future release. |
+| D11 | Query caching | **Not in v1** (recommendation accepted); moved to Future releases. |
+| D12 | Manual override semantics | **Sticky** until explicitly cleared. The automatic status is always computed and shown alongside; rollups use effective status. |
+| D13 | Configuration system | **`minerva.toml`** replaces the flat `.env` approach for server settings: typed config with real arrays, and it enables running the binary directly without Docker. Layered as defaults, then file, then env overrides, so Docker users can still use env vars only. `MINERVA_` prefix with `__` nesting plus `DATABASE_URL`, `REDIS_URL` and `PORT` aliases (assumed; change if you prefer another scheme). Secrets via env or `*_file`, not the TOML. Runtime-managed settings stay in the database. |
+| D14 | Frontend deployment model | **The web UI is never served from the Rust binary.** Deliberate: the server stays modular so a Swarm or Kubernetes deployment can run multiple web services separately from the rest of the infrastructure, and anyone can omit the Web UI and build their own. Packaging the UI as a single executable (for example via Bun) is investigated later at the UI stage (see Future releases). |
+
+**Open decisions:** none.
+
+---
+
+## Out of scope for v1
+
+Explicitly not planned. Move an item out of this list (and into a milestone) before any work starts on it.
+
+- Multi-tenancy or per-school scoping (single deployment = single school or organisation)
+- Per-project or per-goal permissions (roles are app-wide)
+- SAML or other non-OIDC identity protocols (the provider abstraction in 2.3 keeps the door open)
+- Real-time collaboration and live cursors
+- Native mobile apps (the web UI should be responsive, see 6.2)
+- Serving the web UI from the Rust server (D14): the API and the UI are always separate, independently deployable services
+- Time tracking, billing and resource planning
+- Sprints, epics and other developer-centric constructs (by design; see project principles)
+
+---
+
+## Change log
+
+| Date | Change |
+|---|---|
+| 2026-10-01 | Revised roadmap created from the original 8-milestone breakdown after a full repo review. Added M0; added missing M3 endpoints and supporting items (pagination, assignees/owners, comments, status computation, snapshots, dashboard API, audit); added goal management and "my tasks" to M4; added export to M5; added browser-to-API decision and admin screens to M6; moved CI from M7 to M0; reduced the Redis item to optional query caching; added attachments, backup docs and scheduler lock to M7; added a security pass to M8; recorded M1 done, M2 #5 and #6 done, and the M3 items already complete. |
+| 2026-10-01 | All open decisions resolved (D1 to D12). Added 2.5 (first-admin bootstrap, invite-only signup), 2.6 (invite and reset links, admin-generated link fallback), 2.7 (SSO group-to-role mapping via admin UI). Dropped the pre-hijacking fix and signup email verification from M2. Removed audit history (3.16) and export (5.4) from v1 and created the Future releases section. Closed 7.2 (sessions done, query caching deferred). Merged the scheduler lock (old 7.6) into 3.14. Specified task-relation normalisation (3.6), status `PATCH` (3.7), sticky overrides (3.2, 3.13) and daily snapshot sweep (3.14). Added same-origin setup (6.1). |
+| 2026-10-02 | M0 items 0.1 to 0.6 recorded as merged (0.4 reworded to match what was delivered). Added 0.7 (configuration system, `minerva.toml`) to M0 and made it the next item before 2.3. Added D13 (configuration system) and D14 (web UI is always a separate service). Updated 2.5, 7.4, 8.2 wording to refer to configuration instead of env vars. Added the web UI single-executable investigation to Future releases and the no-UI-in-Rust-binary rule to Out of scope. |
+| 2026-10-02 | 0.7 (configuration system) delivered and ticked: typed, validated config in the `interface` crate (`src/config.rs`) layered as defaults < `minerva.toml` < `DATABASE_URL`/`REDIS_URL`/`PORT` aliases < `MINERVA_*` env vars; `--config`/`MINERVA_CONFIG` discovery; `*_file` secrets redacted from logs and `Debug`; legacy variables warn once at startup. All environment reads moved onto it (`main.rs`, OIDC config, cookie flags); `infrastructure::oidc::OidcConfig` is now a plain struct. Added `minerva.example.toml`, git-ignored `minerva.toml`, reduced `.env.example` to compose-level variables, updated compose and docs. M0 is done; next up is 2.3. |
