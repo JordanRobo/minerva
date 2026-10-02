@@ -20,6 +20,13 @@ chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = { workspace = true }
 uuid = { version = "1", features = ["serde"] }
+# Typed configuration: layering (defaults < minerva.toml < env overrides) and
+# TOML parsing; extraction is plain serde. The `env` feature is deliberately
+# not used — its provider reads the real process environment at extract time,
+# which would force tests to mutate (and serialize on) that environment; the
+# MINERVA_ layer is built from an injectable variable list instead (src/config.rs).
+figment = { version = "0.10", features = ["toml"] }
+url = { workspace = true }
 domain = { path = "../domain" }
 application = { path = "../application" }
 infrastructure = { path = "../infrastructure" }

@@ -53,28 +53,24 @@ services:
         container_name: minerva-server
         environment:
             # Passed through from the environment / --env-file so a .env at
-            # the repo root can override the dev defaults. Unset OIDC_* stay
-            # empty, which is how the server knows OIDC is off.
+            # the repo root can override the dev defaults. These are the only
+            # variables the compose file substitutes; everything else (OIDC,
+            # cookies, migrations) is configured via minerva.toml or
+            # MINERVA_-prefixed variables — see minerva.example.toml.
             PORT: "${PORT:-8080}"
             DATABASE_URL: ${DATABASE_URL:-postgresql://minerva:minerva@postgres:5432/minerva}
             REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-            RUN_MIGRATIONS: ${RUN_MIGRATIONS:-}
-            COOKIE_SECURE: ${COOKIE_SECURE:-}
-            WEB_BASE_URL: ${WEB_BASE_URL:-}
-            OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
-            OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
-            OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
-            OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
-            OIDC_DISPLAY_NAME: ${OIDC_DISPLAY_NAME:-}
-            OIDC_SCOPES: ${OIDC_SCOPES:-}
-            OIDC_GROUPS_CLAIM: ${OIDC_GROUPS_CLAIM:-}
-            OIDC_STATE_SECRET: ${OIDC_STATE_SECRET:-}
-            OIDC_AUTO_CREATE_USERS: ${OIDC_AUTO_CREATE_USERS:-}
+            # S3 object storage; reserved for roadmap item 7.1 (the adapter is
+            # not built yet, so the server ignores these for now).
             S3_ENDPOINT: http://rustfs:9000
             S3_REGION: us-east-1
             S3_BUCKET: minerva
             S3_ACCESS_KEY_ID: minerva
             S3_SECRET_ACCESS_KEY: minerva-dev-secret
+            # Per-setting overrides (highest precedence). To enable OIDC
+            # without a config file, set e.g. in .env:
+            # MINERVA_OIDC__ISSUER_URL=https://auth.example.com/application/o/minerva/
+            # MINERVA_SERVER__WEB_BASE_URL=http://localhost:3010
         ports:
             # Host port 3010 (host 8080 is used by gluetun on the dev machine).
             - "3010:8080"
@@ -83,6 +79,12 @@ services:
                 condition: service_healthy
             redis:
                 condition: service_healthy
+        # Mount a local config file read-only. Commented out because Docker
+        # creates a *directory* for a missing host file, which would then be
+        # found and fail to parse; create minerva.toml first (see
+        # minerva.example.toml) before uncommenting.
+        # volumes:
+        #     - ./minerva.toml:/etc/minerva/minerva.toml:ro
 
     web:
         build:

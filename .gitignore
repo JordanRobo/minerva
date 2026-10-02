@@ -11,7 +11,7 @@ node_modules/
 # graphify knowledge graph (generated locally)
 graphify-out/
 
-# Local planning reference, not part of the repo
-docs/roadmap.md
+# Local server configuration (may contain secrets); see minerva.example.toml
+minerva.toml
 
 *.log

@@ -10,9 +10,10 @@
 //! (connection failure, timeout, 5xx) only warn — discovery is retried lazily
 //! on the next auth call until it succeeds.
 //!
-//! All configuration comes from environment variables. The client secret and
-//! all tokens/codes stay out of logs and error messages: errors carry only
-//! status codes, URLs, and provider-side text.
+//! Configuration arrives as a ready-made [`OidcConfig`]; loading and
+//! validating it is the interface crate's job (see `interface::config`). The
+//! client secret and all tokens/codes stay out of logs and error messages:
+//! errors carry only status codes, URLs, and provider-side text.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -32,97 +33,25 @@ use openidconnect::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Default for `OIDC_DISPLAY_NAME`.
-const DEFAULT_DISPLAY_NAME: &str = "Single sign-on";
-/// Default for `OIDC_SCOPES`.
-const DEFAULT_SCOPES: &str = "openid email profile";
-/// Default for `OIDC_GROUPS_CLAIM`.
-const DEFAULT_GROUPS_CLAIM: &str = "groups";
 /// HTTP timeout for discovery and token-exchange calls.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// OIDC configuration, read entirely from the environment.
-#[derive(Debug, Clone, PartialEq)]
+/// OIDC configuration, built by the caller from validated settings.
 pub struct OidcConfig {
-    /// The provider's issuer URL (`OIDC_ISSUER_URL`); also the discovery base.
+    /// The provider's issuer URL; also the discovery base.
     pub issuer_url: url::Url,
-    /// `OIDC_CLIENT_ID`.
+    /// The client id registered at the provider.
     pub client_id: String,
-    /// `OIDC_CLIENT_SECRET`. Never logged.
+    /// The client secret. Never logged.
     pub client_secret: String,
-    /// `OIDC_REDIRECT_URL`; must match a redirect URI registered at the provider.
+    /// The redirect URI; must match one registered at the provider.
     pub redirect_url: url::Url,
-    /// `OIDC_DISPLAY_NAME`, defaulting to "Single sign-on".
+    /// Name shown in the UI's sign-in list.
     pub display_name: String,
-    /// Requested scopes (`OIDC_SCOPES`, space-separated); always includes `openid`.
+    /// Requested scopes; always includes `openid`.
     pub scopes: Vec<String>,
-    /// ID-token claim holding the user's groups (`OIDC_GROUPS_CLAIM`).
+    /// ID-token claim holding the user's groups.
     pub groups_claim: String,
-}
-
-impl OidcConfig {
-    /// Read the OIDC configuration from environment variables.
-    ///
-    /// `OIDC_ISSUER_URL` unset or empty means "OIDC disabled" and yields
-    /// `Ok(None)`. Once the issuer is set, the other required variables must
-    /// be too; a missing one — or an unparseable URL — is an `Err` that names
-    /// the offending variable. (Compose passes unset vars through as empty
-    /// strings, so an empty string means unset throughout.)
-    pub fn from_env() -> Result<Option<OidcConfig>, String> {
-        Self::from_lookup(|key| std::env::var(key).ok())
-    }
-
-    /// The real parser, over an injectable lookup so tests never touch the
-    /// process environment (and thus cannot race each other).
-    pub(crate) fn from_lookup(
-        mut lookup: impl FnMut(&str) -> Option<String>,
-    ) -> Result<Option<OidcConfig>, String> {
-        let Some(issuer_raw) = non_empty(&mut lookup, "OIDC_ISSUER_URL") else {
-            return Ok(None);
-        };
-
-        Ok(Some(OidcConfig {
-            issuer_url: parse_url("OIDC_ISSUER_URL", &issuer_raw)?,
-            client_id: required(&mut lookup, "OIDC_CLIENT_ID")?,
-            client_secret: required(&mut lookup, "OIDC_CLIENT_SECRET")?,
-            redirect_url: parse_url(
-                "OIDC_REDIRECT_URL",
-                &required(&mut lookup, "OIDC_REDIRECT_URL")?,
-            )?,
-            display_name: non_empty(&mut lookup, "OIDC_DISPLAY_NAME")
-                .unwrap_or_else(|| DEFAULT_DISPLAY_NAME.to_owned()),
-            scopes: parse_scopes(
-                non_empty(&mut lookup, "OIDC_SCOPES")
-                    .as_deref()
-                    .unwrap_or(DEFAULT_SCOPES),
-            ),
-            groups_claim: non_empty(&mut lookup, "OIDC_GROUPS_CLAIM")
-                .unwrap_or_else(|| DEFAULT_GROUPS_CLAIM.to_owned()),
-        }))
-    }
-}
-
-/// A variable that must be set once OIDC is enabled.
-fn required(lookup: &mut impl FnMut(&str) -> Option<String>, key: &str) -> Result<String, String> {
-    non_empty(lookup, key).ok_or_else(|| format!("{key} must be set when OIDC_ISSUER_URL is set"))
-}
-
-/// A variable whose empty string means "unset".
-fn non_empty(lookup: &mut impl FnMut(&str) -> Option<String>, key: &str) -> Option<String> {
-    lookup(key).filter(|value| !value.trim().is_empty())
-}
-
-fn parse_url(key: &str, raw: &str) -> Result<url::Url, String> {
-    url::Url::parse(raw).map_err(|err| format!("{key} is not a valid URL ({raw:?}): {err}"))
-}
-
-/// Split a space-separated scope list, making sure `openid` is always present.
-fn parse_scopes(raw: &str) -> Vec<String> {
-    let mut scopes: Vec<String> = raw.split_whitespace().map(str::to_owned).collect();
-    if !scopes.iter().any(|scope| scope == "openid") {
-        scopes.insert(0, "openid".to_owned());
-    }
-    scopes
 }
 
 /// The client type `from_provider_metadata` produces: the authorization
@@ -397,120 +326,6 @@ impl OidcProvider for OpenIdConnectProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn lookup_from(pairs: &[(&str, &str)]) -> impl FnMut(&str) -> Option<String> {
-        move |key: &str| {
-            pairs
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| (*v).to_owned())
-        }
-    }
-
-    const FULL_ENV: [(&str, &str); 4] = [
-        ("OIDC_ISSUER_URL", "https://idp.example"),
-        ("OIDC_CLIENT_ID", "client-id"),
-        ("OIDC_CLIENT_SECRET", "secret"),
-        ("OIDC_REDIRECT_URL", "https://app.example/oidc/callback"),
-    ];
-
-    #[test]
-    fn from_lookup_disabled_when_issuer_unset_or_empty() {
-        assert_eq!(OidcConfig::from_lookup(lookup_from(&[])), Ok(None));
-        assert_eq!(
-            OidcConfig::from_lookup(lookup_from(&[("OIDC_ISSUER_URL", "")])),
-            Ok(None)
-        );
-        assert_eq!(
-            OidcConfig::from_lookup(lookup_from(&[("OIDC_ISSUER_URL", "   ")])),
-            Ok(None)
-        );
-    }
-
-    #[test]
-    fn from_lookup_requires_every_variable_once_issuer_is_set() {
-        for missing in ["OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URL"] {
-            let pairs: Vec<(&str, &str)> = FULL_ENV
-                .iter()
-                .copied()
-                .filter(|(key, _)| *key != missing)
-                .collect();
-            let err = OidcConfig::from_lookup(lookup_from(&pairs)).unwrap_err();
-            assert!(err.contains(missing), "error should name {missing}: {err}");
-        }
-    }
-
-    #[test]
-    fn from_lookup_rejects_unparseable_urls() {
-        let pairs = [
-            ("OIDC_ISSUER_URL", "not a url"),
-            ("OIDC_CLIENT_ID", "client-id"),
-            ("OIDC_CLIENT_SECRET", "secret"),
-            ("OIDC_REDIRECT_URL", "https://app.example/oidc/callback"),
-        ];
-        let err = OidcConfig::from_lookup(lookup_from(&pairs)).unwrap_err();
-        assert!(err.contains("OIDC_ISSUER_URL"), "{err}");
-
-        let pairs = [
-            ("OIDC_ISSUER_URL", "https://idp.example"),
-            ("OIDC_CLIENT_ID", "client-id"),
-            ("OIDC_CLIENT_SECRET", "secret"),
-            ("OIDC_REDIRECT_URL", "not a url"),
-        ];
-        let err = OidcConfig::from_lookup(lookup_from(&pairs)).unwrap_err();
-        assert!(err.contains("OIDC_REDIRECT_URL"), "{err}");
-    }
-
-    #[test]
-    fn from_lookup_applies_defaults() {
-        let config = OidcConfig::from_lookup(lookup_from(&FULL_ENV))
-            .unwrap()
-            .expect("config");
-        assert_eq!(config.display_name, DEFAULT_DISPLAY_NAME);
-        assert_eq!(
-            config.scopes,
-            vec![
-                "openid".to_owned(),
-                "email".to_owned(),
-                "profile".to_owned()
-            ]
-        );
-        assert_eq!(config.groups_claim, DEFAULT_GROUPS_CLAIM);
-    }
-
-    #[test]
-    fn from_lookup_always_keeps_openid_scope() {
-        let pairs: [(&str, &str); 5] = [
-            FULL_ENV[0],
-            FULL_ENV[1],
-            FULL_ENV[2],
-            FULL_ENV[3],
-            ("OIDC_SCOPES", "email   profile"),
-        ];
-        let config = OidcConfig::from_lookup(lookup_from(&pairs))
-            .unwrap()
-            .expect("config");
-        assert_eq!(
-            config.scopes,
-            vec![
-                "openid".to_owned(),
-                "email".to_owned(),
-                "profile".to_owned()
-            ]
-        );
-
-        let pairs: [(&str, &str); 5] = [
-            FULL_ENV[0],
-            FULL_ENV[1],
-            FULL_ENV[2],
-            FULL_ENV[3],
-            ("OIDC_SCOPES", "openid email"),
-        ];
-        let config = OidcConfig::from_lookup(lookup_from(&pairs))
-            .unwrap()
-            .expect("config");
-        assert_eq!(config.scopes, vec!["openid".to_owned(), "email".to_owned()]);
-    }
 
     fn extra(claim: &str, value: Value) -> ExtraIdTokenClaims {
         let mut claims = ExtraIdTokenClaims::default();

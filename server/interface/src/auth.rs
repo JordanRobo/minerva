@@ -23,6 +23,16 @@ use uuid::Uuid;
 
 use crate::error::{ApiError, repo_error_response};
 
+/// Cookie attributes shared by the session and OIDC-state cookies. Built from
+/// `server.cookie_secure` in the configuration and registered as `web::Data`.
+#[derive(Debug, Clone, Copy)]
+pub struct CookieSettings {
+    /// Set the `Secure` flag: true once the deployment is served over https;
+    /// false for local http:// development, where browsers would drop a
+    /// Secure cookie.
+    pub secure: bool,
+}
+
 /// Name of the session cookie.
 const COOKIE_NAME: &str = "minerva_session";
 
@@ -142,6 +152,7 @@ where
 pub(crate) async fn issue_session(
     sessions: &web::Data<dyn SessionRepository>,
     user_id: UserId,
+    cookies: &CookieSettings,
 ) -> Result<Cookie<'static>, ApiError> {
     let now = Utc::now();
     let expires_at = now + SESSION_TTL;
@@ -158,18 +169,22 @@ pub(crate) async fn issue_session(
         .create(session)
         .await
         .map_err(repo_error_response)?;
-    Ok(session_cookie(&token, expires_at))
+    Ok(session_cookie(&token, expires_at, cookies))
 }
 
 /// Build the session cookie: HttpOnly so JavaScript cannot read it,
 /// SameSite=Lax as a CSRF baseline, scoped to the whole site, and expiring
-/// with the session. `Secure` is opt-in via `COOKIE_SECURE=true` because
-/// local dev talks plain HTTP (bun run dev -> localhost API), where browsers
-/// would drop a Secure cookie; production must set it.
-fn session_cookie(token: &str, expires_at: DateTime<Utc>) -> Cookie<'static> {
+/// with the session. `Secure` comes from the configuration (server.cookie_secure)
+/// because local dev talks plain HTTP (bun run dev -> localhost API), where
+/// browsers would drop a Secure cookie; production must set it.
+fn session_cookie(
+    token: &str,
+    expires_at: DateTime<Utc>,
+    cookies: &CookieSettings,
+) -> Cookie<'static> {
     let mut cookie = Cookie::new(COOKIE_NAME, "");
     cookie.set_value(token.to_owned());
-    apply_session_attributes(&mut cookie);
+    apply_session_attributes(&mut cookie, cookies);
     // Second precision is all a cookie expiry needs; the unix-timestamp
     // constructor avoids time's chrono feature (not enabled in our tree).
     cookie.set_expires(
@@ -180,18 +195,18 @@ fn session_cookie(token: &str, expires_at: DateTime<Utc>) -> Cookie<'static> {
 
 /// A cookie that makes the browser drop the session (empty value, past
 /// expiry), carrying the same attributes so it matches the original.
-fn clear_cookie() -> Cookie<'static> {
+fn clear_cookie(cookies: &CookieSettings) -> Cookie<'static> {
     let mut cookie = Cookie::new(COOKIE_NAME, "");
-    apply_session_attributes(&mut cookie);
+    apply_session_attributes(&mut cookie, cookies);
     cookie.make_removal();
     cookie
 }
 
-fn apply_session_attributes(cookie: &mut Cookie<'_>) {
+fn apply_session_attributes(cookie: &mut Cookie<'_>, cookies: &CookieSettings) {
     cookie.set_path("/");
     cookie.set_http_only(true);
     cookie.set_same_site(SameSite::Lax);
-    if std::env::var("COOKIE_SECURE").is_ok_and(|value| value.eq_ignore_ascii_case("true")) {
+    if cookies.secure {
         cookie.set_secure(true);
     }
 }
@@ -215,6 +230,7 @@ pub async fn signup(
     users: web::Data<PostgresUserRepository>,
     sessions: web::Data<dyn SessionRepository>,
     password_hasher: web::Data<Argon2PasswordHasher>,
+    cookies: web::Data<CookieSettings>,
     body: web::Json<SignupRequest>,
 ) -> Result<HttpResponse, ApiError> {
     // Normalize once at the boundary: lookups are case-insensitive, so the
@@ -240,7 +256,7 @@ pub async fn signup(
         updated_at: now,
     };
     let user = users.create(user).await.map_err(repo_error_response)?;
-    let cookie = issue_session(&sessions, user.id).await?;
+    let cookie = issue_session(&sessions, user.id, &cookies).await?;
     Ok(HttpResponse::Created()
         .cookie(cookie)
         .json(UserResponse::from(&user)))
@@ -264,6 +280,7 @@ pub async fn login(
     users: web::Data<PostgresUserRepository>,
     sessions: web::Data<dyn SessionRepository>,
     password_hasher: web::Data<Argon2PasswordHasher>,
+    cookies: web::Data<CookieSettings>,
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, ApiError> {
     let email = body.email.trim().to_lowercase();
@@ -289,7 +306,7 @@ pub async fn login(
     if !valid {
         return Err(ApiError::unauthorized());
     }
-    let cookie = issue_session(&sessions, user.id).await?;
+    let cookie = issue_session(&sessions, user.id, &cookies).await?;
     Ok(HttpResponse::Ok()
         .cookie(cookie)
         .json(UserResponse::from(&user)))
@@ -308,6 +325,7 @@ pub async fn login(
 pub async fn logout(
     req: HttpRequest,
     sessions: web::Data<dyn SessionRepository>,
+    cookies: web::Data<CookieSettings>,
 ) -> Result<HttpResponse, ApiError> {
     if let Some(cookie) = req.cookie(COOKIE_NAME) {
         let session = sessions
@@ -321,7 +339,9 @@ pub async fn logout(
                 .map_err(repo_error_response)?;
         }
     }
-    Ok(HttpResponse::NoContent().cookie(clear_cookie()).finish())
+    Ok(HttpResponse::NoContent()
+        .cookie(clear_cookie(&cookies))
+        .finish())
 }
 
 /// Current User
@@ -396,6 +416,7 @@ mod tests {
                     .app_data(web::Data::new(PostgresUserRepository::new(pool.clone())))
                     .app_data(sessions)
                     .app_data(web::Data::new(Argon2PasswordHasher))
+                    .app_data(web::Data::new(CookieSettings { secure: false }))
                     .route("/api/auth/signup", web::post().to(signup))
                     .route("/api/auth/login", web::post().to(login))
                     .route("/api/auth/logout", web::post().to(logout))

@@ -60,19 +60,20 @@ and the web app:
 | Redis    | localhost:6379               |
 | RustFS   | S3 API http://localhost:9000, dashboard http://localhost:9001 |
 
-Configuration lives in a `.env` file at the **repo root**. Copy
-[`.env.example`](.env.example) and pass it explicitly — Compose resolves
-`.env` relative to the compose file's directory (`deploy/`), not the repo
-root:
+The compose stack reads a `.env` file at the **repo root** holding only the
+variables the compose file itself substitutes (`DATABASE_URL`, `PORT`,
+`REDIS_URL`). Copy [`.env.example`](.env.example) and pass it explicitly —
+Compose resolves `.env` relative to the compose file's directory (`deploy/`),
+not the repo root:
 
 ```sh
 cp .env.example .env
 docker compose --env-file .env -f deploy/docker-compose.yml up --build
 ```
 
-Every value in `.env` is optional for local dev: the compose file falls back
-to built-in dev defaults, and OIDC sign-in stays off until you set
-`OIDC_ISSUER_URL`.
+Every value is optional: the compose file falls back to built-in dev
+defaults. Everything else the server reads — OIDC sign-in, cookies,
+migrations — is configured as described in [Configuration](#configuration).
 
 ### Frontend only
 
@@ -94,24 +95,92 @@ DATABASE_URL=postgresql://minerva:minerva@localhost:5432/minerva cargo run -p in
 The port is configurable via the `PORT` environment variable (default 8080).
 Verify with `curl http://localhost:8080/health`.
 
-### Optional: single sign-on (OIDC)
+To run the compiled binary directly instead, build it and point it at a
+config file:
 
-The server can offer OIDC sign-in alongside email/password. Set these in
-`.env` — [`.env.example`](.env.example) lists them all, with defaults:
+```sh
+cargo build --release -p interface
+./server/target/release/minerva-server --config minerva.toml
+```
 
-- `OIDC_ISSUER_URL` — enables OIDC; leave empty to keep it off
-- `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` — the application registered at
+See [Configuration](#configuration) for what goes in that file.
+
+## Configuration
+
+The server reads its settings from one place only: the `interface` crate's
+config module (`server/interface/src/config.rs`). Settings layer from lowest
+to highest precedence:
+
+1. built-in defaults,
+2. an optional TOML file,
+3. the legacy aliases `DATABASE_URL`, `REDIS_URL` and `PORT`,
+4. `MINERVA_`-prefixed environment variables.
+
+### Config file discovery
+
+The server looks for a config file in this order:
+
+1. `--config <path>` (or `--config=<path>`) on the command line — if the
+   named file does not exist, startup fails;
+2. the path in `MINERVA_CONFIG`;
+3. `./minerva.toml` (relative to the working directory);
+4. `/etc/minerva/minerva.toml`.
+
+Locations 3 and 4 are optional: with no file at all the server runs on
+defaults plus environment variables. The startup log says which file was
+loaded (or that none was). [`minerva.example.toml`](minerva.example.toml) at
+the repo root documents every key; copy it to `minerva.toml` and uncomment
+what you need. Every key is optional, unknown keys are rejected by name, and
+an empty or whitespace-only value counts as unset.
+
+### Environment variables
+
+Individual settings can also be set with a `MINERVA_` prefix: the section and
+key are joined with `__`, e.g. `MINERVA_SERVER__PORT=9000` or
+`MINERVA_OIDC__ISSUER_URL=https://auth.example.com`. Keys are
+case-insensitive, and arrays arrive as JSON, e.g.
+`MINERVA_OIDC__SCOPES='["openid","email"]'`. `MINERVA_CONFIG` names the
+config file; it is not a setting.
+
+The old variable names (`OIDC_*`, `COOKIE_SECURE`, `WEB_BASE_URL`,
+`RUN_MIGRATIONS`) are no longer read. If any of them are present at startup,
+the server prints one warning listing each with its replacement.
+
+### Secrets
+
+`database.url`, `redis.url`, `oidc.client_secret` and `oidc.state_secret` may
+come from their key or from a `*_file` sibling holding a path to a file whose
+trimmed contents are the value (the Docker/Kubernetes convention):
+
+```toml
+[database]
+url_file = "/run/secrets/database-url"
+```
+
+Setting both is an error, as is an unreadable file (named in the error, never
+its contents). Secrets are redacted in all logs and `Debug` output.
+
+### Enabling OIDC sign-in
+
+The server can offer OIDC sign-in alongside email/password. It is disabled
+while `oidc.issuer_url` is blank; to enable it, set in `minerva.toml` (or via
+`MINERVA_OIDC__*` and `MINERVA_SERVER__WEB_BASE_URL`):
+
+- `oidc.issuer_url` — enables OIDC; the base of your provider's
+  `/.well-known/openid-configuration`
+- `oidc.client_id` / `oidc.client_secret` — the application registered at
   your provider
-- `OIDC_REDIRECT_URL` — must be exactly `<API base URL>/api/auth/oidc/callback`
+- `oidc.redirect_url` — must be exactly `<API base URL>/api/auth/oidc/callback`
   and registered at the provider; for the dev compose stack that is
   `http://localhost:3010/api/auth/oidc/callback`
-- `OIDC_STATE_SECRET` — at least 32 bytes; generate with `openssl rand -hex 32`
-- `WEB_BASE_URL` — absolute public URL of the API origin, e.g.
+- `oidc.state_secret` — at least 32 bytes; generate with `openssl rand -hex 32`
+- `server.web_base_url` — absolute public URL of the API origin, e.g.
   `http://localhost:3010` for the dev stack
 
-The server fails at startup, naming the variable, if you set
-`OIDC_ISSUER_URL` but forget one of the required ones. It works with any
-standards-compliant OIDC provider; it has been tested with Authentik.
+The server fails at startup, naming every problem it finds, if you set
+`oidc.issuer_url` but leave anything else required missing or invalid. It
+works with any standards-compliant OIDC provider; it has been tested with
+Authentik.
 
 ## License
 
