@@ -1,6 +1,6 @@
-//! Auth HTTP API: the `/api/auth/*` handlers (signup, login, logout, me),
-//! their JSON DTOs, and the [`AuthenticatedUser`] extractor that resolves a
-//! request's session cookie to a logged-in user.
+//! Auth HTTP API: the `/api/auth/*` handlers (signup, login, logout, me,
+//! providers), their JSON DTOs, and the [`AuthenticatedUser`] extractor that
+//! resolves a request's session cookie to a logged-in user.
 //!
 //! Sessions are cookie-based: the client stores a raw token in an HttpOnly
 //! cookie; the server stores only its SHA-256 hash, so a leaked database
@@ -10,7 +10,7 @@ use actix_web::cookie::{Cookie, SameSite, time::OffsetDateTime};
 use actix_web::dev::Payload;
 use actix_web::{FromRequest, HttpRequest, HttpResponse, web};
 use application::auth::password::PASSWORD_PROVIDER_ID;
-use application::auth::provider::{AuthError, AuthProviders, Credentials};
+use application::auth::provider::{AuthError, AuthProviders, Credentials, ProviderKind};
 use application::auth::{SessionService, normalize_email};
 use application::ports::{PasswordHasher, UserRepository};
 use chrono::{DateTime, Utc};
@@ -23,8 +23,9 @@ use uuid::Uuid;
 
 use crate::error::{ApiError, repo_error_response};
 
-/// Cookie attributes shared by the session and OIDC-state cookies. Built from
-/// `server.cookie_secure` in the configuration and registered as `web::Data`.
+/// Cookie attributes shared by the session and redirect-state cookies. Built
+/// from `server.cookie_secure` in the configuration and registered as
+/// `web::Data`.
 #[derive(Debug, Clone, Copy)]
 pub struct CookieSettings {
     /// Set the `Secure` flag: true once the deployment is served over https;
@@ -320,6 +321,56 @@ pub async fn logout(
 )]
 pub async fn me(auth: AuthenticatedUser) -> Result<HttpResponse, ApiError> {
     Ok(HttpResponse::Ok().json(UserResponse::from(&auth.user)))
+}
+
+/// Wire shape of `GET /api/auth/providers`: the registered sign-in methods.
+#[derive(Serialize, ToSchema)]
+pub struct AuthProvidersResponse {
+    pub providers: Vec<ProviderInfoResponse>,
+}
+
+/// One registered provider as listed to clients.
+#[derive(Serialize, ToSchema)]
+pub struct ProviderInfoResponse {
+    /// Stable slug; appears in the login URL.
+    pub id: String,
+    /// Human-readable name for the login screen.
+    pub display_name: String,
+    /// How the provider signs the user in: `credentials` or `redirect`.
+    pub kind: String,
+    /// Where to start a sign-in with this provider.
+    pub login_url: String,
+}
+
+/// Auth Providers
+///
+/// Which sign-in methods this deployment offers, driven by the registered
+/// providers: email/password first, then redirect providers (e.g. OIDC) in
+/// registration order.
+#[utoipa::path(
+    get,
+    path = "/api/auth/providers",
+    tags = ["auth"],
+    responses((status = 200, description = "The available sign-in methods", body = AuthProvidersResponse))
+)]
+pub async fn list_auth_providers(providers: web::Data<AuthProviders>) -> HttpResponse {
+    let providers = providers
+        .list()
+        .into_iter()
+        .map(|info| {
+            let (kind, login_url) = match info.kind {
+                ProviderKind::Credentials => ("credentials", "/api/auth/login".to_owned()),
+                ProviderKind::Redirect => ("redirect", format!("/api/auth/{}/login", info.id)),
+            };
+            ProviderInfoResponse {
+                id: info.id,
+                display_name: info.display_name,
+                kind: kind.to_owned(),
+                login_url,
+            }
+        })
+        .collect();
+    HttpResponse::Ok().json(AuthProvidersResponse { providers })
 }
 
 #[cfg(test)]

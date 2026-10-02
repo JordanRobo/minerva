@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
-use domain::{Session, SessionId, User, UserId};
+use domain::{Session, SessionId, User, UserId, UserIdentity};
 
 use crate::ports::{
     PasswordHashError, PasswordHasher, RepositoryError, SessionRepository, SessionTokens,
-    UserRepository,
+    UserIdentityRepository, UserRepository,
 };
 
 /// A [`SessionRepository`] that keeps sessions in a `HashMap`.
@@ -125,6 +125,57 @@ impl UserRepository for InMemoryUserRepository {
     async fn update(&self, user: User) -> Result<User, RepositoryError> {
         self.locked().insert(user.id, user.clone());
         Ok(user)
+    }
+}
+
+/// A [`UserIdentityRepository`] that keeps identities in a `HashMap` keyed by
+/// (issuer, subject), the pair the port treats as unique: a second create for
+/// the same pair is a `Conflict`, like the real repository's constraint.
+#[derive(Default)]
+pub struct InMemoryUserIdentityRepository {
+    identities: Mutex<HashMap<(String, String), UserIdentity>>,
+}
+
+impl InMemoryUserIdentityRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl InMemoryUserIdentityRepository {
+    fn locked(&self) -> MutexGuard<'_, HashMap<(String, String), UserIdentity>> {
+        self.identities.lock().unwrap()
+    }
+}
+
+#[async_trait::async_trait]
+impl UserIdentityRepository for InMemoryUserIdentityRepository {
+    async fn create(&self, identity: UserIdentity) -> Result<UserIdentity, RepositoryError> {
+        let key = (identity.issuer.clone(), identity.subject.clone());
+        if self.locked().contains_key(&key) {
+            return Err(RepositoryError::Conflict(
+                "an identity with this issuer and subject already exists".to_owned(),
+            ));
+        }
+        self.locked().insert(key, identity.clone());
+        Ok(identity)
+    }
+
+    async fn find_by_issuer_and_subject(
+        &self,
+        issuer: String,
+        subject: String,
+    ) -> Result<Option<UserIdentity>, RepositoryError> {
+        Ok(self.locked().get(&(issuer, subject)).cloned())
+    }
+
+    async fn list_for_user(&self, user_id: UserId) -> Result<Vec<UserIdentity>, RepositoryError> {
+        Ok(self
+            .locked()
+            .values()
+            .filter(|identity| identity.user_id == user_id)
+            .cloned()
+            .collect())
     }
 }
 

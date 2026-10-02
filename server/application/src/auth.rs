@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::ports::{RepositoryError, SessionRepository, SessionTokens};
 
+pub mod oidc;
 pub mod password;
 pub mod provider;
 
