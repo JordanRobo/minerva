@@ -35,6 +35,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::{COOKIE_NAME, CookieSettings};
+use crate::public_routes::PUBLIC_OPERATIONS;
 use crate::routes;
 
 /// The `DATABASE_URL` the tests run against, or `None` to skip.
@@ -441,84 +442,64 @@ async fn public_routes_do_not_require_a_session() {
     let login_user = create_password_user(&pool, unique_email("public-login")).await;
     let signup_email = unique_email("public-signup");
 
-    let cases: Vec<(&str, Method, String, Option<serde_json::Value>, StatusCode)> = vec![
-        (
-            "health",
-            Method::GET,
-            "/health".into(),
-            None,
-            StatusCode::OK,
-        ),
-        (
-            "signup",
-            Method::POST,
-            "/api/auth/signup".into(),
-            Some(serde_json::json!({
-                "email": signup_email,
-                "password": "password123",
-                "display_name": "Public",
-            })),
-            StatusCode::CREATED,
-        ),
-        (
-            "login",
-            Method::POST,
-            "/api/auth/login".into(),
-            Some(serde_json::json!({
-                "email": login_user.email,
-                "password": "password123",
-            })),
-            StatusCode::OK,
-        ),
-        (
-            "logout",
-            Method::POST,
-            "/api/auth/logout".into(),
-            None,
-            StatusCode::NO_CONTENT,
-        ),
-        (
-            "providers",
-            Method::GET,
-            "/api/auth/providers".into(),
-            None,
-            StatusCode::OK,
-        ),
-        // No redirect provider is registered in the test app: the flow routes
-        // must answer 404, not 401.
-        (
-            "redirect login",
-            Method::GET,
-            "/api/auth/oidc/login".into(),
-            None,
-            StatusCode::NOT_FOUND,
-        ),
-        (
-            "redirect callback",
-            Method::GET,
-            "/api/auth/oidc/callback".into(),
-            None,
-            StatusCode::NOT_FOUND,
-        ),
-        (
-            "openapi json",
-            Method::GET,
-            "/api-docs/openapi.json".into(),
-            None,
-            StatusCode::OK,
-        ),
-        (
-            "swagger ui",
-            Method::GET,
-            "/api-docs/swagger-ui/".into(),
-            None,
-            StatusCode::OK,
-        ),
-    ];
+    // The public API operations come from the shared allowlist (the OpenAPI
+    // document test checks the same list); `{provider}` is exercised with
+    // `oidc`. No redirect provider is registered in the test app: the flow
+    // routes must answer 404, not 401.
+    let mut cases: Vec<(Method, String, Option<serde_json::Value>, StatusCode)> = PUBLIC_OPERATIONS
+        .iter()
+        .map(|(method, path)| {
+            let (body, expected) = match *path {
+                "/api/auth/signup" => (
+                    Some(serde_json::json!({
+                        "email": signup_email.clone(),
+                        "password": "password123",
+                        "display_name": "Public",
+                    })),
+                    StatusCode::CREATED,
+                ),
+                "/api/auth/login" => (
+                    Some(serde_json::json!({
+                        "email": login_user.email.clone(),
+                        "password": "password123",
+                    })),
+                    StatusCode::OK,
+                ),
+                "/api/auth/logout" => (None, StatusCode::NO_CONTENT),
+                "/api/auth/providers" => (None, StatusCode::OK),
+                "/api/auth/{provider}/login" | "/api/auth/{provider}/callback" => {
+                    (None, StatusCode::NOT_FOUND)
+                }
+                // The allowlist only holds the routes above.
+                other => panic!("public route {other} has no request details"),
+            };
+            (
+                method.clone(),
+                path.replace("{provider}", "oidc"),
+                body,
+                expected,
+            )
+        })
+        .collect();
 
-    for (name, method, uri, body, expected) in cases {
+    // Public routes that are not OpenAPI operations: no allowlist entry.
+    cases.push((Method::GET, "/health".into(), None, StatusCode::OK));
+    cases.push((
+        Method::GET,
+        "/api-docs/openapi.json".into(),
+        None,
+        StatusCode::OK,
+    ));
+    cases.push((
+        Method::GET,
+        "/api-docs/swagger-ui/".into(),
+        None,
+        StatusCode::OK,
+    ));
+
+    for (method, uri, body, expected) in cases {
         let res = request!(&app, method, uri, None, body.as_ref());
-        assert_eq!(res.status(), expected, "{name}: {method} {uri}");
+        assert_eq!(res.status(), expected, "{method} {uri}");
     }
 
     // The two routes that create users clean up after themselves.

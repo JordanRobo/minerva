@@ -59,14 +59,18 @@ pub struct MilestoneRequest {
 /// Create Milestone
 ///
 /// Create a new milestone - a measurable step toward a goal.
+/// Requires the Staff or Admin role.
 #[utoipa::path(
     post,
     path = "/api/milestones",
     tags = ["milestones"],
+    security(("session_cookie" = [])),
     request_body = MilestoneRequest,
     responses(
         (status = 201, description = "Milestone created", body = MilestoneResponse),
-        (status = 400, description = "Title is missing or blank", body = ApiError)
+        (status = 400, description = "Title is missing or blank", body = ApiError),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError)
     )
 )]
 pub async fn create_milestone(
@@ -95,12 +99,16 @@ pub async fn create_milestone(
 
 /// List all Milestones
 ///
-/// List every milestone, across all statuses.
+/// List every milestone, across all statuses. Any signed-in user may read.
 #[utoipa::path(
     get,
     path = "/api/milestones",
     tags = ["milestones"],
-    responses((status = 200, description = "All milestones", body = Vec<MilestoneResponse>))
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, description = "All milestones", body = Vec<MilestoneResponse>),
+        (status = 401, description = "Missing or invalid session", body = ApiError)
+    )
 )]
 pub async fn list_milestones(
     milestones: web::Data<PostgresMilestoneRepository>,
@@ -119,14 +127,16 @@ pub async fn list_milestones(
 
 /// Get Individual Milestone
 ///
-/// Fetch a single milestone by its ID.
+/// Fetch a single milestone by its ID. Any signed-in user may read.
 #[utoipa::path(
     get,
     path = "/api/milestones/{id}",
     tags = ["milestones"],
+    security(("session_cookie" = [])),
     params(("id" = Uuid, Path, description = "Milestone identifier")),
     responses(
         (status = 200, description = "The milestone", body = MilestoneResponse),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
         (status = 404, description = "No milestone with this id", body = ApiError)
     )
 )]
@@ -145,15 +155,19 @@ pub async fn get_milestone(
 /// Update Milestone
 ///
 /// Update a milestone's title, description, or target date. Status and timestamps are managed by the server.
+/// Requires the Staff or Admin role.
 #[utoipa::path(
     put,
     path = "/api/milestones/{id}",
     tags = ["milestones"],
+    security(("session_cookie" = [])),
     params(("id" = Uuid, Path, description = "Milestone identifier")),
     request_body = MilestoneRequest,
     responses(
         (status = 200, description = "The updated milestone", body = MilestoneResponse),
         (status = 400, description = "Title is missing or blank", body = ApiError),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
         (status = 404, description = "No milestone with this id", body = ApiError)
     )
 )]
@@ -191,13 +205,17 @@ pub async fn update_milestone(
 /// Delete Milestone
 ///
 /// Delete a milestone. Tasks assigned to it become unassigned rather than being deleted.
+/// Requires the Staff or Admin role.
 #[utoipa::path(
     delete,
     path = "/api/milestones/{id}",
     tags = ["milestones"],
+    security(("session_cookie" = [])),
     params(("id" = Uuid, Path, description = "Milestone identifier")),
     responses(
         (status = 204, description = "Milestone deleted"),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
         (status = 404, description = "No milestone with this id", body = ApiError)
     )
 )]

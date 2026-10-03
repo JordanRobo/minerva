@@ -327,11 +327,12 @@ pub async fn logout(
 
 /// Current User
 ///
-/// The user behind the request's session cookie.
+/// The user behind the request's session cookie. Any signed-in user may call it.
 #[utoipa::path(
     get,
     path = "/api/auth/me",
     tags = ["auth"],
+    security(("session_cookie" = [])),
     responses(
         (status = 200, description = "The authenticated user", body = UserResponse),
         (status = 401, description = "Missing or invalid session", body = ApiError)

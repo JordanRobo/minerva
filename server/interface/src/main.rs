@@ -13,6 +13,9 @@ mod tasks;
 #[cfg(test)]
 mod access_tests;
 
+#[cfg(test)]
+mod public_routes;
+
 use actix_web::cookie::Key;
 use actix_web::{App, HttpServer, web};
 use application::auth::SessionService;

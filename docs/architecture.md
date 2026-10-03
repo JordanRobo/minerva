@@ -142,4 +142,8 @@ The `interface` crate generates an OpenAPI 3 document from code annotations
 Under Docker compose the API is mapped to host port 3010, so use
 http://localhost:3010/api-docs/swagger-ui/ there. All `/api/*` endpoints
 (auth, goals, milestones, tasks) are documented; the temporary `/debug/*`
-routes are not.
+routes are not. Protected endpoints declare the `session_cookie` security
+scheme (the session cookie as an API key, registered by a `utoipa::Modify`
+addon in `interface/src/openapi.rs`) so Swagger UI's Authorize button can
+fill it in; a document test keeps every operation's security requirement and
+401/403 responses in sync with the access rules (see "Authorization").

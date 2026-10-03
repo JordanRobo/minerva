@@ -58,14 +58,18 @@ pub struct GoalRequest {
 /// Create Goal
 ///
 /// Create a new goal - a strategic outcome the school is working toward.
+/// Requires the Staff or Admin role.
 #[utoipa::path(
     post,
     path = "/api/goals",
     tags = ["goals"],
+    security(("session_cookie" = [])),
     request_body = GoalRequest,
     responses(
         (status = 201, description = "Goal created", body = GoalResponse),
-        (status = 400, description = "Title is missing or blank", body = ApiError)
+        (status = 400, description = "Title is missing or blank", body = ApiError),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError)
     )
 )]
 pub async fn create_goal(
@@ -95,12 +99,16 @@ pub async fn create_goal(
 
 /// List Goals
 ///
-/// List every goal, across all statuses.
+/// List every goal, across all statuses. Any signed-in user may read.
 #[utoipa::path(
     get,
     path = "/api/goals",
     tags = ["goals"],
-    responses((status = 200, description = "All goals", body = Vec<GoalResponse>))
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, description = "All goals", body = Vec<GoalResponse>),
+        (status = 401, description = "Missing or invalid session", body = ApiError)
+    )
 )]
 pub async fn list_goals(
     goals: web::Data<PostgresGoalRepository>,
@@ -116,14 +124,16 @@ pub async fn list_goals(
 
 /// Get Individual Goal
 ///
-/// Fetch a single goal by its ID.
+/// Fetch a single goal by its ID. Any signed-in user may read.
 #[utoipa::path(
     get,
     path = "/api/goals/{id}",
     tags = ["goals"],
+    security(("session_cookie" = [])),
     params(("id" = Uuid, Path, description = "Goal identifier")),
     responses(
         (status = 200, description = "The goal", body = GoalResponse),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
         (status = 404, description = "No goal with this id", body = ApiError)
     )
 )]
@@ -142,15 +152,19 @@ pub async fn get_goal(
 /// Update Goal
 ///
 /// Update a goal's title, description, or target date. Status and timestamps are managed by the server.
+/// Requires the Staff or Admin role.
 #[utoipa::path(
     put,
     path = "/api/goals/{id}",
     tags = ["goals"],
+    security(("session_cookie" = [])),
     params(("id" = Uuid, Path, description = "Goal identifier")),
     request_body = GoalRequest,
     responses(
         (status = 200, description = "The updated goal", body = GoalResponse),
         (status = 400, description = "Title is missing or blank", body = ApiError),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
         (status = 404, description = "No goal with this id", body = ApiError)
     )
 )]
@@ -188,13 +202,17 @@ pub async fn update_goal(
 /// Delete Goal
 ///
 /// Delete a goal, including its links to any milestones.
+/// Requires the Staff or Admin role.
 #[utoipa::path(
     delete,
     path = "/api/goals/{id}",
     tags = ["goals"],
+    security(("session_cookie" = [])),
     params(("id" = Uuid, Path, description = "Goal identifier")),
     responses(
         (status = 204, description = "Goal deleted"),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
         (status = 404, description = "No goal with this id", body = ApiError)
     )
 )]
