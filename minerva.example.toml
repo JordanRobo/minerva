@@ -87,3 +87,22 @@
 # Create an account for first-time SSO logins (default: true); set false to
 # only allow sign-in with existing accounts.
 #auto_create_users = true
+
+[bootstrap]
+# First-admin bootstrap: while the database has no users at all, the server
+# creates this admin account once at startup and prints a log line about it.
+# Once any user exists, these keys do nothing — they never reset an existing
+# password or change an existing account. Blank admin_email disables it.
+
+# Email of the first admin (blank = disabled).
+#admin_email = "admin@example.com"
+
+# Display name of the first admin (default: "Administrator").
+#admin_display_name = "Administrator"
+
+# Password of the first admin; at least 8 characters. Never commit a real
+# one: set it via the MINERVA_BOOTSTRAP__ADMIN_PASSWORD environment variable
+# or admin_password_file, not in a committed file.
+#admin_password = "change-me"
+
+#admin_password_file = "/run/secrets/bootstrap-admin-password"

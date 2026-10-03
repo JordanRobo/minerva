@@ -252,7 +252,6 @@ mod tests {
                 Arc::new(PostgresUserRepository::new(pool.clone()));
             let hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
             let users_data: web::Data<dyn UserRepository> = users.clone().into();
-            let hasher_data: web::Data<dyn PasswordHasher> = hasher.clone().into();
             // The login route resolves providers by id, mirroring `main.rs`.
             let providers = web::Data::new(
                 AuthProviders::new(
@@ -292,7 +291,6 @@ mod tests {
                         session_service,
                     )))
                     .app_data(providers)
-                    .app_data(hasher_data)
                     .app_data(web::Data::new(CookieSettings { secure: false }))
                     .configure(routes::configure),
             )

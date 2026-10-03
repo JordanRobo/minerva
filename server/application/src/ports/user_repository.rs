@@ -37,6 +37,13 @@ impl From<RepositoryError> for AccessChangeError {
 pub trait UserRepository: Send + Sync {
     async fn create(&self, user: User) -> Result<User, RepositoryError>;
 
+    /// Insert `user` only if the users table is completely empty, atomically:
+    /// implementations count the rows and insert under a lock in one
+    /// transaction, so two concurrent first-admin attempts cannot both win.
+    /// Returns `Some(user)` when it inserted, `None` when any user already
+    /// exists — deactivated or passwordless ones count too.
+    async fn create_if_no_users(&self, user: User) -> Result<Option<User>, RepositoryError>;
+
     /// Returns `None` if no user has this id.
     async fn find_by_id(&self, id: UserId) -> Result<Option<User>, RepositoryError>;
 

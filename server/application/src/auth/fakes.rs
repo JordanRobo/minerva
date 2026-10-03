@@ -105,6 +105,18 @@ impl UserRepository for InMemoryUserRepository {
         Ok(user)
     }
 
+    async fn create_if_no_users(&self, user: User) -> Result<Option<User>, RepositoryError> {
+        // The mutex plays the part of the Postgres advisory lock: the count
+        // and the insert happen under it, so a concurrent call cannot slip in
+        // between them.
+        let mut users = self.locked();
+        if !users.is_empty() {
+            return Ok(None);
+        }
+        users.insert(user.id, user.clone());
+        Ok(Some(user))
+    }
+
     async fn find_by_id(&self, id: UserId) -> Result<Option<User>, RepositoryError> {
         Ok(self.locked().get(&id).cloned())
     }
@@ -285,6 +297,12 @@ pub struct FailingUserRepository;
 #[async_trait::async_trait]
 impl UserRepository for FailingUserRepository {
     async fn create(&self, _user: User) -> Result<User, RepositoryError> {
+        Err(RepositoryError::Unexpected(
+            "faking a repository failure".to_owned(),
+        ))
+    }
+
+    async fn create_if_no_users(&self, _user: User) -> Result<Option<User>, RepositoryError> {
         Err(RepositoryError::Unexpected(
             "faking a repository failure".to_owned(),
         ))

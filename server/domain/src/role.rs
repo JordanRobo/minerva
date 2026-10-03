@@ -54,8 +54,8 @@ impl Role {
     }
 }
 
-/// The role given to newly created accounts: open signup today, and the SSO
-/// fallback in roadmap 2.7 reuses it.
+/// The role given to newly created accounts: SSO auto-creation today, and
+/// the fallback role in roadmap 2.7's group-to-role mapping reuses it.
 pub const DEFAULT_NEW_USER_ROLE: Role = Role::ReadOnly;
 
 #[cfg(test)]

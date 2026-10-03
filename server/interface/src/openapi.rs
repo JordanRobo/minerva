@@ -85,14 +85,13 @@ pub struct GoalStatusDoc {
     ),
     modifiers(&SessionCookieSecurity),
     tags(
-        (name = "auth", description = "Authentication: account creation, login, logout, and the current user."),
+        (name = "auth", description = "Authentication: login, logout, and the current user."),
         (name = "goals", description = "Goals: the top-level outcomes a school works toward."),
         (name = "milestones", description = "Milestones: dated checkpoints within a goal."),
         (name = "tasks", description = "Tasks: day-to-day work, optionally attached to a milestone."),
         (name = "users", description = "User administration: roles and active state. Admin only."),
     ),
     paths(
-        crate::auth::signup,
         crate::auth::login,
         crate::auth::logout,
         crate::auth::me,
@@ -122,7 +121,6 @@ pub struct GoalStatusDoc {
     components(schemas(
         crate::error::ApiError,
         crate::auth::LoginRequest,
-        crate::auth::SignupRequest,
         crate::auth::UserResponse,
         crate::auth::AuthProvidersResponse,
         crate::auth::ProviderInfoResponse,

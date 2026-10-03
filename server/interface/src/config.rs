@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use application::bootstrap::MIN_PASSWORD_LENGTH;
 use figment::Figment;
 use figment::providers::{Format, Serialized, Toml};
 use serde::Deserialize;
@@ -71,12 +72,19 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub oidc: OidcConfig,
+    pub bootstrap: BootstrapConfig,
 }
 
 impl Config {
     /// OIDC sign-in is enabled exactly when `oidc.issuer_url` is non-blank.
     pub fn oidc_enabled(&self) -> bool {
         !self.oidc.issuer_url.trim().is_empty()
+    }
+
+    /// First-admin bootstrap is enabled exactly when
+    /// `bootstrap.admin_email` is non-blank.
+    pub fn bootstrap_enabled(&self) -> bool {
+        !self.bootstrap.admin_email.trim().is_empty()
     }
 }
 
@@ -204,6 +212,41 @@ fn default_scopes() -> Vec<String> {
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BootstrapConfig {
+    /// Email of the first admin; blank means bootstrap is disabled.
+    pub admin_email: String,
+    /// Display name of the first admin (default "Administrator"); a blank
+    /// value falls back to the default after a successful load.
+    pub admin_display_name: String,
+    /// Password of the first admin; required when `admin_email` is set, at
+    /// least 8 characters. Never commit a real one: set it via the
+    /// MINERVA_BOOTSTRAP__ADMIN_PASSWORD environment variable or
+    /// `admin_password_file`.
+    pub admin_password: Secret,
+    /// Path to a file containing the password (trimmed). Consumed by the
+    /// loader; always blank after a successful load.
+    admin_password_file: String,
+}
+
+// Manual `Default` for the same reason as the other sections: missing fields
+// are filled from it, and a derived default would leave the display name
+// blank instead of "Administrator".
+impl Default for BootstrapConfig {
+    fn default() -> Self {
+        Self {
+            admin_email: String::new(),
+            admin_display_name: DEFAULT_BOOTSTRAP_DISPLAY_NAME.to_owned(),
+            admin_password: Secret::default(),
+            admin_password_file: String::new(),
+        }
+    }
+}
+
+/// Default for `bootstrap.admin_display_name`.
+const DEFAULT_BOOTSTRAP_DISPLAY_NAME: &str = "Administrator";
+
 impl Config {
     /// Replace each `*_file` secret with the trimmed contents of its file.
     /// Setting both a value and its file, or an unreadable file, is recorded
@@ -233,6 +276,12 @@ impl Config {
             &mut self.oidc.state_secret_file,
             problems,
         );
+        resolve_one(
+            "bootstrap.admin_password",
+            &mut self.bootstrap.admin_password,
+            &mut self.bootstrap.admin_password_file,
+            problems,
+        );
     }
 
     /// Fill in what a blank value stands for: an empty `display_name` falls
@@ -251,6 +300,9 @@ impl Config {
         if !self.oidc.scopes.iter().any(|scope| scope == "openid") {
             self.oidc.scopes.insert(0, "openid".to_owned());
         }
+        if self.bootstrap.admin_display_name.trim().is_empty() {
+            self.bootstrap.admin_display_name = DEFAULT_BOOTSTRAP_DISPLAY_NAME.to_owned();
+        }
     }
 
     /// Every rule, checked together: all problems come back in one list so a
@@ -260,6 +312,31 @@ impl Config {
         let mut problems = Vec::new();
         if self.database.url.expose().trim().is_empty() {
             problems.push("database.url is required".to_owned());
+        }
+        // Bootstrap is independent of OIDC, so it is checked before the early
+        // return below: a fresh deployment usually has neither configured.
+        if self.bootstrap_enabled() {
+            if let Some(why) = valid_email(&self.bootstrap.admin_email) {
+                problems.push(format!(
+                    "bootstrap.admin_email is not a valid email address: {why}"
+                ));
+            }
+            match self.bootstrap.admin_password.expose() {
+                password if password.trim().is_empty() => problems.push(
+                    "bootstrap.admin_password is required when bootstrap.admin_email is set"
+                        .to_owned(),
+                ),
+                password if password.chars().count() < MIN_PASSWORD_LENGTH => {
+                    problems.push(format!(
+                        "bootstrap.admin_password must be at least {MIN_PASSWORD_LENGTH} characters"
+                    ))
+                }
+                _ => {}
+            }
+        } else if !self.bootstrap.admin_password.expose().trim().is_empty() {
+            problems.push(
+                "bootstrap.admin_email is required when bootstrap.admin_password is set".to_owned(),
+            );
         }
         if !self.oidc_enabled() {
             return problems;
@@ -323,6 +400,21 @@ fn resolve_one(key: &str, value: &mut Secret, file: &mut String, problems: &mut 
         }
     }
     file.clear();
+}
+
+/// A minimal email shape check for configuration input: exactly one '@' with
+/// a non-empty local part and domain.
+/// Returns the first problem found, if any.
+fn valid_email(raw: &str) -> Option<String> {
+    let email = raw.trim();
+    if email.matches('@').count() != 1 {
+        return Some("exactly one '@' is required".to_owned());
+    }
+    let (local, domain) = email.split_once('@').expect("checked above");
+    if local.is_empty() || domain.is_empty() {
+        return Some("the parts before and after the '@' must not be empty".to_owned());
+    }
+    None
 }
 
 /// An absolute http(s) URL with any trailing slash stripped, so redirects can
@@ -620,6 +712,9 @@ mod tests {
         assert_eq!(config.server.web_base_url, "");
         assert_eq!(config.redis.url.expose(), "");
         assert!(!config.oidc_enabled());
+        // No [bootstrap] section: disabled, and the exact problems list above
+        // proves no bootstrap problem was invented.
+        assert!(!config.bootstrap_enabled());
         assert_eq!(config.oidc.display_name, DEFAULT_DISPLAY_NAME);
         assert_eq!(
             config.oidc.scopes,
@@ -871,8 +966,210 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_loads_email_and_password_from_toml() {
+        let toml = format!(
+            "{DB_TOML}[bootstrap]\n\
+             admin_email = \"root@example.com\"\n\
+             admin_password = \"long-enough-password\"\n"
+        );
+        let (config, problems) = sources(Some(&toml), &[], &[]).expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(config.bootstrap_enabled());
+        assert_eq!(config.bootstrap.admin_email, "root@example.com");
+        assert_eq!(
+            config.bootstrap.admin_password.expose(),
+            "long-enough-password"
+        );
+        // The display name defaults even when the section is present.
+        assert_eq!(
+            config.bootstrap.admin_display_name,
+            DEFAULT_BOOTSTRAP_DISPLAY_NAME
+        );
+    }
+
+    #[test]
+    fn bootstrap_password_comes_from_the_env_layer() {
+        let (config, problems) = sources(
+            Some(DB_TOML),
+            &[],
+            &[
+                ("MINERVA_BOOTSTRAP__ADMIN_EMAIL", "root@example.com"),
+                ("MINERVA_BOOTSTRAP__ADMIN_PASSWORD", "from-the-environment"),
+            ],
+        )
+        .expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            config.bootstrap.admin_password.expose(),
+            "from-the-environment"
+        );
+    }
+
+    #[test]
+    fn bootstrap_password_file_is_read_and_trimmed() {
+        let password_path = temp_file("bootstrap-password.txt", "  from-a-file-123\n");
+        let toml = format!(
+            "{DB_TOML}[bootstrap]\nadmin_email = \"root@example.com\"\n\
+             admin_password_file = \"{password_path}\"\n",
+            password_path = password_path.display()
+        );
+        let (config, problems) = sources(Some(&toml), &[], &[]).expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.bootstrap.admin_password.expose(), "from-a-file-123");
+    }
+
+    #[test]
+    fn bootstrap_password_and_file_together_is_an_error() {
+        let password_path = temp_file("bootstrap-password.txt", "file-secret-123");
+        let toml = format!(
+            "{DB_TOML}[bootstrap]\nadmin_email = \"root@example.com\"\n\
+             admin_password = \"direct-secret-1\"\n\
+             admin_password_file = \"{password_path}\"\n",
+            password_path = password_path.display()
+        );
+        let (_, problems) = sources(Some(&toml), &[], &[]).expect("extract");
+        assert!(
+            problems.iter().any(|problem| problem.contains(
+                "bootstrap.admin_password and bootstrap.admin_password_file are both set"
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_email_without_a_password_is_an_error() {
+        let (config, problems) = sources(
+            Some(DB_TOML),
+            &[],
+            &[("MINERVA_BOOTSTRAP__ADMIN_EMAIL", "root@example.com")],
+        )
+        .expect("extract");
+        assert!(config.bootstrap_enabled());
+        assert_eq!(
+            problems,
+            vec![
+                "bootstrap.admin_password is required when bootstrap.admin_email is set".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn bootstrap_password_without_an_email_is_an_error() {
+        let (_, problems) = sources(
+            Some(DB_TOML),
+            &[],
+            &[("MINERVA_BOOTSTRAP__ADMIN_PASSWORD", "long-enough-password")],
+        )
+        .expect("extract");
+        assert_eq!(
+            problems,
+            vec![
+                "bootstrap.admin_email is required when bootstrap.admin_password is set".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn bootstrap_password_length_counts_characters_not_bytes() {
+        // "pässwör" is 7 characters but 9 bytes: a byte-based limit would
+        // accept it, so this pins the character count.
+        let (_, problems) = sources(
+            Some(DB_TOML),
+            &[],
+            &[
+                ("MINERVA_BOOTSTRAP__ADMIN_EMAIL", "root@example.com"),
+                ("MINERVA_BOOTSTRAP__ADMIN_PASSWORD", "pässwör"),
+            ],
+        )
+        .expect("extract");
+        assert_eq!(
+            problems,
+            vec![format!(
+                "bootstrap.admin_password must be at least {MIN_PASSWORD_LENGTH} characters"
+            )]
+        );
+
+        // Eight characters is enough, whatever their byte width.
+        let (_, problems) = sources(
+            Some(DB_TOML),
+            &[],
+            &[
+                ("MINERVA_BOOTSTRAP__ADMIN_EMAIL", "root@example.com"),
+                ("MINERVA_BOOTSTRAP__ADMIN_PASSWORD", "pässwörd"),
+            ],
+        )
+        .expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn bootstrap_malformed_emails_are_rejected() {
+        for email in ["no-at-sign", "@example.com", "root@", "a@b@c"] {
+            let (_, problems) = sources(
+                Some(DB_TOML),
+                &[],
+                &[
+                    ("MINERVA_BOOTSTRAP__ADMIN_EMAIL", email),
+                    ("MINERVA_BOOTSTRAP__ADMIN_PASSWORD", "long-enough-password"),
+                ],
+            )
+            .expect("extract");
+            assert!(
+                problems.iter().any(|problem| problem
+                    .contains("bootstrap.admin_email is not a valid email address")),
+                "{email:?}: {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_blank_display_name_falls_back_to_the_default() {
+        let toml = format!(
+            "{DB_TOML}[bootstrap]\nadmin_email = \"root@example.com\"\n\
+             admin_display_name = \"   \"\n\
+             admin_password = \"long-enough-password\"\n"
+        );
+        let (config, problems) = sources(Some(&toml), &[], &[]).expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            config.bootstrap.admin_display_name,
+            DEFAULT_BOOTSTRAP_DISPLAY_NAME
+        );
+    }
+
+    #[test]
+    fn bootstrap_problems_are_reported_even_when_oidc_is_disabled() {
+        // No issuer_url anywhere: before the bootstrap checks moved ahead of
+        // the OIDC early return, none of these would be reported.
+        let (_, problems) = sources(
+            Some(DB_TOML),
+            &[],
+            &[
+                ("MINERVA_BOOTSTRAP__ADMIN_EMAIL", "not-an-email"),
+                ("MINERVA_BOOTSTRAP__ADMIN_PASSWORD", "short"),
+            ],
+        )
+        .expect("extract");
+        for expected in [
+            "bootstrap.admin_email is not a valid email address".to_owned(),
+            format!("bootstrap.admin_password must be at least {MIN_PASSWORD_LENGTH} characters"),
+        ] {
+            assert!(
+                problems.iter().any(|problem| problem.contains(&expected)),
+                "{expected} missing from {problems:?}"
+            );
+        }
+    }
+
+    #[test]
     fn secrets_are_redacted_in_debug_output() {
-        let toml = format!("{DB_TOML}[redis]\nurl = \"redis://user:hunter2@localhost:6379\"\n");
+        // The bootstrap password shares the "hunter2" stem, so the existing
+        // assertion below covers it too.
+        let toml = format!(
+            "{DB_TOML}[redis]\nurl = \"redis://user:hunter2@localhost:6379\"\n\
+             [bootstrap]\nadmin_email = \"root@example.com\"\n\
+             admin_password = \"hunter2-bootstrap\"\n"
+        );
         let (config, problems) = sources(Some(&toml), &[], &[]).expect("extract");
         assert!(problems.is_empty(), "{problems:?}");
         let debug = format!("{config:?}");

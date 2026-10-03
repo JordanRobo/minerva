@@ -58,7 +58,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     "/users/{id}/reactivate",
                     web::post().to(users::reactivate_user),
                 )
-                .route("/auth/signup", web::post().to(auth::signup))
                 .route("/auth/login", web::post().to(auth::login))
                 .route("/auth/logout", web::post().to(auth::logout))
                 .route("/auth/me", web::get().to(auth::me))

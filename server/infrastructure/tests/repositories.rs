@@ -519,8 +519,8 @@ async fn user_repository_round_trip() {
     assert_eq!(reloaded_pw.password_hash, None);
 
     // Characterization: `find_by_email` lowercases only the *query*. A row
-    // stored with mixed case (bypassing signup's normalization) is never
-    // found. Every current write path normalizes, so this stays latent —
+    // stored with mixed case (bypassing the auth layer's normalization) is
+    // never found. Every current write path normalizes, so this stays latent —
     // pinned here so a future change to the lookup (e.g. `LOWER(email) =
     // LOWER(?)`) surfaces as a test failure instead of a silent behaviour
     // change.
@@ -555,4 +555,49 @@ async fn user_repository_round_trip() {
             .execute(&mut conn)
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn create_if_no_users_refuses_when_any_user_exists() {
+    let Some(pool) = pool() else { return };
+    let users = PostgresUserRepository::new(pool.clone());
+    let now = now();
+    // The tests share one database, so the users table is never empty here:
+    // only the "users already exist" branch can be exercised. The empty-table
+    // branch (the actual insert) is covered by the fake-based unit tests in
+    // application/src/bootstrap.rs.
+    let first = User {
+        id: UserId::new(),
+        email: format!("bootstrap-{}@example.com", Uuid::new_v4()),
+        password_hash: Some("not-a-real-hash".into()),
+        display_name: "Bootstrap blocker".into(),
+        role: Role::ReadOnly,
+        deactivated_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    users.create(first.clone()).await.expect("create");
+
+    let second = User {
+        id: UserId::new(),
+        email: format!("bootstrap-second-{}@example.com", Uuid::new_v4()),
+        password_hash: Some("not-a-real-hash".into()),
+        display_name: "Second admin".into(),
+        role: Role::Admin,
+        deactivated_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let inserted = users
+        .create_if_no_users(second.clone())
+        .await
+        .expect("create_if_no_users");
+    assert!(inserted.is_none(), "no insert while a user exists");
+    assert!(users.find_by_id(second.id).await.unwrap().is_none());
+
+    // UserRepository has no delete yet; drop the row directly.
+    let mut conn = pool.get().unwrap();
+    diesel::delete(infrastructure::schema::users::table.find(first.id.0))
+        .execute(&mut conn)
+        .unwrap();
 }

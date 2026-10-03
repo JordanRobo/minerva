@@ -16,6 +16,12 @@ use crate::schema::users;
 /// releases it at commit or rollback.
 const ACCESS_CHANGE_LOCK_KEY: i64 = 0x4D4E5652_41434353;
 
+/// Advisory lock key for first-admin bootstrap. Arbitrary but stable across
+/// nodes and releases; "MNVRBOOT" read as ASCII, in the style of the
+/// migration lock. Transaction-level (`pg_advisory_xact_lock`), so Postgres
+/// releases it at commit or rollback.
+const BOOTSTRAP_LOCK_KEY: i64 = 0x4D4E5652_424F4F54;
+
 /// Errors inside the access-change transaction, before they are mapped to
 /// [`AccessChangeError`].
 #[derive(Debug)]
@@ -87,6 +93,40 @@ impl UserRepository for PostgresUserRepository {
                 .execute(conn)
                 .map_err(map_diesel_error)?;
             Ok(user)
+        })
+        .await
+    }
+
+    async fn create_if_no_users(&self, user: User) -> Result<Option<User>, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            conn.transaction::<Option<User>, diesel::result::Error, _>(move |conn| {
+                // Serialize concurrent bootstrap attempts: the row count is
+                // only trusted after every preceding attempt has committed.
+                diesel::sql_query(format!(
+                    "SELECT pg_advisory_xact_lock({BOOTSTRAP_LOCK_KEY})"
+                ))
+                .execute(conn)?;
+
+                let count: i64 = users::table.count().first(conn)?;
+                if count > 0 {
+                    return Ok(None);
+                }
+                diesel::insert_into(users::table)
+                    .values((
+                        users::id.eq(user.id.0),
+                        users::email.eq(&user.email),
+                        users::password_hash.eq(&user.password_hash),
+                        users::display_name.eq(&user.display_name),
+                        users::created_at.eq(&user.created_at),
+                        users::updated_at.eq(&user.updated_at),
+                        users::role.eq(role_to_db(user.role)),
+                        users::deactivated_at.eq(&user.deactivated_at),
+                    ))
+                    .execute(conn)?;
+                Ok(Some(user))
+            })
+            .map_err(map_diesel_error)
         })
         .await
     }

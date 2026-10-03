@@ -23,11 +23,13 @@ use application::auth::SessionService;
 use application::auth::oidc::OidcAuthProvider;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::{AuthProviders, RedirectProvider};
+use application::bootstrap::{BootstrapAdmin, BootstrapOutcome, bootstrap_admin};
 use application::oidc_login::LoginPolicy;
 use application::ports::{
     OidcProvider, PasswordHasher, SessionRepository, UserIdentityRepository, UserRepository,
 };
 use application::user_admin::UserAdminService;
+use chrono::Utc;
 use infrastructure::Argon2PasswordHasher;
 use infrastructure::Sha256SessionTokens;
 use infrastructure::db::build_pool;
@@ -137,10 +139,38 @@ async fn main() -> std::io::Result<()> {
         users.clone(),
         session_service.get_ref().clone(),
     ));
-    // The password hasher holds no state; it is registered like the
-    // repositories so handlers name their dependency in their signature.
+    // The password hasher holds no state; the password provider and the
+    // bootstrap admin below both need it, so it is built once here.
     let password_hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
-    let password_hasher_data: web::Data<dyn PasswordHasher> = password_hasher.clone().into();
+    // First-admin bootstrap (roadmap 2.5): while the database has no users,
+    // create the configured admin so there is someone who can log in and
+    // start inviting people. The repository decides atomically whether the
+    // table is empty, so racing nodes cannot both create an admin; once any
+    // user exists this prints only the skip line. It runs regardless of
+    // run_migrations — the schema exists either way (migrated above or owned
+    // by a dedicated job). The password never reaches these log lines.
+    if config.bootstrap_enabled() {
+        match bootstrap_admin(
+            users.as_ref(),
+            password_hasher.as_ref(),
+            BootstrapAdmin {
+                email: config.bootstrap.admin_email.clone(),
+                display_name: config.bootstrap.admin_display_name.clone(),
+                password: config.bootstrap.admin_password.expose().to_owned(),
+            },
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(BootstrapOutcome::Created(user)) => {
+                println!("created bootstrap admin account {}", user.email)
+            }
+            Ok(BootstrapOutcome::UsersAlreadyExist) => {
+                println!("bootstrap admin skipped: users already exist")
+            }
+            Err(err) => panic!("{err}"),
+        }
+    }
     // OIDC sign-in is optional: without oidc.issuer_url the server behaves
     // exactly as before and nothing redirect-related is registered. With it,
     // an unreachable/misconfigured IdP that answers 4xx fails startup like
@@ -225,7 +255,6 @@ async fn main() -> std::io::Result<()> {
             .app_data(session_service.clone())
             .app_data(user_admin.clone())
             .app_data(auth_providers.clone())
-            .app_data(password_hasher_data.clone())
             .app_data(cookies.clone());
         // Registered only when at least one redirect provider exists; the
         // flow handlers take it as an `Option` extractor and treat its

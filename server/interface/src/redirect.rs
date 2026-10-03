@@ -955,6 +955,11 @@ mod tests {
             .unwrap()
             .expect("user created");
         assert_eq!(user.password_hash, None, "SSO users are passwordless");
+        assert_eq!(
+            user.role,
+            Role::ReadOnly,
+            "new SSO accounts get the fallback role (DEFAULT_NEW_USER_ROLE), never Admin"
+        );
         let identity = identities
             .find_by_issuer_and_subject("https://idp.example".to_owned(), subject)
             .await

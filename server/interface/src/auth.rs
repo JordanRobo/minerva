@@ -1,4 +1,4 @@
-//! Auth HTTP API: the `/api/auth/*` handlers (signup, login, logout, me,
+//! Auth HTTP API: the `/api/auth/*` handlers (login, logout, me,
 //! providers), their JSON DTOs, and the [`AuthenticatedUser`] extractor that
 //! resolves a request's session cookie to a logged-in user.
 //!
@@ -9,12 +9,12 @@
 use actix_web::cookie::{Cookie, SameSite, time::OffsetDateTime};
 use actix_web::dev::Payload;
 use actix_web::{FromRequest, HttpRequest, HttpResponse, web};
+use application::auth::SessionService;
 use application::auth::password::PASSWORD_PROVIDER_ID;
 use application::auth::provider::{AuthError, AuthProviders, Credentials, ProviderKind};
-use application::auth::{SessionService, normalize_email};
-use application::ports::{PasswordHasher, UserRepository};
+use application::ports::UserRepository;
 use chrono::{DateTime, Utc};
-use domain::{DEFAULT_NEW_USER_ROLE, Role, User, UserId};
+use domain::{Role, User, UserId};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
@@ -63,14 +63,6 @@ impl From<&User> for UserResponse {
             updated_at: user.updated_at,
         }
     }
-}
-
-/// Body for `POST /api/auth/signup`.
-#[derive(Deserialize, ToSchema)]
-pub struct SignupRequest {
-    pub email: String,
-    pub password: String,
-    pub display_name: String,
 }
 
 /// Body for `POST /api/auth/login`.
@@ -200,61 +192,6 @@ fn apply_session_attributes(cookie: &mut Cookie<'_>, cookies: &CookieSettings) {
     if cookies.secure {
         cookie.set_secure(true);
     }
-}
-
-/// Sign Up
-///
-/// Create an account and start a session: the user is created with a hashed
-/// password and a session cookie is set on the response.
-#[utoipa::path(
-    post,
-    path = "/api/auth/signup",
-    tags = ["auth"],
-    request_body = SignupRequest,
-    responses(
-        (status = 201, description = "Account created; session cookie set", body = UserResponse),
-        (status = 400, description = "Email or password is blank, or the password is under 8 characters", body = ApiError),
-        (status = 409, description = "A user with this email already exists", body = ApiError)
-    )
-)]
-pub async fn signup(
-    users: web::Data<dyn UserRepository>,
-    session_service: web::Data<SessionService>,
-    password_hasher: web::Data<dyn PasswordHasher>,
-    cookies: web::Data<CookieSettings>,
-    body: web::Json<SignupRequest>,
-) -> Result<HttpResponse, ApiError> {
-    // Normalize once at the boundary: lookups are case-insensitive, so the
-    // stored email must be too or duplicate detection would miss "Foo@x.com".
-    let email = normalize_email(&body.email);
-    if email.is_empty() {
-        return Err(ApiError::bad_request("email must not be empty"));
-    }
-    if body.password.chars().count() < 8 {
-        return Err(ApiError::bad_request(
-            "password must be at least 8 characters long",
-        ));
-    }
-    let password_hash = password_hasher
-        .hash(&body.password)
-        .await
-        .map_err(|_| ApiError::internal_error())?;
-    let now = Utc::now();
-    let user = User {
-        id: UserId::new(),
-        email,
-        password_hash: Some(password_hash),
-        display_name: body.display_name.clone(),
-        role: DEFAULT_NEW_USER_ROLE,
-        deactivated_at: None,
-        created_at: now,
-        updated_at: now,
-    };
-    let user = users.create(user).await.map_err(repo_error_response)?;
-    let cookie = issue_session(session_service.get_ref(), user.id, &cookies).await?;
-    Ok(HttpResponse::Created()
-        .cookie(cookie)
-        .json(UserResponse::from(&user)))
 }
 
 /// Log In
@@ -408,7 +345,7 @@ mod tests {
     use actix_web::http::{StatusCode, header};
     use actix_web::test::{TestRequest, init_service, read_body};
     use application::auth::password::PasswordAuthProvider;
-    use application::ports::{SessionRepository, SessionTokens};
+    use application::ports::{PasswordHasher, SessionRepository, SessionTokens};
     use chrono::Duration;
     use diesel::prelude::*;
     use domain::{Session, SessionId};
@@ -463,7 +400,6 @@ mod tests {
                 Arc::new(PostgresUserRepository::new(pool.clone()));
             let users_data: web::Data<dyn UserRepository> = users.clone().into();
             let hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
-            let hasher_data: web::Data<dyn PasswordHasher> = hasher.clone().into();
             // The login handler resolves providers by id, mirroring `main.rs`.
             let providers = web::Data::new(
                 AuthProviders::new(
@@ -485,9 +421,7 @@ mod tests {
                         SessionService::DEFAULT_SESSION_TTL,
                     )))
                     .app_data(providers)
-                    .app_data(hasher_data)
                     .app_data(web::Data::new(CookieSettings { secure: false }))
-                    .route("/api/auth/signup", web::post().to(signup))
                     .route("/api/auth/login", web::post().to(login))
                     .route("/api/auth/logout", web::post().to(logout))
                     .route("/api/auth/me", web::get().to(me)),
@@ -558,8 +492,8 @@ mod tests {
         format!("{prefix}-{}@example.com", Uuid::new_v4())
     }
 
-    /// A password account with a real Argon2 hash, created directly so login
-    /// tests do not depend on signup (which roadmap 2.5 removes).
+    /// A password account with a real Argon2 hash, created directly in the
+    /// database.
     async fn create_password_user(pool: &PgPool, email: String) -> User {
         let users = PostgresUserRepository::new(pool.clone());
         let now = Utc::now();
@@ -587,143 +521,6 @@ mod tests {
         diesel::delete(infrastructure::schema::users::table.find(user_id.0))
             .execute(&mut conn)
             .expect("delete user");
-    }
-
-    // ---- signup ----
-    // These pin CURRENT behaviour: open signup exists today and is removed by
-    // roadmap 2.5 (invite-only accounts). Replace when that lands.
-
-    #[actix_web::test]
-    async fn signup_creates_the_user_and_sets_a_session_cookie() {
-        let Some(url) = database_url() else {
-            eprintln!("skipping: DATABASE_URL not set");
-            return;
-        };
-        let email = unique_email("signup");
-        let app = test_app!(&url);
-        let res = post_json!(
-            &app,
-            "/api/auth/signup",
-            serde_json::json!({
-                "email": format!("  {}  ", email.to_uppercase()),
-                "password": "password123",
-                "display_name": "Signup user",
-            }),
-        );
-        assert_eq!(res.status(), StatusCode::CREATED);
-
-        // The cookie is HttpOnly (JS cannot read it), Lax (CSRF baseline)
-        // and scoped to the whole site.
-        let set = set_cookie(&res, COOKIE_NAME).expect("session cookie set");
-        assert!(set.contains("HttpOnly"), "{set}");
-        assert!(set.contains("SameSite=Lax"), "{set}");
-        assert!(set.contains("Path=/"), "{set}");
-
-        // The email is trimmed and lowercased; the hash never crosses the wire.
-        let body = read_body(res).await;
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["email"], email);
-        assert_eq!(json["display_name"], "Signup user");
-        // New accounts start with the default role.
-        assert_eq!(json["role"], "read_only");
-        assert!(json.get("password_hash").is_none(), "no hash in response");
-
-        let pool = test_pool(&url);
-        let users = PostgresUserRepository::new(pool.clone());
-        let user = users
-            .find_by_email(email)
-            .await
-            .unwrap()
-            .expect("user created");
-        delete_user(&pool, user.id);
-    }
-
-    #[actix_web::test]
-    async fn signup_rejects_a_blank_email() {
-        let Some(url) = database_url() else {
-            eprintln!("skipping: DATABASE_URL not set");
-            return;
-        };
-        let app = test_app!(&url);
-        let res = post_json!(
-            &app,
-            "/api/auth/signup",
-            serde_json::json!({
-                "email": "   ",
-                "password": "password123",
-                "display_name": "Blank",
-            }),
-        );
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        let body = read_body(res).await;
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"]["code"], "bad_request");
-    }
-
-    #[actix_web::test]
-    async fn signup_rejects_a_short_password() {
-        let Some(url) = database_url() else {
-            eprintln!("skipping: DATABASE_URL not set");
-            return;
-        };
-        let app = test_app!(&url);
-        let res = post_json!(
-            &app,
-            "/api/auth/signup",
-            serde_json::json!({
-                "email": unique_email("short"),
-                "password": "short",
-                "display_name": "Short password",
-            }),
-        );
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        let body = read_body(res).await;
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"]["code"], "bad_request");
-    }
-
-    #[actix_web::test]
-    async fn signup_duplicate_email_is_a_conflict() {
-        let Some(url) = database_url() else {
-            eprintln!("skipping: DATABASE_URL not set");
-            return;
-        };
-        let email = unique_email("dup");
-        let app = test_app!(&url);
-        let first = post_json!(
-            &app,
-            "/api/auth/signup",
-            serde_json::json!({
-                "email": email.clone(),
-                "password": "password123",
-                "display_name": "First",
-            }),
-        );
-        assert_eq!(first.status(), StatusCode::CREATED);
-
-        // Same address in another case: normalization must still catch it.
-        let second = post_json!(
-            &app,
-            "/api/auth/signup",
-            serde_json::json!({
-                "email": email.to_uppercase(),
-                "password": "password123",
-                "display_name": "Second",
-            }),
-        );
-        assert_eq!(second.status(), StatusCode::CONFLICT);
-        let body = read_body(second).await;
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"]["code"], "conflict");
-
-        let pool = test_pool(&url);
-        let users = PostgresUserRepository::new(pool.clone());
-        let user = users
-            .find_by_email(email)
-            .await
-            .unwrap()
-            .expect("user created");
-        delete_user(&pool, user.id);
     }
 
     // ---- login ----

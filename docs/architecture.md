@@ -122,9 +122,8 @@ extractor and asking `authz` for its permission:
 A missing or invalid session is a 401; a valid session whose role lacks the
 permission is a 403 with the standard error envelope (`forbidden`). Handlers
 declare their required level in their signature — no inline role checks.
-`GET /api/auth/me` requires only a session (any role); signup, login,
-logout, providers, the redirect flow, `/health` and the API docs stay
-public. The public list is an explicit allowlist in
+`GET /api/auth/me` requires only a session (any role); login, logout,
+providers, the redirect flow, `/health` and the API docs stay public. The public list is an explicit allowlist in
 `interface/src/access_tests.rs`: adding a route without an extractor or an
 allowlist entry fails the tests.
 
@@ -154,9 +153,17 @@ login fails as invalid credentials and OIDC completion rejects the account.
 The per-request re-resolution above is the backstop: an already-issued session
 stops working on its next request even if it races the revocation.
 
-Until first-admin bootstrap exists (roadmap 2.5), the very first admin is
-created by setting `users.role` directly in the database; afterwards, admins
-manage roles and active state through this API.
+The very first admin comes from the first-admin bootstrap (roadmap 2.5): at
+startup, only while the users table is empty, `application::bootstrap`
+creates the configured admin — a password account, with the password
+supplied via environment variable or `*_file`, never in a committed config.
+The check-and-insert runs as one Postgres transaction under an advisory lock
+(`UserRepository::create_if_no_users`), so racing starts cannot both create
+an admin; once any user exists the bootstrap never runs again and can never
+reset a password or modify an existing account. All other accounts are
+created by SSO (while `oidc.auto_create_users` is set) and, later, by
+invites (roadmap 2.6); afterwards, admins manage roles and active state
+through this API.
 
 ## API documentation
 

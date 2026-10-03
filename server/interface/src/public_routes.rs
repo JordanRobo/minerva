@@ -10,7 +10,6 @@ use actix_web::http::Method;
 /// Method + path of every public operation, with paths exactly as they appear
 /// in the OpenAPI document (`{provider}` templated).
 pub(crate) const PUBLIC_OPERATIONS: &[(Method, &str)] = &[
-    (Method::POST, "/api/auth/signup"),
     (Method::POST, "/api/auth/login"),
     (Method::POST, "/api/auth/logout"),
     (Method::GET, "/api/auth/providers"),

@@ -78,7 +78,6 @@ macro_rules! test_app {
         let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
         let hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
         let users_data: web::Data<dyn UserRepository> = users.clone().into();
-        let hasher_data: web::Data<dyn PasswordHasher> = hasher.clone().into();
         // The login route resolves providers by id, mirroring `main.rs`. No
         // redirect provider is registered: the flow routes must 404.
         let providers = web::Data::new(
@@ -119,7 +118,6 @@ macro_rules! test_app {
                     session_service,
                 )))
                 .app_data(providers)
-                .app_data(hasher_data)
                 .app_data(web::Data::new(CookieSettings { secure: false }))
                 .configure(routes::configure),
         )
@@ -473,7 +471,6 @@ async fn public_routes_do_not_require_a_session() {
     // Login needs real credentials: a 401 for bad credentials is correct
     // behaviour, so reachability is proven by signing in successfully.
     let login_user = create_password_user(&pool, unique_email("public-login")).await;
-    let signup_email = unique_email("public-signup");
 
     // The public API operations come from the shared allowlist (the OpenAPI
     // document test checks the same list); `{provider}` is exercised with
@@ -483,14 +480,6 @@ async fn public_routes_do_not_require_a_session() {
         .iter()
         .map(|(method, path)| {
             let (body, expected) = match *path {
-                "/api/auth/signup" => (
-                    Some(serde_json::json!({
-                        "email": signup_email.clone(),
-                        "password": "password123",
-                        "display_name": "Public",
-                    })),
-                    StatusCode::CREATED,
-                ),
                 "/api/auth/login" => (
                     Some(serde_json::json!({
                         "email": login_user.email.clone(),
@@ -530,20 +519,21 @@ async fn public_routes_do_not_require_a_session() {
         StatusCode::OK,
     ));
 
+    // Open signup is gone (roadmap 2.5): no route matches the path at all, so
+    // the router answers 404 — a 405 would mean some method still serves it.
+    cases.push((
+        Method::POST,
+        "/api/auth/signup".into(),
+        None,
+        StatusCode::NOT_FOUND,
+    ));
+
     for (method, uri, body, expected) in cases {
         let res = request!(&app, method, uri, None, body.as_ref());
         assert_eq!(res.status(), expected, "{method} {uri}");
     }
 
-    // The two routes that create users clean up after themselves.
-    let users = PostgresUserRepository::new(pool.clone());
-    if let Some(user) = users
-        .find_by_email(signup_email)
-        .await
-        .expect("find signup user")
-    {
-        delete_user(&pool, user.id);
-    }
+    // The login check created a user; clean it up.
     delete_user(&pool, login_user.id);
 }
 

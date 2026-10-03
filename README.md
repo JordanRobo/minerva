@@ -95,10 +95,11 @@ DATABASE_URL=postgresql://minerva:minerva@localhost:5432/minerva cargo run -p in
 The port is configurable via the `PORT` environment variable (default 8080).
 Verify with `curl http://localhost:8080/health`.
 
-> **Temporary (until roadmap 2.5):** a fresh database has no admin — every
-> account starts as `read_only`, and open signup only creates read-only
-> accounts. Until first-admin bootstrap exists, promote one account directly
-> in Postgres:
+> **First admin:** on a fresh database the server creates the configured
+> bootstrap admin at startup — see [Configuration](#configuration), "First
+> admin". The bootstrap only runs while no users exist, so for a database
+> that already has accounts it never touches anything; to promote an
+> existing account there, update it directly in Postgres:
 >
 > ```sql
 > UPDATE users SET role = 'admin' WHERE email = 'you@example.com';
@@ -172,6 +173,24 @@ url_file = "/run/secrets/database-url"
 
 Setting both is an error, as is an unreadable file (named in the error, never
 its contents). Secrets are redacted in all logs and `Debug` output.
+
+### First admin
+
+On a fresh deployment the first account is created at startup: while the
+database has no users at all, the server creates the configured admin once
+and prints `created bootstrap admin account <email>`; on every later start
+it prints `bootstrap admin skipped: users already exist` and changes
+nothing. Set in `minerva.toml` (or via
+`MINERVA_BOOTSTRAP__*` environment variables):
+
+- `bootstrap.admin_email` — enables the bootstrap; blank disables it
+- `bootstrap.admin_password` — at least 8 characters; belongs in the
+  `MINERVA_BOOTSTRAP__ADMIN_PASSWORD` environment variable or
+  `bootstrap.admin_password_file`, not a committed file
+- `bootstrap.admin_display_name` — optional (default: "Administrator")
+
+The bootstrap only takes effect while no users exist: it never resets an
+existing password or modifies an existing account.
 
 ### Enabling OIDC sign-in
 

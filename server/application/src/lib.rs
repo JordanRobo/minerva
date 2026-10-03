@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod authz;
+pub mod bootstrap;
 pub mod oidc_login;
 pub mod ports;
 pub mod user_admin;
