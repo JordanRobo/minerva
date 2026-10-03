@@ -10,7 +10,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::error::ApiError;
 use crate::openapi::ApiDoc;
-use crate::{auth, debug, goals, milestones, redirect, tasks};
+use crate::{auth, debug, goals, milestones, redirect, tasks, users};
 
 async fn health() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
@@ -48,6 +48,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/tasks/{id}", web::get().to(tasks::get_task))
                 .route("/tasks/{id}", web::put().to(tasks::update_task))
                 .route("/tasks/{id}", web::delete().to(tasks::delete_task))
+                .route("/users", web::get().to(users::list_users))
+                .route("/users/{id}/role", web::put().to(users::change_user_role))
+                .route(
+                    "/users/{id}/deactivate",
+                    web::post().to(users::deactivate_user),
+                )
+                .route(
+                    "/users/{id}/reactivate",
+                    web::post().to(users::reactivate_user),
+                )
                 .route("/auth/signup", web::post().to(auth::signup))
                 .route("/auth/login", web::post().to(auth::login))
                 .route("/auth/logout", web::post().to(auth::logout))

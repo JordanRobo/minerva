@@ -6,7 +6,7 @@
 //!
 //! - [`ViewAccess`] — view content (the GET goal/milestone/task routes).
 //! - [`EditAccess`] — create or modify content (POST/PUT/DELETE).
-//! - [`AdminAccess`] — manage users; today only the `/debug/*` routes.
+//! - [`AdminAccess`] — manage users (the `/api/users` and `/debug/*` routes).
 //!
 //! A missing or invalid session is a 401 (from `AuthenticatedUser`); a valid
 //! session whose role lacks the permission is a 403 with the standard error
@@ -38,7 +38,6 @@ pub struct EditAccess {
 }
 
 /// A signed-in user who may manage users.
-#[allow(dead_code)] // `user` is unused until a check needs the identity
 pub struct AdminAccess {
     pub user: User,
 }

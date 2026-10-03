@@ -247,6 +247,7 @@ mod tests {
                 password_hash: None,
                 display_name: "Magic user".to_owned(),
                 role: Role::Admin,
+                deactivated_at: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })

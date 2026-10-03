@@ -1,13 +1,60 @@
 //! Postgres implementation of [`UserRepository`].
 
-use application::ports::{RepositoryError, UserRepository};
+use application::ports::{AccessChange, AccessChangeError, RepositoryError, UserRepository};
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
-use domain::{User, UserId};
+use domain::{Role, User, UserId};
 
-use crate::db::{PgPool, run_on_postgres};
+use crate::db::{PgPool, run_on_postgres, run_on_postgres_with};
 use crate::error::map_diesel_error;
-use crate::repositories::mapping::{UserRow, role_to_db, user_from_row};
+use crate::repositories::mapping::{UserRow, role_from_db, role_to_db, user_from_row};
 use crate::schema::users;
+
+/// Advisory lock key for user access changes. Arbitrary but stable across
+/// nodes and releases; "MNVRACCS" read as ASCII, in the style of the
+/// migration lock. Transaction-level (`pg_advisory_xact_lock`), so Postgres
+/// releases it at commit or rollback.
+const ACCESS_CHANGE_LOCK_KEY: i64 = 0x4D4E5652_41434353;
+
+/// Errors inside the access-change transaction, before they are mapped to
+/// [`AccessChangeError`].
+#[derive(Debug)]
+enum AccessTxError {
+    NotFound,
+    LastAdmin,
+    Diesel(diesel::result::Error),
+    Mapped(RepositoryError),
+}
+
+impl From<diesel::result::Error> for AccessTxError {
+    fn from(error: diesel::result::Error) -> Self {
+        AccessTxError::Diesel(error)
+    }
+}
+
+impl From<RepositoryError> for AccessTxError {
+    fn from(error: RepositoryError) -> Self {
+        AccessTxError::Mapped(error)
+    }
+}
+
+/// The active admins other than `target`, counted under the access-change
+/// lock so concurrent changes cannot slip in between the count and the write.
+fn count_other_active_admins(
+    conn: &mut PgConnection,
+    target: UserId,
+) -> Result<i64, AccessTxError> {
+    let count: i64 = users::table
+        .filter(
+            users::role
+                .eq("admin")
+                .and(users::deactivated_at.is_null())
+                .and(users::id.ne(target.0)),
+        )
+        .count()
+        .first(conn)?;
+    Ok(count)
+}
 
 /// [`UserRepository`] backed by Postgres through Diesel.
 pub struct PostgresUserRepository {
@@ -35,6 +82,7 @@ impl UserRepository for PostgresUserRepository {
                     users::created_at.eq(&user.created_at),
                     users::updated_at.eq(&user.updated_at),
                     users::role.eq(role_to_db(user.role)),
+                    users::deactivated_at.eq(&user.deactivated_at),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
@@ -75,7 +123,11 @@ impl UserRepository for PostgresUserRepository {
     async fn list(&self) -> Result<Vec<User>, RepositoryError> {
         let pool = self.pool.clone();
         run_on_postgres(pool, |conn| {
-            let rows: Vec<UserRow> = users::table.load(conn).map_err(map_diesel_error)?;
+            // Stable order for the admin list view: creation time, then id.
+            let rows: Vec<UserRow> = users::table
+                .order((users::created_at.asc(), users::id.asc()))
+                .load(conn)
+                .map_err(map_diesel_error)?;
             rows.into_iter().map(user_from_row).collect()
         })
         .await
@@ -91,6 +143,7 @@ impl UserRepository for PostgresUserRepository {
                     users::display_name.eq(&user.display_name),
                     users::updated_at.eq(&user.updated_at),
                     users::role.eq(role_to_db(user.role)),
+                    users::deactivated_at.eq(&user.deactivated_at),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
@@ -100,6 +153,96 @@ impl UserRepository for PostgresUserRepository {
                 return Err(RepositoryError::NotFound);
             }
             Ok(user)
+        })
+        .await
+    }
+
+    async fn apply_access_change(
+        &self,
+        target: UserId,
+        change: AccessChange,
+    ) -> Result<User, AccessChangeError> {
+        let pool = self.pool.clone();
+        run_on_postgres_with(pool, move |conn| {
+            let outcome = conn.transaction::<User, AccessTxError, _>(|conn| {
+                // Serialize concurrent access changes: the active-admin count
+                // is re-checked only after every preceding change has committed.
+                diesel::sql_query(format!(
+                    "SELECT pg_advisory_xact_lock({ACCESS_CHANGE_LOCK_KEY})"
+                ))
+                .execute(conn)?;
+
+                let row: Option<UserRow> = users::table.find(target.0).first(conn).optional()?;
+                let Some(row) = row else {
+                    return Err(AccessTxError::NotFound);
+                };
+                let role = role_from_db(&row.6)?;
+                let active = row.7.is_none();
+
+                match change {
+                    AccessChange::Role(new_role) => {
+                        if new_role == role {
+                            return Ok(user_from_row(row)?);
+                        }
+                        // Demoting the last active admin would leave no one who
+                        // can manage users again.
+                        if role == Role::Admin
+                            && active
+                            && new_role != Role::Admin
+                            && count_other_active_admins(conn, target)? == 0
+                        {
+                            return Err(AccessTxError::LastAdmin);
+                        }
+                        let now = Utc::now();
+                        diesel::update(users::table.find(target.0))
+                            .set((
+                                users::role.eq(role_to_db(new_role)),
+                                users::updated_at.eq(now),
+                            ))
+                            .execute(conn)?;
+                    }
+                    AccessChange::Deactivate => {
+                        if !active {
+                            return Ok(user_from_row(row)?);
+                        }
+                        if role == Role::Admin && count_other_active_admins(conn, target)? == 0 {
+                            return Err(AccessTxError::LastAdmin);
+                        }
+                        let now = Utc::now();
+                        diesel::update(users::table.find(target.0))
+                            .set((
+                                users::deactivated_at.eq(Some(now)),
+                                users::updated_at.eq(now),
+                            ))
+                            .execute(conn)?;
+                    }
+                    AccessChange::Reactivate => {
+                        if active {
+                            return Ok(user_from_row(row)?);
+                        }
+                        let now = Utc::now();
+                        diesel::update(users::table.find(target.0))
+                            .set((
+                                users::deactivated_at.eq(None::<DateTime<Utc>>),
+                                users::updated_at.eq(now),
+                            ))
+                            .execute(conn)?;
+                    }
+                }
+
+                // Return the row as stored, not a copy of what was intended.
+                let row: UserRow = users::table.find(target.0).first(conn)?;
+                Ok(user_from_row(row)?)
+            });
+            match outcome {
+                Ok(user) => Ok(user),
+                Err(AccessTxError::NotFound) => Err(AccessChangeError::NotFound),
+                Err(AccessTxError::LastAdmin) => Err(AccessChangeError::LastAdmin),
+                Err(AccessTxError::Diesel(err)) => {
+                    Err(AccessChangeError::Repository(map_diesel_error(err)))
+                }
+                Err(AccessTxError::Mapped(err)) => Err(AccessChangeError::Repository(err)),
+            }
         })
         .await
     }

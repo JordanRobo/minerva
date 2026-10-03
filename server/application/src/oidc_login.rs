@@ -137,6 +137,7 @@ pub fn new_user_from_claims(claims: &OidcClaims, now: DateTime<Utc>) -> User {
         password_hash: None,
         display_name,
         role: DEFAULT_NEW_USER_ROLE,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     }
@@ -193,6 +194,7 @@ mod tests {
             password_hash: Some("hash".into()),
             display_name: "Existing user".into(),
             role: Role::Admin,
+            deactivated_at: None,
             created_at: now,
             updated_at: now,
         }

@@ -260,8 +260,9 @@ pub fn progress_snapshot_from_row(
 }
 
 /// A row of the `users` table: id, email, password_hash, display_name,
-/// created_at, updated_at, role — in that order. `password_hash` is `None`
-/// for a user who can only sign in via an external identity provider.
+/// created_at, updated_at, role, deactivated_at — in that order.
+/// `password_hash` is `None` for a user who can only sign in via an external
+/// identity provider; `deactivated_at` is `None` while the account is active.
 pub type UserRow = (
     Uuid,
     String,
@@ -270,6 +271,7 @@ pub type UserRow = (
     DateTime<Utc>,
     DateTime<Utc>,
     String,
+    Option<DateTime<Utc>>,
 );
 
 /// The value stored in a `role` column for [`Role`].
@@ -299,13 +301,15 @@ pub fn role_from_db(role: &str) -> Result<Role, RepositoryError> {
 
 /// Build a [`User`] from a `users` row.
 pub fn user_from_row(row: UserRow) -> Result<User, RepositoryError> {
-    let (id, email, password_hash, display_name, created_at, updated_at, role) = row;
+    let (id, email, password_hash, display_name, created_at, updated_at, role, deactivated_at) =
+        row;
     Ok(User {
         id: UserId(id),
         email,
         password_hash,
         display_name,
         role: role_from_db(&role)?,
+        deactivated_at,
         created_at,
         updated_at,
     })

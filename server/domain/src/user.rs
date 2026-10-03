@@ -35,6 +35,16 @@ pub struct User {
     pub display_name: String,
     /// What this user is allowed to do; see [`Role::allows`].
     pub role: Role,
+    /// When an admin deactivated this account; `None` while it is active. A
+    /// deactivated account cannot sign in and its sessions are revoked.
+    pub deactivated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl User {
+    /// Whether this account may sign in and use the system.
+    pub fn is_active(&self) -> bool {
+        self.deactivated_at.is_none()
+    }
 }

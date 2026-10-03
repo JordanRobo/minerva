@@ -187,7 +187,7 @@ impl RedirectProvider for OidcAuthProvider {
         };
 
         let now = Utc::now();
-        match decide_login(
+        let user = match decide_login(
             self.policy,
             &claims,
             identity.as_ref(),
@@ -199,13 +199,13 @@ impl RedirectProvider for OidcAuthProvider {
                         "user {} behind a known identity no longer exists",
                         user_id.0
                     ))
-                })
+                })?
             }
             LoginDecision::LinkToExistingUser { user_id } => {
                 // decide_login only links when the verified email matched a user.
                 let user = user_with_email.expect("a link decision requires the matched user");
                 self.create_identity(user_id, &claims, now).await?;
-                Ok(user)
+                user
             }
             LoginDecision::CreateUser => {
                 let user = new_user_from_claims(&claims, now);
@@ -216,12 +216,22 @@ impl RedirectProvider for OidcAuthProvider {
                 // via its verified email. Belongs in an application-layer unit of
                 // work when one exists.
                 self.create_identity(user.id, &claims, now).await?;
-                Ok(user)
+                user
             }
-            LoginDecision::Reject(rejection) => Err(AuthError::Rejected {
-                code: rejection.code(),
-            }),
+            LoginDecision::Reject(rejection) => {
+                return Err(AuthError::Rejected {
+                    code: rejection.code(),
+                });
+            }
+        };
+
+        // A deactivated account cannot sign in via SSO either.
+        if !user.is_active() {
+            return Err(AuthError::Rejected {
+                code: "deactivated",
+            });
         }
+        Ok(user)
     }
 }
 
@@ -379,6 +389,7 @@ mod tests {
             password_hash: Some("hash-of-password".to_owned()),
             display_name: "Existing user".to_owned(),
             role: Role::Admin,
+            deactivated_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -484,6 +495,7 @@ mod tests {
             password_hash: None,
             display_name: "Known user".to_owned(),
             role: Role::Admin,
+            deactivated_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -506,6 +518,40 @@ mod tests {
             .unwrap();
         assert_eq!(user.id, existing.id);
         assert_eq!(users.list().await.unwrap().len(), 1, "no new user");
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_a_deactivated_user() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let identities = Arc::new(InMemoryUserIdentityRepository::new());
+        let mut deactivated = user("off@example.com");
+        deactivated.deactivated_at = Some(Utc::now());
+        users.create(deactivated.clone()).await.unwrap();
+        identities
+            .create(identity_for(deactivated.id, "sub-123"))
+            .await
+            .unwrap();
+
+        let provider = provider(
+            FakeOidcProvider::new(claims("sub-123", Some("off@example.com"), true)),
+            users,
+            identities,
+            false,
+        );
+
+        let error = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                AuthError::Rejected {
+                    code: "deactivated"
+                }
+            ),
+            "got {error:?}"
+        );
     }
 
     #[tokio::test]

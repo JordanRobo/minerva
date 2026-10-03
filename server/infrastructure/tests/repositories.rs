@@ -383,6 +383,7 @@ async fn user_identity_repository_round_trip() {
         password_hash: None,
         display_name: "Identity test user".into(),
         role: Role::ReadOnly,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -443,6 +444,7 @@ async fn user_repository_round_trip() {
         password_hash: Some("not-a-real-hash".into()),
         display_name: "Round trip user".into(),
         role: Role::Staff,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -472,6 +474,7 @@ async fn user_repository_round_trip() {
         password_hash: None,
         display_name: "Duplicate".into(),
         role: Role::ReadOnly,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -500,6 +503,7 @@ async fn user_repository_round_trip() {
         password_hash: None,
         display_name: "Passwordless".into(),
         role: Role::ReadOnly,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -527,6 +531,7 @@ async fn user_repository_round_trip() {
         password_hash: None,
         display_name: "Mixed case".into(),
         role: Role::ReadOnly,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     };

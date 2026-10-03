@@ -104,9 +104,10 @@ this?". The policy lives in two layers:
   (`ViewContent`, `EditContent`, `ManageUsers`), with an exhaustive,
   wildcard-free `Role::allows` matrix that lists every (role, permission)
   pair.
-- `application::authz::authorize(user, permission)` — the single place an
-  access decision is made. Future checks (deactivated accounts, ownership)
-  land here, so no handler or extractor compares roles itself.
+- `application::authz::authorize(user, permission)` — the single place a
+  role decision is made. Future checks (ownership rules) land here, so no
+  handler or extractor compares roles itself. Deactivated accounts are not
+  a role question and are handled where the user row is resolved (below).
 
 HTTP-level enforcement is three request extractors in
 `interface/src/access.rs`, each wrapping the `AuthenticatedUser` session
@@ -116,7 +117,7 @@ extractor and asking `authz` for its permission:
 |---|---|---|
 | `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes |
 | `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes |
-| `AdminAccess` | `ManageUsers` | the temporary `/debug/*` routes (until 3.4/3.6 replace them) |
+| `AdminAccess` | `ManageUsers` | the `/api/users` routes and the temporary `/debug/*` routes (until 3.4/3.6 replace them) |
 
 A missing or invalid session is a 401; a valid session whose role lacks the
 permission is a 403 with the standard error envelope (`forbidden`). Handlers
@@ -128,8 +129,34 @@ public. The public list is an explicit allowlist in
 allowlist entry fails the tests.
 
 Roles are stored on `users.role`; a change takes effect on the next request,
-because every authenticated request re-resolves the user row. Until the
-Users API exists (roadmap 2.4), roles are changed directly in the database.
+because every authenticated request re-resolves the user row.
+
+### User administration
+
+The admin-only Users API (`/api/users`, roadmap 2.4) lists users and changes
+a user's role or active state. The rules live in
+`application::user_admin::UserAdminService`, not in the handlers:
+
+- An administrator cannot change their own role or deactivate themselves.
+- The last **active** administrator can never be demoted or deactivated, so
+  there is always someone who can manage users again. A deactivated
+  administrator does not count as active.
+
+The last-admin rule must hold under concurrent requests, so the write goes
+through `UserRepository::apply_access_change`: a single Postgres transaction
+guarded by a transaction-level advisory lock that re-checks the active-admin
+count after acquiring it. Concurrent changes serialize on the lock instead of
+interleaving between the count and the write.
+
+Deactivation sets `users.deactivated_at`, revokes all of the user's sessions
+(`SessionService::revoke_all_for_user`), and refuses new sign-ins — password
+login fails as invalid credentials and OIDC completion rejects the account.
+The per-request re-resolution above is the backstop: an already-issued session
+stops working on its next request even if it races the revocation.
+
+Until first-admin bootstrap exists (roadmap 2.5), the very first admin is
+created by setting `users.role` directly in the database; afterwards, admins
+manage roles and active state through this API.
 
 ## API documentation
 
@@ -141,8 +168,8 @@ The `interface` crate generates an OpenAPI 3 document from code annotations
 
 Under Docker compose the API is mapped to host port 3010, so use
 http://localhost:3010/api-docs/swagger-ui/ there. All `/api/*` endpoints
-(auth, goals, milestones, tasks) are documented; the temporary `/debug/*`
-routes are not. Protected endpoints declare the `session_cookie` security
+(auth, goals, milestones, tasks, users) are documented; the temporary
+`/debug/*` routes are not. Protected endpoints declare the `session_cookie` security
 scheme (the session cookie as an API key, registered by a `utoipa::Modify`
 addon in `interface/src/openapi.rs`) so Swagger UI's Authorize button can
 fill it in; a document test keeps every operation's security requirement and

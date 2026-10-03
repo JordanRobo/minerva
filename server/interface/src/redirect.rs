@@ -1024,6 +1024,7 @@ mod tests {
             password_hash: Some("not-a-real-hash".into()),
             display_name: "Existing".into(),
             role: Role::Admin,
+            deactivated_at: None,
             created_at: now,
             updated_at: now,
         };

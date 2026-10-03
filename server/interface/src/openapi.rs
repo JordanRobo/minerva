@@ -1,6 +1,6 @@
 //! OpenAPI document for the Minerva API, assembled from the
 //! `#[utoipa::path]` annotations on the handlers in `auth`, `goals`,
-//! `milestones`, `redirect`, and `tasks`. Served as JSON at `/api-docs/openapi.json` and
+//! `milestones`, `redirect`, `tasks`, and `users`. Served as JSON at `/api-docs/openapi.json` and
 //! rendered by Swagger UI at `/api-docs/swagger-ui/` (wired up in `main.rs`).
 //!
 //! The `*Doc` schema types mirror the wire shape of domain status types:
@@ -89,6 +89,7 @@ pub struct GoalStatusDoc {
         (name = "goals", description = "Goals: the top-level outcomes a school works toward."),
         (name = "milestones", description = "Milestones: dated checkpoints within a goal."),
         (name = "tasks", description = "Tasks: day-to-day work, optionally attached to a milestone."),
+        (name = "users", description = "User administration: roles and active state. Admin only."),
     ),
     paths(
         crate::auth::signup,
@@ -113,6 +114,10 @@ pub struct GoalStatusDoc {
         crate::tasks::get_task,
         crate::tasks::update_task,
         crate::tasks::delete_task,
+        crate::users::list_users,
+        crate::users::change_user_role,
+        crate::users::deactivate_user,
+        crate::users::reactivate_user,
     ),
     components(schemas(
         crate::error::ApiError,
@@ -130,6 +135,8 @@ pub struct GoalStatusDoc {
         crate::tasks::TaskListQuery,
         crate::tasks::TaskRequest,
         crate::tasks::TaskResponse,
+        crate::users::UserAdminResponse,
+        crate::users::ChangeRoleRequest,
         GoalStatusDoc,
         RoleDoc,
         StatusDoc,

@@ -21,6 +21,7 @@ use application::ports::{
     GoalRepository, MilestoneRepository, PasswordHasher, SessionRepository, TaskRepository,
     UserRepository,
 };
+use application::user_admin::UserAdminService;
 use chrono::Utc;
 use diesel::prelude::*;
 use domain::{GoalId, MilestoneId, Permission, Role, TaskId, User, UserId};
@@ -90,6 +91,11 @@ macro_rules! test_app {
             )
             .expect("static provider ids are valid and unique"),
         );
+        let session_service = SessionService::new(
+            sessions,
+            Arc::new(Sha256SessionTokens),
+            SessionService::DEFAULT_SESSION_TTL,
+        );
         init_service(
             App::new()
                 .app_data(web::Data::new(PostgresGoalRepository::new(pool.clone())))
@@ -107,10 +113,10 @@ macro_rules! test_app {
                     pool.clone(),
                 )))
                 .app_data(users_data)
-                .app_data(web::Data::new(SessionService::new(
-                    sessions,
-                    Arc::new(Sha256SessionTokens),
-                    SessionService::DEFAULT_SESSION_TTL,
+                .app_data(web::Data::new(session_service.clone()))
+                .app_data(web::Data::new(UserAdminService::new(
+                    users,
+                    session_service,
                 )))
                 .app_data(providers)
                 .app_data(hasher_data)
@@ -154,6 +160,7 @@ async fn create_user(pool: &PgPool, email: String, role: Role) -> User {
         password_hash: None,
         display_name: "Access test user".into(),
         role,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -175,6 +182,7 @@ async fn create_password_user(pool: &PgPool, email: String) -> User {
         password_hash: Some(password_hash),
         display_name: "Access test user".into(),
         role: Role::Admin,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -312,6 +320,31 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Method::DELETE,
             format!("/api/tasks/{task}"),
             Permission::EditContent,
+            None,
+        ),
+        // The admin-only user management routes.
+        (
+            Method::GET,
+            "/api/users".into(),
+            Permission::ManageUsers,
+            None,
+        ),
+        (
+            Method::PUT,
+            format!("/api/users/{debug_id}/role"),
+            Permission::ManageUsers,
+            Some(serde_json::json!({ "role": "staff" })),
+        ),
+        (
+            Method::POST,
+            format!("/api/users/{debug_id}/deactivate"),
+            Permission::ManageUsers,
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/users/{debug_id}/reactivate"),
+            Permission::ManageUsers,
             None,
         ),
         // The temporary debug routes are locked down to Admin.

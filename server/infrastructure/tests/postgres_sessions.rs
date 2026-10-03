@@ -58,6 +58,7 @@ async fn create_user(pool: &PgPool) -> User {
         password_hash: None,
         display_name: "Session test user".into(),
         role: Role::ReadOnly,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     };

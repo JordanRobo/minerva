@@ -119,6 +119,13 @@ impl AuthenticatedUser {
         let Some(user) = user else {
             return Err(ApiError::unauthorized());
         };
+        // Deactivation revokes the user's sessions, but this is the backstop:
+        // any session that survives (or a request racing the revocation) must
+        // still 401. Like every other failure mode here, the answer is the
+        // same generic 401.
+        if !user.is_active() {
+            return Err(ApiError::unauthorized());
+        }
         Ok(user)
     }
 }
@@ -239,6 +246,7 @@ pub async fn signup(
         password_hash: Some(password_hash),
         display_name: body.display_name.clone(),
         role: DEFAULT_NEW_USER_ROLE,
+        deactivated_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -565,6 +573,7 @@ mod tests {
             password_hash: Some(password_hash),
             display_name: "Auth test user".into(),
             role: Role::Admin,
+            deactivated_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -783,6 +792,7 @@ mod tests {
             password_hash: None,
             display_name: "SSO only".into(),
             role: Role::ReadOnly,
+            deactivated_at: None,
             created_at: now,
             updated_at: now,
         };

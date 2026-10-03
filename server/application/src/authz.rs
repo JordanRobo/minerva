@@ -50,6 +50,7 @@ mod tests {
             password_hash: None,
             display_name: "Test".into(),
             role,
+            deactivated_at: None,
             created_at: now,
             updated_at: now,
         }

@@ -30,7 +30,7 @@ pub use session_tokens::SessionTokens;
 pub use task_relation_repository::TaskRelationRepository;
 pub use task_repository::TaskRepository;
 pub use user_identity_repository::UserIdentityRepository;
-pub use user_repository::UserRepository;
+pub use user_repository::{AccessChange, AccessChangeError, UserRepository};
 
 /// An error from a repository operation.
 #[derive(Debug)]

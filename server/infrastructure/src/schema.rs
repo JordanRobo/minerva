@@ -99,6 +99,7 @@ diesel::table! {
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
         role -> Text,
+        deactivated_at -> Nullable<Timestamptz>,
     }
 }
 

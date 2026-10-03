@@ -9,6 +9,7 @@ mod openapi;
 mod redirect;
 mod routes;
 mod tasks;
+mod users;
 
 #[cfg(test)]
 mod access_tests;
@@ -26,6 +27,7 @@ use application::oidc_login::LoginPolicy;
 use application::ports::{
     OidcProvider, PasswordHasher, SessionRepository, UserIdentityRepository, UserRepository,
 };
+use application::user_admin::UserAdminService;
 use infrastructure::Argon2PasswordHasher;
 use infrastructure::Sha256SessionTokens;
 use infrastructure::db::build_pool;
@@ -129,6 +131,12 @@ async fn main() -> std::io::Result<()> {
         Arc::new(Sha256SessionTokens),
         SessionService::DEFAULT_SESSION_TTL,
     ));
+    // User administration goes through the service so the self-modification
+    // and last-admin rules live in one place (see application::user_admin).
+    let user_admin = web::Data::new(UserAdminService::new(
+        users.clone(),
+        session_service.get_ref().clone(),
+    ));
     // The password hasher holds no state; it is registered like the
     // repositories so handlers name their dependency in their signature.
     let password_hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
@@ -215,6 +223,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(user_identities_data.clone())
             .app_data(sessions_data.clone())
             .app_data(session_service.clone())
+            .app_data(user_admin.clone())
             .app_data(auth_providers.clone())
             .app_data(password_hasher_data.clone())
             .app_data(cookies.clone());

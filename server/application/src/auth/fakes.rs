@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
-use domain::{Session, SessionId, User, UserId, UserIdentity};
+use domain::{Role, Session, SessionId, User, UserId, UserIdentity};
 
 use crate::ports::{
-    PasswordHashError, PasswordHasher, RepositoryError, SessionRepository, SessionTokens,
-    UserIdentityRepository, UserRepository,
+    AccessChange, AccessChangeError, PasswordHashError, PasswordHasher, RepositoryError,
+    SessionRepository, SessionTokens, UserIdentityRepository, UserRepository,
 };
 
 /// A [`SessionRepository`] that keeps sessions in a `HashMap`.
@@ -125,6 +125,69 @@ impl UserRepository for InMemoryUserRepository {
     async fn update(&self, user: User) -> Result<User, RepositoryError> {
         self.locked().insert(user.id, user.clone());
         Ok(user)
+    }
+
+    async fn apply_access_change(
+        &self,
+        target: UserId,
+        change: AccessChange,
+    ) -> Result<User, AccessChangeError> {
+        // The mutex plays the part of the Postgres advisory lock: every access
+        // change re-checks the active-admin count while holding it, so the
+        // fake enforces the same last-admin rule as the real repository.
+        let mut users = self.locked();
+        let Some(user) = users.get(&target) else {
+            return Err(AccessChangeError::NotFound);
+        };
+        let other_active_admins = users
+            .values()
+            .filter(|other| other.id != target && other.role == Role::Admin && other.is_active())
+            .count();
+        let now = Utc::now();
+        let updated = match change {
+            AccessChange::Role(role) => {
+                if user.role == role {
+                    return Ok(user.clone());
+                }
+                if user.role == Role::Admin
+                    && user.is_active()
+                    && role != Role::Admin
+                    && other_active_admins == 0
+                {
+                    return Err(AccessChangeError::LastAdmin);
+                }
+                User {
+                    role,
+                    updated_at: now,
+                    ..user.clone()
+                }
+            }
+            AccessChange::Deactivate => {
+                if !user.is_active() {
+                    return Ok(user.clone());
+                }
+                if user.role == Role::Admin && other_active_admins == 0 {
+                    return Err(AccessChangeError::LastAdmin);
+                }
+                User {
+                    deactivated_at: Some(now),
+                    updated_at: now,
+                    ..user.clone()
+                }
+            }
+            AccessChange::Reactivate => {
+                if user.is_active() {
+                    return Ok(user.clone());
+                }
+                User {
+                    deactivated_at: None,
+                    updated_at: now,
+                    ..user.clone()
+                }
+            }
+        };
+        users.insert(target, updated.clone());
+        Ok(updated)
     }
 }
 
@@ -249,5 +312,15 @@ impl UserRepository for FailingUserRepository {
         Err(RepositoryError::Unexpected(
             "faking a repository failure".to_owned(),
         ))
+    }
+
+    async fn apply_access_change(
+        &self,
+        _target: UserId,
+        _change: AccessChange,
+    ) -> Result<User, AccessChangeError> {
+        Err(AccessChangeError::Repository(RepositoryError::Unexpected(
+            "faking a repository failure".to_owned(),
+        )))
     }
 }

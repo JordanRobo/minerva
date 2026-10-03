@@ -16,7 +16,7 @@ pub mod password;
 pub mod provider;
 
 #[cfg(test)]
-mod fakes;
+pub(crate) mod fakes;
 
 /// A freshly issued session: the raw token (shown to the client exactly once)
 /// and the session record whose `token_hash` is what got stored.
@@ -31,6 +31,7 @@ pub struct IssuedSession {
 /// Issues, resolves and revokes sessions. Every sign-in method ends in
 /// [`SessionService::issue`], so sessions are indistinguishable regardless of
 /// how the user signed in.
+#[derive(Clone)]
 pub struct SessionService {
     sessions: Arc<dyn SessionRepository>,
     tokens: Arc<dyn SessionTokens>,
@@ -94,6 +95,13 @@ impl SessionService {
             self.sessions.delete(session.id).await?;
         }
         Ok(())
+    }
+
+    /// Delete every session of a user at once (e.g. when an admin deactivates
+    /// the account). A user with no sessions is a valid state, so this never
+    /// errors on an empty result.
+    pub async fn revoke_all_for_user(&self, user_id: UserId) -> Result<(), RepositoryError> {
+        self.sessions.delete_all_for_user(user_id).await
     }
 }
 
@@ -210,6 +218,7 @@ mod tests {
             password_hash: None,
             display_name: "Test user".to_owned(),
             role: Role::ReadOnly,
+            deactivated_at: None,
             created_at: now,
             updated_at: now,
         };

@@ -13,9 +13,9 @@ use crate::ports::{PasswordHasher, UserRepository};
 pub const PASSWORD_PROVIDER_ID: &str = "password";
 
 /// Signs users in with an email address and a password. Every rejection —
-/// unknown email, passwordless account, wrong password — is
-/// [`AuthError::InvalidCredentials`], so the answer never reveals which check
-/// failed; only repository or hasher failures surface as
+/// unknown email, deactivated account, passwordless account, wrong password —
+/// is [`AuthError::InvalidCredentials`], so the answer never reveals which
+/// check failed; only repository or hasher failures surface as
 /// [`AuthError::Internal`].
 pub struct PasswordAuthProvider {
     users: Arc<dyn UserRepository>,
@@ -52,6 +52,10 @@ impl CredentialProvider for PasswordAuthProvider {
         let Some(user) = user else {
             return Err(AuthError::InvalidCredentials);
         };
+        // A deactivated account is refused like any other bad credential.
+        if !user.is_active() {
+            return Err(AuthError::InvalidCredentials);
+        }
         let Some(password_hash) = user.password_hash.clone() else {
             return Err(AuthError::InvalidCredentials);
         };
@@ -81,6 +85,7 @@ mod tests {
             password_hash: password_hash.map(str::to_owned),
             display_name: "Test user".to_owned(),
             role: Role::Admin,
+            deactivated_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -147,6 +152,20 @@ mod tests {
         let provider = provider(Arc::new(users));
         let err = provider
             .authenticate(credentials("sso-only@example.com", "s3cret"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials));
+    }
+
+    #[tokio::test]
+    async fn a_deactivated_account_is_invalid_credentials() {
+        let users = InMemoryUserRepository::new();
+        let mut deactivated = user("off@example.com", Some("hash-of-s3cret"));
+        deactivated.deactivated_at = Some(Utc::now());
+        users.create(deactivated).await.unwrap();
+        let provider = provider(Arc::new(users));
+        let err = provider
+            .authenticate(credentials("off@example.com", "s3cret"))
             .await
             .unwrap_err();
         assert!(matches!(err, AuthError::InvalidCredentials));

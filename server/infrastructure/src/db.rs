@@ -51,3 +51,22 @@ where
     .await
     .map_err(|err| RepositoryError::Unexpected(format!("blocking task failed: {err}")))?
 }
+
+/// Like [`run_on_postgres`], but for operations whose failures are not
+/// plain [`RepositoryError`] (e.g. the user access-change transaction, whose
+/// typed outcomes — not found, last admin — are policy decisions, not storage
+/// failures). Pool and task failures still surface as [`RepositoryError`]
+/// and are lifted into `E` through its `From` impl.
+pub async fn run_on_postgres_with<T, E, F>(pool: PgPool, op: F) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<RepositoryError> + Send + 'static,
+    F: FnOnce(&mut PgConnection) -> Result<T, E> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut conn = pool.get().map_err(map_pool_error)?;
+        op(&mut conn)
+    })
+    .await
+    .map_err(|err| RepositoryError::Unexpected(format!("blocking task failed: {err}")))?
+}
