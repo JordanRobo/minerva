@@ -220,7 +220,7 @@ mod tests {
     use crate::auth::fakes::{FakePasswordHasher, InMemoryUserRepository};
     use crate::auth::password::PasswordAuthProvider;
     use chrono::Utc;
-    use domain::UserId;
+    use domain::{Role, UserId};
 
     /// A throwaway [`CredentialProvider`] standing in for a future login
     /// method: any id, and it always authenticates to one fixed user.
@@ -246,6 +246,7 @@ mod tests {
                 email: "magic@example.com".to_owned(),
                 password_hash: None,
                 display_name: "Magic user".to_owned(),
+                role: Role::Admin,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })

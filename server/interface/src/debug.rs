@@ -1,10 +1,11 @@
-//! TEMPORARY, unauthenticated debug endpoints for verifying repository
-//! wiring end-to-end against a live Postgres. Each handler calls one read
-//! method on a single repository and returns the result as JSON; an empty
-//! database yields an empty array, which is itself a useful "it works" signal.
+//! TEMPORARY, admin-only debug endpoints for verifying repository wiring
+//! end-to-end against a live Postgres. Each handler calls one read method on
+//! a single repository and returns the result as JSON; an empty database
+//! yields an empty array, which is itself a useful "it works" signal.
 //!
-//! These are not meant to ship: remove this module and its routes (see
-//! `main.rs`) before `/debug` is considered a real API surface.
+//! These are not meant to ship: they stay locked down to Admin (roadmap
+//! 2.4) until roadmap 3.4/3.6 provide real endpoints for the same data, and
+//! their removal is roadmap 8.5.
 
 use actix_web::{HttpResponse, web};
 use application::ports::{
@@ -18,6 +19,8 @@ use infrastructure::repositories::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::access::AdminAccess;
+
 #[derive(Deserialize)]
 pub struct TaskIdQuery {
     pub task_id: Uuid,
@@ -25,6 +28,7 @@ pub struct TaskIdQuery {
 
 /// `GET /debug/task-relations?task_id=<uuid>` — relations a task touches.
 pub async fn list_task_relations(
+    _access: AdminAccess,
     query: web::Query<TaskIdQuery>,
     relations: web::Data<PostgresTaskRelationRepository>,
 ) -> HttpResponse {
@@ -42,6 +46,7 @@ pub struct TargetQuery {
 
 /// `GET /debug/progress-snapshots?goal_id=<uuid>` or `?milestone_id=<uuid>`.
 pub async fn list_progress_snapshots(
+    _access: AdminAccess,
     query: web::Query<TargetQuery>,
     snapshots: web::Data<PostgresProgressSnapshotRepository>,
 ) -> HttpResponse {
@@ -67,6 +72,7 @@ pub struct GoalIdQuery {
 
 /// `GET /debug/goal-milestones?goal_id=<uuid>` — milestones linked to a goal.
 pub async fn list_goal_milestones(
+    _access: AdminAccess,
     query: web::Query<GoalIdQuery>,
     links: web::Data<PostgresGoalMilestoneRepository>,
 ) -> HttpResponse {

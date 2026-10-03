@@ -245,7 +245,7 @@ mod tests {
     use super::*;
     use crate::auth::fakes::{InMemoryUserIdentityRepository, InMemoryUserRepository};
     use crate::ports::OidcAuthRequest;
-    use domain::UserIdentity;
+    use domain::{Role, UserIdentity};
     use std::sync::Mutex;
 
     /// A [`OidcProvider`] for tests: a fixed authorization URL and pending
@@ -378,6 +378,7 @@ mod tests {
             email: email.to_owned(),
             password_hash: Some("hash-of-password".to_owned()),
             display_name: "Existing user".to_owned(),
+            role: Role::Admin,
             created_at: now,
             updated_at: now,
         }
@@ -482,6 +483,7 @@ mod tests {
             email: "someone@example.com".to_owned(),
             password_hash: None,
             display_name: "Known user".to_owned(),
+            role: Role::Admin,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

@@ -47,6 +47,15 @@ impl ApiError {
         }
     }
 
+    /// 403 — the request is authenticated, but the user's role does not allow
+    /// the action.
+    pub fn forbidden() -> Self {
+        Self {
+            code: "forbidden".to_owned(),
+            message: "you do not have permission to do this".to_owned(),
+        }
+    }
+
     /// 404 — the requested resource does not exist.
     pub fn not_found() -> Self {
         Self {
@@ -85,6 +94,7 @@ impl ResponseError for ApiError {
     fn status_code(&self) -> StatusCode {
         match self.code.as_str() {
             "unauthorized" => StatusCode::UNAUTHORIZED,
+            "forbidden" => StatusCode::FORBIDDEN,
             "not_found" => StatusCode::NOT_FOUND,
             "conflict" => StatusCode::CONFLICT,
             "internal_error" => StatusCode::INTERNAL_SERVER_ERROR,

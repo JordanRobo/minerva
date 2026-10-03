@@ -1,3 +1,4 @@
+mod access;
 mod auth;
 mod config;
 mod debug;
@@ -6,10 +7,17 @@ mod goals;
 mod milestones;
 mod openapi;
 mod redirect;
+mod routes;
 mod tasks;
 
+#[cfg(test)]
+mod access_tests;
+
+#[cfg(test)]
+mod public_routes;
+
 use actix_web::cookie::Key;
-use actix_web::{App, HttpResponse, HttpServer, web};
+use actix_web::{App, HttpServer, web};
 use application::auth::SessionService;
 use application::auth::oidc::OidcAuthProvider;
 use application::auth::password::PasswordAuthProvider;
@@ -30,16 +38,8 @@ use infrastructure::repositories::{
     RedisSessionRepository,
 };
 use std::sync::Arc;
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
-use crate::error::ApiError;
-use crate::openapi::ApiDoc;
 use crate::redirect::RedirectFlow;
-
-async fn health() -> HttpResponse {
-    HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
-}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -204,7 +204,6 @@ async fn main() -> std::io::Result<()> {
     println!("minerva-server listening on 0.0.0.0:{port}");
 
     HttpServer::new(move || {
-        let openapi = ApiDoc::openapi();
         let mut app = App::new()
             .app_data(goals.clone())
             .app_data(milestones.clone())
@@ -225,72 +224,7 @@ async fn main() -> std::io::Result<()> {
         if let Some(flow) = redirect_flow.clone() {
             app = app.app_data(flow);
         }
-        app.route("/health", web::get().to(health))
-            // The real API surface, built endpoint-group by endpoint-group.
-            .service(
-                web::scope("/api")
-                    // Malformed or unparsable JSON bodies get the standard
-                    // error envelope instead of Actix's default plaintext.
-                    .app_data(web::JsonConfig::default().error_handler(|err, _req| {
-                        ApiError::bad_request(format!("invalid JSON body: {err}")).into()
-                    }))
-                    .route("/goals", web::post().to(goals::create_goal))
-                    .route("/goals", web::get().to(goals::list_goals))
-                    .route("/goals/{id}", web::get().to(goals::get_goal))
-                    .route("/goals/{id}", web::put().to(goals::update_goal))
-                    .route("/goals/{id}", web::delete().to(goals::delete_goal))
-                    .route("/milestones", web::post().to(milestones::create_milestone))
-                    .route("/milestones", web::get().to(milestones::list_milestones))
-                    .route("/milestones/{id}", web::get().to(milestones::get_milestone))
-                    .route(
-                        "/milestones/{id}",
-                        web::put().to(milestones::update_milestone),
-                    )
-                    .route(
-                        "/milestones/{id}",
-                        web::delete().to(milestones::delete_milestone),
-                    )
-                    .route("/tasks", web::post().to(tasks::create_task))
-                    .route("/tasks", web::get().to(tasks::list_tasks))
-                    .route("/tasks/{id}", web::get().to(tasks::get_task))
-                    .route("/tasks/{id}", web::put().to(tasks::update_task))
-                    .route("/tasks/{id}", web::delete().to(tasks::delete_task))
-                    .route("/auth/signup", web::post().to(auth::signup))
-                    .route("/auth/login", web::post().to(auth::login))
-                    .route("/auth/logout", web::post().to(auth::logout))
-                    .route("/auth/me", web::get().to(auth::me))
-                    .route("/auth/providers", web::get().to(auth::list_auth_providers))
-                    .route(
-                        "/auth/{provider}/login",
-                        web::get().to(redirect::redirect_login),
-                    )
-                    .route(
-                        "/auth/{provider}/callback",
-                        web::get().to(redirect::redirect_callback),
-                    ),
-            )
-            // TEMPORARY: verifies repository wiring end-to-end; unauthenticated
-            // and not meant to ship. Remove this scope before /debug is a real API.
-            .service(
-                web::scope("/debug")
-                    .route("/task-relations", web::get().to(debug::list_task_relations))
-                    .route(
-                        "/progress-snapshots",
-                        web::get().to(debug::list_progress_snapshots),
-                    )
-                    .route(
-                        "/goal-milestones",
-                        web::get().to(debug::list_goal_milestones),
-                    ),
-            )
-            // API documentation (not part of the /api surface): a Swagger UI
-            // rendering the generated OpenAPI 3 document, plus the raw JSON at
-            // /api-docs/openapi.json (registered by `.url`). Unauthenticated
-            // like the rest of the server; route protection is roadmap item 2.4.
-            .service(
-                SwaggerUi::new("/api-docs/swagger-ui/{_:.*}")
-                    .url("/api-docs/openapi.json", openapi),
-            )
+        app.configure(routes::configure)
     })
     .bind(("0.0.0.0", port))?
     .run()

@@ -98,6 +98,7 @@ diesel::table! {
         display_name -> Text,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
+        role -> Text,
     }
 }
 

@@ -6,7 +6,7 @@ use domain::{User, UserId};
 
 use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
-use crate::repositories::mapping::{UserRow, user_from_row};
+use crate::repositories::mapping::{UserRow, role_to_db, user_from_row};
 use crate::schema::users;
 
 /// [`UserRepository`] backed by Postgres through Diesel.
@@ -34,6 +34,7 @@ impl UserRepository for PostgresUserRepository {
                     users::display_name.eq(&user.display_name),
                     users::created_at.eq(&user.created_at),
                     users::updated_at.eq(&user.updated_at),
+                    users::role.eq(role_to_db(user.role)),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
@@ -89,6 +90,7 @@ impl UserRepository for PostgresUserRepository {
                     users::password_hash.eq(&user.password_hash),
                     users::display_name.eq(&user.display_name),
                     users::updated_at.eq(&user.updated_at),
+                    users::role.eq(role_to_db(user.role)),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;

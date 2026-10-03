@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::role::Role;
+
 /// Identifier for a [`User`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct UserId(pub Uuid);
@@ -31,6 +33,8 @@ pub struct User {
     /// kept in memory past the moment of verification.
     pub password_hash: Option<String>,
     pub display_name: String,
+    /// What this user is allowed to do; see [`Role::allows`].
+    pub role: Role,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

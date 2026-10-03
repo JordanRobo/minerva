@@ -13,7 +13,7 @@ use uuid::Uuid;
 use application::ports::RepositoryError;
 use domain::{
     Goal, GoalId, GoalStatus, Milestone, MilestoneId, ProgressSnapshot, ProgressSnapshotId,
-    ProgressTarget, Session, SessionId, Status, StatusSource, Task, TaskId, TaskRelation,
+    ProgressTarget, Role, Session, SessionId, Status, StatusSource, Task, TaskId, TaskRelation,
     TaskRelationId, TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserIdentityId,
 };
 
@@ -260,8 +260,8 @@ pub fn progress_snapshot_from_row(
 }
 
 /// A row of the `users` table: id, email, password_hash, display_name,
-/// created_at, updated_at — in that order. `password_hash` is `None` for a
-/// user who can only sign in via an external identity provider.
+/// created_at, updated_at, role — in that order. `password_hash` is `None`
+/// for a user who can only sign in via an external identity provider.
 pub type UserRow = (
     Uuid,
     String,
@@ -269,16 +269,43 @@ pub type UserRow = (
     String,
     DateTime<Utc>,
     DateTime<Utc>,
+    String,
 );
+
+/// The value stored in a `role` column for [`Role`].
+pub fn role_to_db(role: Role) -> &'static str {
+    match role {
+        Role::Admin => "admin",
+        Role::Staff => "staff",
+        Role::ReadOnly => "read_only",
+    }
+}
+
+/// The [`Role`] stored in a `role` column.
+///
+/// A value that matches no known variant is a data-integrity problem — the
+/// CHECK constraint should make it impossible — so it is reported as
+/// [`RepositoryError::Unexpected`] rather than guessed at.
+pub fn role_from_db(role: &str) -> Result<Role, RepositoryError> {
+    match role {
+        "admin" => Ok(Role::Admin),
+        "staff" => Ok(Role::Staff),
+        "read_only" => Ok(Role::ReadOnly),
+        other => Err(RepositoryError::Unexpected(format!(
+            "unknown role value {other:?} in database"
+        ))),
+    }
+}
 
 /// Build a [`User`] from a `users` row.
 pub fn user_from_row(row: UserRow) -> Result<User, RepositoryError> {
-    let (id, email, password_hash, display_name, created_at, updated_at) = row;
+    let (id, email, password_hash, display_name, created_at, updated_at, role) = row;
     Ok(User {
         id: UserId(id),
         email,
         password_hash,
         display_name,
+        role: role_from_db(&role)?,
         created_at,
         updated_at,
     })

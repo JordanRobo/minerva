@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+use crate::access::{EditAccess, ViewAccess};
 use crate::error::{ApiError, repo_error_response};
 use crate::openapi::TaskStatusDoc;
 
@@ -74,10 +75,12 @@ pub struct TaskListQuery {
 /// Create Task
 ///
 /// Create a new task, optionally assigning it to a milestone.
+/// Requires the Staff or Admin role.
 #[utoipa::path(
     post,
     path = "/api/tasks",
     tags = ["tasks"],
+    security(("session_cookie" = [])),
     request_body = TaskRequest,
     responses(
         (status = 201, description = "Task created", body = TaskResponse),
@@ -85,11 +88,14 @@ pub struct TaskListQuery {
             status = 400,
             description = "Title is missing or blank, or milestone_id does not reference an existing milestone",
             body = ApiError
-        )
+        ),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError)
     )
 )]
 pub async fn create_task(
     tasks: web::Data<PostgresTaskRepository>,
+    _access: EditAccess,
     body: web::Json<TaskRequest>,
 ) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
@@ -115,10 +121,12 @@ pub async fn create_task(
 /// List Tasks
 ///
 /// List tasks, filtered to either a milestone's tasks or the unassigned pool.
+/// Any signed-in user may read.
 #[utoipa::path(
     get,
     path = "/api/tasks",
     tags = ["tasks"],
+    security(("session_cookie" = [])),
     params(TaskListQuery),
     responses(
         (status = 200, description = "The matching tasks", body = Vec<TaskResponse>),
@@ -126,12 +134,14 @@ pub async fn create_task(
             status = 400,
             description = "Neither milestone_id nor unassigned=true supplied, or both",
             body = ApiError
-        )
+        ),
+        (status = 401, description = "Missing or invalid session", body = ApiError)
     )
 )]
 pub async fn list_tasks(
     query: web::Query<TaskListQuery>,
     tasks: web::Data<PostgresTaskRepository>,
+    _access: ViewAccess,
 ) -> Result<HttpResponse, ApiError> {
     let listed = match (query.milestone_id, query.unassigned) {
         (Some(milestone_id), None) => tasks.list_by_milestone(MilestoneId(milestone_id)).await,
@@ -152,19 +162,22 @@ pub async fn list_tasks(
 
 /// Get Task
 ///
-/// Fetch a single task by its ID.
+/// Fetch a single task by its ID. Any signed-in user may read.
 #[utoipa::path(
     get,
     path = "/api/tasks/{id}",
     tags = ["tasks"],
+    security(("session_cookie" = [])),
     params(("id" = Uuid, Path, description = "Task identifier")),
     responses(
         (status = 200, description = "The task", body = TaskResponse),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
         (status = 404, description = "No task with this id", body = ApiError)
     )
 )]
 pub async fn get_task(
     tasks: web::Data<PostgresTaskRepository>,
+    _access: ViewAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match tasks.find_by_id(TaskId(*path)).await {
@@ -177,10 +190,12 @@ pub async fn get_task(
 /// Update Task
 ///
 /// Update a task's fields, including reassigning it to a different milestone or unassigning it.
+/// Requires the Staff or Admin role.
 #[utoipa::path(
     put,
     path = "/api/tasks/{id}",
     tags = ["tasks"],
+    security(("session_cookie" = [])),
     params(("id" = Uuid, Path, description = "Task identifier")),
     request_body = TaskRequest,
     responses(
@@ -190,11 +205,14 @@ pub async fn get_task(
             description = "Title is missing or blank, or milestone_id does not reference an existing milestone",
             body = ApiError
         ),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
         (status = 404, description = "No task with this id", body = ApiError)
     )
 )]
 pub async fn update_task(
     tasks: web::Data<PostgresTaskRepository>,
+    _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<TaskRequest>,
 ) -> Result<HttpResponse, ApiError> {
@@ -226,19 +244,23 @@ pub async fn update_task(
 
 /// Delete Task
 ///
-/// Delete a task.
+/// Delete a task. Requires the Staff or Admin role.
 #[utoipa::path(
     delete,
     path = "/api/tasks/{id}",
     tags = ["tasks"],
+    security(("session_cookie" = [])),
     params(("id" = Uuid, Path, description = "Task identifier")),
     responses(
         (status = 204, description = "Task deleted"),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
         (status = 404, description = "No task with this id", body = ApiError)
     )
 )]
 pub async fn delete_task(
     tasks: web::Data<PostgresTaskRepository>,
+    _access: EditAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match tasks.delete(TaskId(*path)).await {

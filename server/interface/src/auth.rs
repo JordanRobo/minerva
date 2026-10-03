@@ -14,7 +14,7 @@ use application::auth::provider::{AuthError, AuthProviders, Credentials, Provide
 use application::auth::{SessionService, normalize_email};
 use application::ports::{PasswordHasher, UserRepository};
 use chrono::{DateTime, Utc};
-use domain::{User, UserId};
+use domain::{DEFAULT_NEW_USER_ROLE, Role, User, UserId};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
@@ -22,6 +22,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::error::{ApiError, repo_error_response};
+use crate::openapi::RoleDoc;
 
 /// Cookie attributes shared by the session and redirect-state cookies. Built
 /// from `server.cookie_secure` in the configuration and registered as
@@ -35,7 +36,7 @@ pub struct CookieSettings {
 }
 
 /// Name of the session cookie.
-const COOKIE_NAME: &str = "minerva_session";
+pub(crate) const COOKIE_NAME: &str = "minerva_session";
 
 /// JSON shape of a user in auth responses. Deliberately omits
 /// `password_hash` — it is server-side only and must never cross the wire.
@@ -44,6 +45,9 @@ pub struct UserResponse {
     pub id: Uuid,
     pub email: String,
     pub display_name: String,
+    /// The user's role: `admin`, `staff` or `read_only`.
+    #[schema(value_type = RoleDoc)]
+    pub role: Role,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -54,6 +58,7 @@ impl From<&User> for UserResponse {
             id: user.id.0,
             email: user.email.clone(),
             display_name: user.display_name.clone(),
+            role: user.role,
             created_at: user.created_at,
             updated_at: user.updated_at,
         }
@@ -82,6 +87,42 @@ pub struct AuthenticatedUser {
     pub user: User,
 }
 
+impl AuthenticatedUser {
+    /// The user behind the request's session cookie, or a 401 [`ApiError`].
+    ///
+    /// Every failure mode (no cookie, unknown token, expired session,
+    /// vanished user) is the same 401: the response must not hint which.
+    /// Shared with the access extractors in `crate::access`, so there is one
+    /// place that turns "no valid session" into a 401.
+    pub(crate) async fn resolve(req: &HttpRequest) -> Result<User, ApiError> {
+        let service = req
+            .app_data::<web::Data<SessionService>>()
+            .ok_or_else(ApiError::internal_error)?;
+        let users = req
+            .app_data::<web::Data<dyn UserRepository>>()
+            .ok_or_else(ApiError::internal_error)?;
+
+        let Some(cookie) = req.cookie(COOKIE_NAME) else {
+            return Err(ApiError::unauthorized());
+        };
+        let session = service
+            .resolve(cookie.value())
+            .await
+            .map_err(repo_error_response)?;
+        let Some(session) = session else {
+            return Err(ApiError::unauthorized());
+        };
+        let user = users
+            .find_by_id(session.user_id)
+            .await
+            .map_err(repo_error_response)?;
+        let Some(user) = user else {
+            return Err(ApiError::unauthorized());
+        };
+        Ok(user)
+    }
+}
+
 impl FromRequest for AuthenticatedUser {
     type Error = ApiError;
     type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
@@ -91,33 +132,9 @@ impl FromRequest for AuthenticatedUser {
         // (cheap: headers + extensions).
         let req = req.clone();
         Box::pin(async move {
-            let service = req
-                .app_data::<web::Data<SessionService>>()
-                .ok_or_else(ApiError::internal_error)?;
-            let users = req
-                .app_data::<web::Data<dyn UserRepository>>()
-                .ok_or_else(ApiError::internal_error)?;
-
-            // Every failure mode (no cookie, unknown token, expired session,
-            // vanished user) is the same 401: the response must not hint which.
-            let Some(cookie) = req.cookie(COOKIE_NAME) else {
-                return Err(ApiError::unauthorized());
-            };
-            let session = service
-                .resolve(cookie.value())
-                .await
-                .map_err(repo_error_response)?;
-            let Some(session) = session else {
-                return Err(ApiError::unauthorized());
-            };
-            let user = users
-                .find_by_id(session.user_id)
-                .await
-                .map_err(repo_error_response)?;
-            let Some(user) = user else {
-                return Err(ApiError::unauthorized());
-            };
-            Ok(Self { user })
+            Ok(Self {
+                user: Self::resolve(&req).await?,
+            })
         })
     }
 }
@@ -221,6 +238,7 @@ pub async fn signup(
         email,
         password_hash: Some(password_hash),
         display_name: body.display_name.clone(),
+        role: DEFAULT_NEW_USER_ROLE,
         created_at: now,
         updated_at: now,
     };
@@ -309,11 +327,12 @@ pub async fn logout(
 
 /// Current User
 ///
-/// The user behind the request's session cookie.
+/// The user behind the request's session cookie. Any signed-in user may call it.
 #[utoipa::path(
     get,
     path = "/api/auth/me",
     tags = ["auth"],
+    security(("session_cookie" = [])),
     responses(
         (status = 200, description = "The authenticated user", body = UserResponse),
         (status = 401, description = "Missing or invalid session", body = ApiError)
@@ -545,6 +564,7 @@ mod tests {
             email,
             password_hash: Some(password_hash),
             display_name: "Auth test user".into(),
+            role: Role::Admin,
             created_at: now,
             updated_at: now,
         };
@@ -595,6 +615,8 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["email"], email);
         assert_eq!(json["display_name"], "Signup user");
+        // New accounts start with the default role.
+        assert_eq!(json["role"], "read_only");
         assert!(json.get("password_hash").is_none(), "no hash in response");
 
         let pool = test_pool(&url);
@@ -760,6 +782,7 @@ mod tests {
             email: unique_email("sso"),
             password_hash: None,
             display_name: "SSO only".into(),
+            role: Role::ReadOnly,
             created_at: now,
             updated_at: now,
         };
@@ -828,6 +851,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["email"], email);
         assert_eq!(json["id"], user.id.0.to_string());
+        assert_eq!(json["role"], "admin");
 
         delete_user(&pool, user.id);
     }

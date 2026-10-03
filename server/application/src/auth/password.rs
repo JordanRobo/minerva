@@ -72,7 +72,7 @@ mod tests {
     use super::*;
     use crate::auth::fakes::{FailingUserRepository, FakePasswordHasher, InMemoryUserRepository};
     use chrono::Utc;
-    use domain::UserId;
+    use domain::{Role, UserId};
 
     fn user(email: &str, password_hash: Option<&str>) -> User {
         User {
@@ -80,6 +80,7 @@ mod tests {
             email: email.to_owned(),
             password_hash: password_hash.map(str::to_owned),
             display_name: "Test user".to_owned(),
+            role: Role::Admin,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
