@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use application::auth::validate_email;
 use application::bootstrap::MIN_PASSWORD_LENGTH;
 use figment::Figment;
 use figment::providers::{Format, Serialized, Toml};
@@ -316,7 +317,7 @@ impl Config {
         // Bootstrap is independent of OIDC, so it is checked before the early
         // return below: a fresh deployment usually has neither configured.
         if self.bootstrap_enabled() {
-            if let Some(why) = valid_email(&self.bootstrap.admin_email) {
+            if let Some(why) = validate_email(&self.bootstrap.admin_email) {
                 problems.push(format!(
                     "bootstrap.admin_email is not a valid email address: {why}"
                 ));
@@ -400,21 +401,6 @@ fn resolve_one(key: &str, value: &mut Secret, file: &mut String, problems: &mut 
         }
     }
     file.clear();
-}
-
-/// A minimal email shape check for configuration input: exactly one '@' with
-/// a non-empty local part and domain.
-/// Returns the first problem found, if any.
-fn valid_email(raw: &str) -> Option<String> {
-    let email = raw.trim();
-    if email.matches('@').count() != 1 {
-        return Some("exactly one '@' is required".to_owned());
-    }
-    let (local, domain) = email.split_once('@').expect("checked above");
-    if local.is_empty() || domain.is_empty() {
-        return Some("the parts before and after the '@' must not be empty".to_owned());
-    }
-    None
 }
 
 /// An absolute http(s) URL with any trailing slash stripped, so redirects can

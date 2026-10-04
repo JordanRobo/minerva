@@ -14,12 +14,13 @@ use actix_web::dev::Service;
 use actix_web::http::{Method, StatusCode, header};
 use actix_web::test::{TestRequest, init_service, read_body};
 use actix_web::web;
+use application::account_links::AccountLinkService;
 use application::auth::SessionService;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::AuthProviders;
 use application::ports::{
-    GoalRepository, MilestoneRepository, PasswordHasher, SessionRepository, TaskRepository,
-    UserRepository,
+    GoalRepository, MilestoneRepository, PasswordHasher, SessionRepository, SessionTokens,
+    TaskRepository, UserRepository,
 };
 use application::user_admin::UserAdminService;
 use chrono::Utc;
@@ -27,11 +28,11 @@ use diesel::prelude::*;
 use domain::{GoalId, MilestoneId, Permission, Role, TaskId, User, UserId};
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{
-    PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
-    PostgresProgressSnapshotRepository, PostgresSessionRepository, PostgresTaskRelationRepository,
-    PostgresTaskRepository, PostgresUserRepository,
+    PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
+    PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
+    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserRepository,
 };
-use infrastructure::{Argon2PasswordHasher, Sha256SessionTokens};
+use infrastructure::{Argon2PasswordHasher, NoEmailSender, Sha256SessionTokens};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -90,10 +91,22 @@ macro_rules! test_app {
             )
             .expect("static provider ids are valid and unique"),
         );
+        let session_tokens: Arc<dyn SessionTokens> = Arc::new(Sha256SessionTokens);
         let session_service = SessionService::new(
             sessions,
-            Arc::new(Sha256SessionTokens),
+            session_tokens.clone(),
             SessionService::DEFAULT_SESSION_TTL,
+        );
+        // Mirrors `main.rs`: the invite and password-reset routes go through
+        // the account-link service (no email delivery in tests).
+        let account_link_service = AccountLinkService::new(
+            Arc::new(PostgresAccountTokenRepository::new(pool.clone())),
+            users.clone(),
+            hasher.clone(),
+            session_tokens,
+            session_service.clone(),
+            Arc::new(NoEmailSender),
+            String::new(),
         );
         init_service(
             App::new()
@@ -113,6 +126,7 @@ macro_rules! test_app {
                 )))
                 .app_data(users_data)
                 .app_data(web::Data::new(session_service.clone()))
+                .app_data(web::Data::new(account_link_service))
                 .app_data(web::Data::new(UserAdminService::new(
                     users,
                     session_service,
@@ -216,6 +230,19 @@ async fn issue_token(pool: &PgPool, user_id: UserId) -> String {
         SessionService::DEFAULT_SESSION_TTL,
     );
     service.issue(user_id).await.expect("issue session").token
+}
+
+/// The `id` field of a creation response, as a UUID.
+fn parse_id(value: &serde_json::Value) -> Uuid {
+    value.as_str().unwrap().parse().unwrap()
+}
+
+/// Delete an account-token row directly (the repository has no delete).
+fn delete_token(pool: &PgPool, id: Uuid) {
+    let mut conn = pool.get().expect("pool connection");
+    diesel::delete(infrastructure::schema::account_tokens::table.find(id))
+        .execute(&mut conn)
+        .expect("delete token");
 }
 
 /// Every protected route: method, URI (placeholder UUIDs), the permission it
@@ -345,6 +372,40 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Permission::ManageUsers,
             None,
         ),
+        (
+            Method::POST,
+            format!("/api/users/{debug_id}/password-reset"),
+            Permission::ManageUsers,
+            None,
+        ),
+        // The admin-only invite routes.
+        (
+            Method::POST,
+            "/api/invites".into(),
+            Permission::ManageUsers,
+            Some(serde_json::json!({
+                "email": "invite-access-test@example.com",
+                "role": "staff"
+            })),
+        ),
+        (
+            Method::GET,
+            "/api/invites".into(),
+            Permission::ManageUsers,
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/invites/{debug_id}/revoke"),
+            Permission::ManageUsers,
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/invites/{debug_id}/reissue"),
+            Permission::ManageUsers,
+            None,
+        ),
         // The temporary debug routes are locked down to Admin.
         (
             Method::GET,
@@ -396,6 +457,7 @@ async fn each_role_gets_exactly_what_its_permissions_allow() {
     let mut created_goals = Vec::new();
     let mut created_milestones = Vec::new();
     let mut created_tasks = Vec::new();
+    let mut created_invites = Vec::new();
 
     for role in [Role::Admin, Role::Staff, Role::ReadOnly] {
         let user = create_user(&pool, unique_email("access"), role).await;
@@ -412,11 +474,13 @@ async fn each_role_gets_exactly_what_its_permissions_allow() {
                 if method == Method::POST && res.status() == StatusCode::CREATED {
                     let json: serde_json::Value =
                         serde_json::from_slice(&read_body(res).await).unwrap();
-                    let id: Uuid = json["id"].as_str().unwrap().parse().unwrap();
+                    // Invites nest their id under `invite`; the other
+                    // creations carry a top-level one.
                     match uri.as_str() {
-                        "/api/goals" => created_goals.push(id),
-                        "/api/milestones" => created_milestones.push(id),
-                        _ => created_tasks.push(id),
+                        "/api/goals" => created_goals.push(parse_id(&json["id"])),
+                        "/api/milestones" => created_milestones.push(parse_id(&json["id"])),
+                        "/api/invites" => created_invites.push(parse_id(&json["invite"]["id"])),
+                        _ => created_tasks.push(parse_id(&json["id"])),
                     }
                 } else {
                     // Consume the body so the response is dropped cleanly.
@@ -450,9 +514,12 @@ async fn each_role_gets_exactly_what_its_permissions_allow() {
             .await
             .expect("cleanup milestone");
     }
-    let tasks = PostgresTaskRepository::new(pool);
+    let tasks = PostgresTaskRepository::new(pool.clone());
     for id in created_tasks {
         tasks.delete(TaskId(id)).await.expect("cleanup task");
+    }
+    for id in created_invites {
+        delete_token(&pool, id);
     }
 }
 
@@ -489,6 +556,26 @@ async fn public_routes_do_not_require_a_session() {
                 ),
                 "/api/auth/logout" => (None, StatusCode::NO_CONTENT),
                 "/api/auth/providers" => (None, StatusCode::OK),
+                // A bogus token must reach the handler and answer 400: that
+                // proves the route needs no session.
+                "/api/auth/tokens/inspect" => (
+                    Some(serde_json::json!({ "token": "bogus" })),
+                    StatusCode::BAD_REQUEST,
+                ),
+                "/api/auth/accept-invite" => (
+                    Some(serde_json::json!({
+                        "token": "bogus",
+                        "password": "long-enough-pass"
+                    })),
+                    StatusCode::BAD_REQUEST,
+                ),
+                "/api/auth/reset-password" => (
+                    Some(serde_json::json!({
+                        "token": "bogus",
+                        "password": "long-enough-pass"
+                    })),
+                    StatusCode::BAD_REQUEST,
+                ),
                 "/api/auth/{provider}/login" | "/api/auth/{provider}/callback" => {
                     (None, StatusCode::NOT_FOUND)
                 }

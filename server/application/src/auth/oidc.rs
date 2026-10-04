@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use domain::{User, UserId};
+use domain::{AccountTokenKind, User, UserId};
 
 use crate::auth::normalize_email;
 use crate::auth::provider::{
@@ -20,8 +20,8 @@ use crate::oidc_login::{
     LoginDecision, LoginPolicy, decide_login, identity_from_claims, new_user_from_claims,
 };
 use crate::ports::{
-    OidcClaims, OidcError, OidcProvider, PendingOidcLogin, RepositoryError, UserIdentityRepository,
-    UserRepository,
+    AccountTokenRepository, OidcClaims, OidcError, OidcProvider, PendingOidcLogin, RepositoryError,
+    UserIdentityRepository, UserRepository,
 };
 
 /// Keys under which the one-time OIDC values ride in [`PendingLogin`].
@@ -33,6 +33,7 @@ pub struct OidcAuthProvider {
     oidc: Arc<dyn OidcProvider>,
     users: Arc<dyn UserRepository>,
     identities: Arc<dyn UserIdentityRepository>,
+    invites: Arc<dyn AccountTokenRepository>,
     policy: LoginPolicy,
 }
 
@@ -41,12 +42,14 @@ impl OidcAuthProvider {
         oidc: Arc<dyn OidcProvider>,
         users: Arc<dyn UserRepository>,
         identities: Arc<dyn UserIdentityRepository>,
+        invites: Arc<dyn AccountTokenRepository>,
         policy: LoginPolicy,
     ) -> Self {
         Self {
             oidc,
             users,
             identities,
+            invites,
             policy,
         }
     }
@@ -208,7 +211,30 @@ impl RedirectProvider for OidcAuthProvider {
                 user
             }
             LoginDecision::CreateUser => {
-                let user = new_user_from_claims(&claims, now);
+                let mut user = new_user_from_claims(&claims, now);
+                // decide_login only reaches CreateUser with a verified,
+                // non-blank email claim. That IdP-verified email is proof this
+                // is the invited person: a pending (unexpired, unrevoked,
+                // unconsumed) invite for it upgrades the new account to the
+                // invite's role and is consumed below so it shows as accepted
+                // in the invites list. Expired or revoked invites are not
+                // returned by the lookup, so they are ignored (the default role
+                // stands). An invite never enables SSO signup on its own — with
+                // auto_create_users off, decide_login rejects before we get
+                // here.
+                let email = claims
+                    .email
+                    .clone()
+                    .expect("a create decision requires an email claim");
+                let pending_invite = self
+                    .invites
+                    .find_pending_invite_for_email(normalize_email(&email), now)
+                    .await?;
+                if let Some(invite) = &pending_invite
+                    && let AccountTokenKind::Invite { role, .. } = &invite.kind
+                {
+                    user.role = *role;
+                }
                 let user = self.users.create(user).await?;
                 // ponytail: creating the user and its identity is two repository
                 // calls with no cross-repo transaction; if the second fails, a
@@ -216,6 +242,17 @@ impl RedirectProvider for OidcAuthProvider {
                 // via its verified email. Belongs in an application-layer unit of
                 // work when one exists.
                 self.create_identity(user.id, &claims, now).await?;
+                if let Some(invite) = pending_invite {
+                    // ponytail: user creation, identity creation and this token
+                    // consumption are separate repository calls with no cross-repo
+                    // transaction (consistent with the note above); a failed
+                    // consume leaves a harmless pending invite whose accept will
+                    // return account_exists. A `false` result means a concurrent
+                    // accept won the token; by then the user already existed, so
+                    // the create above would have conflicted and this path ends in
+                    // the existing error handling.
+                    let _ = self.invites.consume(invite.id, now).await;
+                }
                 user
             }
             LoginDecision::Reject(rejection) => {
@@ -253,9 +290,15 @@ fn map_oidc_error(error: OidcError) -> AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::fakes::{InMemoryUserIdentityRepository, InMemoryUserRepository};
+    use crate::auth::fakes::{
+        InMemoryAccountTokenRepository, InMemoryUserIdentityRepository, InMemoryUserRepository,
+    };
     use crate::ports::OidcAuthRequest;
-    use domain::{Role, UserIdentity};
+    use chrono::Duration;
+    use domain::{
+        AccountToken, AccountTokenId, AccountTokenKind, AccountTokenStatus, DEFAULT_NEW_USER_ROLE,
+        Role, UserIdentity,
+    };
     use std::sync::Mutex;
 
     /// A [`OidcProvider`] for tests: a fixed authorization URL and pending
@@ -427,12 +470,48 @@ mod tests {
         identities: Arc<InMemoryUserIdentityRepository>,
         auto_create_users: bool,
     ) -> OidcAuthProvider {
+        // The pre-invite tests do not care about tokens: an empty store.
+        provider_with_invites(
+            oidc,
+            users.clone(),
+            identities,
+            Arc::new(InMemoryAccountTokenRepository::new(users)),
+            auto_create_users,
+        )
+    }
+
+    fn provider_with_invites(
+        oidc: FakeOidcProvider,
+        users: Arc<InMemoryUserRepository>,
+        identities: Arc<InMemoryUserIdentityRepository>,
+        invites: Arc<InMemoryAccountTokenRepository>,
+        auto_create_users: bool,
+    ) -> OidcAuthProvider {
         OidcAuthProvider::new(
             Arc::new(oidc),
             users,
             identities,
+            invites,
             LoginPolicy { auto_create_users },
         )
+    }
+
+    /// A pending invite token for tests; seed it with [`InMemoryAccountTokenRepository::insert`].
+    fn invite_token(email: &str, role: Role) -> AccountToken {
+        let now = Utc::now();
+        AccountToken {
+            id: AccountTokenId::new(),
+            kind: AccountTokenKind::Invite {
+                email: email.to_owned(),
+                role,
+            },
+            token_hash: format!("invite-hash-{email}"),
+            created_by: None,
+            created_at: now,
+            expires_at: now + Duration::hours(48),
+            consumed_at: None,
+            revoked_at: None,
+        }
     }
 
     #[tokio::test]
@@ -481,6 +560,202 @@ mod tests {
             .unwrap()
             .expect("identity stored");
         assert_eq!(identity.user_id, user.id);
+    }
+
+    #[tokio::test]
+    async fn a_pending_invite_upgrades_the_created_users_role_and_is_consumed() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let identities = Arc::new(InMemoryUserIdentityRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        let invite = invite_token("alice@example.com", Role::Staff);
+        invites.insert(invite.clone());
+
+        let provider = provider_with_invites(
+            FakeOidcProvider::new(claims("sub-123", Some("alice@example.com"), true)),
+            users,
+            identities,
+            invites.clone(),
+            true,
+        );
+
+        let user = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(
+            user.role,
+            Role::Staff,
+            "the invite's role wins over the default"
+        );
+
+        // The invite is consumed: it shows as accepted in the invites list.
+        let stored = invites.find_by_id(invite.id).await.unwrap().unwrap();
+        assert_eq!(stored.status(Utc::now()), AccountTokenStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn without_an_invite_the_created_user_gets_the_default_role() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let provider = provider(
+            FakeOidcProvider::new(claims("sub-123", Some("alice@example.com"), true)),
+            users,
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            true,
+        );
+
+        let user = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(user.role, DEFAULT_NEW_USER_ROLE);
+    }
+
+    #[tokio::test]
+    async fn an_expired_invite_is_ignored() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        let mut invite = invite_token("alice@example.com", Role::Staff);
+        invite.expires_at = Utc::now() - Duration::hours(1);
+        invites.insert(invite.clone());
+
+        let provider = provider_with_invites(
+            FakeOidcProvider::new(claims("sub-123", Some("alice@example.com"), true)),
+            users,
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            invites.clone(),
+            true,
+        );
+
+        let user = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(
+            user.role, DEFAULT_NEW_USER_ROLE,
+            "an expired invite grants nothing"
+        );
+
+        let stored = invites.find_by_id(invite.id).await.unwrap().unwrap();
+        assert_eq!(stored.status(Utc::now()), AccountTokenStatus::Expired);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_invite_is_ignored() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        let mut invite = invite_token("alice@example.com", Role::Staff);
+        invite.revoked_at = Some(Utc::now());
+        invites.insert(invite.clone());
+
+        let provider = provider_with_invites(
+            FakeOidcProvider::new(claims("sub-123", Some("alice@example.com"), true)),
+            users,
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            invites.clone(),
+            true,
+        );
+
+        let user = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(
+            user.role, DEFAULT_NEW_USER_ROLE,
+            "a revoked invite grants nothing"
+        );
+
+        let stored = invites.find_by_id(invite.id).await.unwrap().unwrap();
+        assert_eq!(stored.status(Utc::now()), AccountTokenStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn a_pending_invite_does_not_enable_sso_signup_when_auto_create_is_off() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        let invite = invite_token("alice@example.com", Role::Staff);
+        invites.insert(invite.clone());
+
+        let provider = provider_with_invites(
+            FakeOidcProvider::new(claims("sub-123", Some("alice@example.com"), true)),
+            users,
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            invites.clone(),
+            false,
+        );
+
+        let error = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                AuthError::Rejected {
+                    code: "oidc_signup_disabled"
+                }
+            ),
+            "got {error:?}"
+        );
+
+        // The invite is untouched: it can still be accepted the normal way.
+        let stored = invites.find_by_id(invite.id).await.unwrap().unwrap();
+        assert_eq!(stored.status(Utc::now()), AccountTokenStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn linking_to_an_existing_user_leaves_a_pending_invite_untouched() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        let existing = user("alice@example.com");
+        users.create(existing.clone()).await.unwrap();
+        let invite = invite_token("alice@example.com", Role::Staff);
+        invites.insert(invite.clone());
+
+        let provider = provider_with_invites(
+            FakeOidcProvider::new(claims("sub-123", Some("alice@example.com"), true)),
+            users,
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            invites.clone(),
+            true,
+        );
+
+        let logged_in = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(logged_in.id, existing.id, "logs in as the existing user");
+
+        // An existing account means the invite could not have been created
+        // (or was superseded): it is left exactly as it was.
+        let stored = invites.find_by_id(invite.id).await.unwrap().unwrap();
+        assert_eq!(stored.status(Utc::now()), AccountTokenStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn invite_email_matching_is_case_and_whitespace_insensitive() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        // The invite stored the normalized form; the IdP reports a messy one.
+        let invite = invite_token("alice@example.com", Role::Staff);
+        invites.insert(invite.clone());
+
+        let provider = provider_with_invites(
+            FakeOidcProvider::new(claims("sub-123", Some("  Alice@Example.COM "), true)),
+            users,
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            invites.clone(),
+            true,
+        );
+
+        let user = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(user.email, "alice@example.com");
+        assert_eq!(user.role, Role::Staff);
+
+        let stored = invites.find_by_id(invite.id).await.unwrap().unwrap();
+        assert_eq!(stored.status(Utc::now()), AccountTokenStatus::Accepted);
     }
 
     #[tokio::test]
@@ -811,6 +1086,7 @@ mod tests {
             ))),
             users.clone(),
             identities,
+            Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
             LoginPolicy {
                 auto_create_users: true,
             },
@@ -830,6 +1106,9 @@ mod tests {
             Arc::new(FakeOidcProvider::new(claims("sub-123", None, false))),
             Arc::new(InMemoryUserRepository::new()),
             Arc::new(InMemoryUserIdentityRepository::new()),
+            Arc::new(InMemoryAccountTokenRepository::new(Arc::new(
+                InMemoryUserRepository::new(),
+            ))),
             LoginPolicy {
                 auto_create_users: true,
             },

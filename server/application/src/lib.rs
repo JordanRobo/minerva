@@ -2,6 +2,7 @@
 //!
 //! Use cases and orchestration over the domain. Depends only on `domain`.
 
+pub mod account_links;
 pub mod auth;
 pub mod authz;
 pub mod bootstrap;

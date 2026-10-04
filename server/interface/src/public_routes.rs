@@ -13,6 +13,9 @@ pub(crate) const PUBLIC_OPERATIONS: &[(Method, &str)] = &[
     (Method::POST, "/api/auth/login"),
     (Method::POST, "/api/auth/logout"),
     (Method::GET, "/api/auth/providers"),
+    (Method::POST, "/api/auth/tokens/inspect"),
+    (Method::POST, "/api/auth/accept-invite"),
+    (Method::POST, "/api/auth/reset-password"),
     (Method::GET, "/api/auth/{provider}/login"),
     (Method::GET, "/api/auth/{provider}/callback"),
 ];

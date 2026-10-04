@@ -10,7 +10,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::error::ApiError;
 use crate::openapi::ApiDoc;
-use crate::{auth, debug, goals, milestones, redirect, tasks, users};
+use crate::{account_links, auth, debug, goals, invites, milestones, redirect, tasks, users};
 
 async fn health() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
@@ -58,10 +58,36 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     "/users/{id}/reactivate",
                     web::post().to(users::reactivate_user),
                 )
+                .route(
+                    "/users/{id}/password-reset",
+                    web::post().to(users::create_password_reset),
+                )
+                .route("/invites", web::post().to(invites::create_invite))
+                .route("/invites", web::get().to(invites::list_invites))
+                .route(
+                    "/invites/{id}/revoke",
+                    web::post().to(invites::revoke_invite),
+                )
+                .route(
+                    "/invites/{id}/reissue",
+                    web::post().to(invites::reissue_invite),
+                )
                 .route("/auth/login", web::post().to(auth::login))
                 .route("/auth/logout", web::post().to(auth::logout))
                 .route("/auth/me", web::get().to(auth::me))
                 .route("/auth/providers", web::get().to(auth::list_auth_providers))
+                .route(
+                    "/auth/tokens/inspect",
+                    web::post().to(account_links::inspect_token),
+                )
+                .route(
+                    "/auth/accept-invite",
+                    web::post().to(account_links::accept_invite),
+                )
+                .route(
+                    "/auth/reset-password",
+                    web::post().to(account_links::reset_password),
+                )
                 .route(
                     "/auth/{provider}/login",
                     web::get().to(redirect::redirect_login),

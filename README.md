@@ -192,6 +192,16 @@ nothing. Set in `minerva.toml` (or via
 The bootstrap only takes effect while no users exist: it never resets an
 existing password or modifies an existing account.
 
+### Inviting people
+
+There is no public signup: an administrator creates an invite through the API
+(`POST /api/invites`) and shares the returned link with the invited email —
+copied manually while SMTP delivery (roadmap 7.3) is not configured. The
+invitee follows the link, sets a password and is signed in. The link's origin
+comes from `server.web_base_url`; without it the link is a site-relative path.
+The same API lists, revokes and re-issues invites, and an admin can issue a
+password-reset link for an existing user (`POST /api/users/{id}/password-reset`).
+
 ### Enabling OIDC sign-in
 
 The server can offer OIDC sign-in alongside email/password. It is disabled

@@ -5,6 +5,7 @@
 //! errors to and from HTTP.
 
 use actix_web::{HttpResponse, web};
+use application::account_links::AccountLinkService;
 use application::user_admin::{UserAdminError, UserAdminService};
 use chrono::{DateTime, Utc};
 use domain::{Role, User, UserId};
@@ -13,7 +14,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::access::AdminAccess;
-use crate::error::{ApiError, repo_error_response};
+use crate::error::{ApiError, account_link_error_response, repo_error_response};
 use crate::openapi::RoleDoc;
 
 /// JSON shape of a user in the admin list and mutation responses. The
@@ -186,6 +187,52 @@ pub async fn reactivate_user(
     }
 }
 
+/// A freshly issued password-reset link. The raw token appears in `link`
+/// exactly once and is not recoverable afterwards; issuing again replaces it.
+#[derive(Serialize, ToSchema)]
+pub struct PasswordResetCreatedResponse {
+    /// The one-time reset link; shown only in this response.
+    pub link: String,
+    pub expires_at: DateTime<Utc>,
+    /// Whether the reset email went out; when false, share `link` by hand.
+    pub emailed: bool,
+}
+
+/// Create a Password Reset Link
+///
+/// Issue a one-time password-reset link for a user's account; any live link the user already has stops working. The link is returned only in this response (and emailed when delivery is configured). Refused for accounts that sign in through an external provider (no password to reset) and for deactivated accounts. Requires the Admin role.
+#[utoipa::path(
+    post,
+    path = "/api/users/{id}/password-reset",
+    tags = ["users"],
+    security(("session_cookie" = [])),
+    params(("id" = Uuid, Path, description = "User identifier")),
+    responses(
+        (status = 201, description = "The one-time reset link", body = PasswordResetCreatedResponse),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Admin role", body = ApiError),
+        (status = 404, description = "No user with this id", body = ApiError),
+        (status = 409, description = "The account has no password to reset (external provider only) or is deactivated", body = ApiError)
+    )
+)]
+pub async fn create_password_reset(
+    links: web::Data<AccountLinkService>,
+    access: AdminAccess,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    match links
+        .issue_password_reset(&access.user, UserId(*path))
+        .await
+    {
+        Ok(issued) => Ok(HttpResponse::Created().json(PasswordResetCreatedResponse {
+            link: issued.link,
+            expires_at: issued.item.expires_at,
+            emailed: issued.emailed,
+        })),
+        Err(error) => Err(account_link_error_response(error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,20 +240,23 @@ mod tests {
     use actix_web::dev::Service;
     use actix_web::http::{Method, StatusCode, header};
     use actix_web::test::{TestRequest, init_service, read_body};
+    use application::account_links::AccountLinkService;
     use application::auth::SessionService;
     use application::auth::password::PasswordAuthProvider;
     use application::auth::provider::AuthProviders;
-    use application::ports::{GoalRepository, PasswordHasher, SessionRepository, UserRepository};
+    use application::ports::{
+        GoalRepository, PasswordHasher, SessionRepository, SessionTokens, UserRepository,
+    };
     use chrono::Utc;
     use diesel::prelude::*;
     use domain::GoalId;
     use infrastructure::db::PgPool;
     use infrastructure::repositories::{
-        PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
-        PostgresProgressSnapshotRepository, PostgresSessionRepository,
+        PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
+        PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
         PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserRepository,
     };
-    use infrastructure::{Argon2PasswordHasher, Sha256SessionTokens};
+    use infrastructure::{Argon2PasswordHasher, NoEmailSender, Sha256SessionTokens};
     use std::sync::Arc;
 
     use crate::auth::{COOKIE_NAME, CookieSettings};
@@ -263,10 +313,23 @@ mod tests {
                 )
                 .expect("static provider ids are valid and unique"),
             );
+            let session_tokens: Arc<dyn SessionTokens> = Arc::new(Sha256SessionTokens);
             let session_service = SessionService::new(
                 sessions,
-                Arc::new(Sha256SessionTokens),
+                session_tokens.clone(),
                 SessionService::DEFAULT_SESSION_TTL,
+            );
+            // Mirrors `main.rs`: the invite and password-reset routes go
+            // through the account-link service (no email delivery in tests,
+            // so links come back site-relative).
+            let account_link_service = AccountLinkService::new(
+                Arc::new(PostgresAccountTokenRepository::new(pool.clone())),
+                users.clone(),
+                hasher.clone(),
+                session_tokens,
+                session_service.clone(),
+                Arc::new(NoEmailSender),
+                String::new(),
             );
             init_service(
                 App::new()
@@ -286,6 +349,7 @@ mod tests {
                     )))
                     .app_data(users_data)
                     .app_data(web::Data::new(session_service.clone()))
+                    .app_data(web::Data::new(account_link_service))
                     .app_data(web::Data::new(UserAdminService::new(
                         users,
                         session_service,

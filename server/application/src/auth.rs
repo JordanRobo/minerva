@@ -111,6 +111,21 @@ pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
+/// A minimal email shape check for user-supplied addresses: exactly one '@'
+/// with a non-empty local part and domain. Returns the first problem found,
+/// if any — the same rules the configuration layer applies to its own input.
+pub fn validate_email(raw: &str) -> Option<String> {
+    let email = raw.trim();
+    if email.matches('@').count() != 1 {
+        return Some("exactly one '@' is required".to_owned());
+    }
+    let (local, domain) = email.split_once('@').expect("checked above");
+    if local.is_empty() || domain.is_empty() {
+        return Some("the parts before and after the '@' must not be empty".to_owned());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

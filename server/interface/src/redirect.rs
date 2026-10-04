@@ -337,20 +337,22 @@ mod tests {
     use actix_web::dev::Service;
     use actix_web::http::StatusCode;
     use actix_web::test::{TestRequest, init_service};
+    use application::account_links::AccountLinkService;
     use application::auth::oidc::OidcAuthProvider;
     use application::auth::password::PasswordAuthProvider;
     use application::auth::provider::{AuthProvider, RedirectProvider, RedirectStart};
     use application::oidc_login::LoginPolicy;
     use application::ports::{
-        OidcAuthRequest, OidcClaims, OidcError, OidcProvider, PendingOidcLogin, SessionRepository,
-        UserIdentityRepository, UserRepository,
+        AccountTokenRepository, OidcAuthRequest, OidcClaims, OidcError, OidcProvider,
+        PendingOidcLogin, SessionRepository, SessionTokens, UserIdentityRepository, UserRepository,
     };
-    use domain::{Role, User};
+    use domain::{AccountToken, AccountTokenId, AccountTokenKind, Role, User};
     use infrastructure::db::PgPool;
     use infrastructure::repositories::{
-        PostgresSessionRepository, PostgresUserIdentityRepository, PostgresUserRepository,
+        PostgresAccountTokenRepository, PostgresSessionRepository, PostgresUserIdentityRepository,
+        PostgresUserRepository,
     };
-    use infrastructure::{Argon2PasswordHasher, Sha256SessionTokens};
+    use infrastructure::{Argon2PasswordHasher, NoEmailSender, Sha256SessionTokens};
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -578,11 +580,16 @@ mod tests {
         let pool = test_pool(url);
         let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
         let identities: Arc<dyn UserIdentityRepository> =
-            Arc::new(PostgresUserIdentityRepository::new(pool));
+            Arc::new(PostgresUserIdentityRepository::new(pool.clone()));
+        // The provider consumes pending invites when an invited email signs
+        // in via SSO before accepting one.
+        let invites: Arc<dyn AccountTokenRepository> =
+            Arc::new(PostgresAccountTokenRepository::new(pool));
         Arc::new(OidcAuthProvider::new(
             Arc::new(FakeProvider { claims }),
             users,
             identities,
+            invites,
             LoginPolicy { auto_create_users },
         ))
     }
@@ -636,20 +643,34 @@ mod tests {
             let providers = web::Data::new(
                 AuthProviders::new(
                     vec![Arc::new(PasswordAuthProvider::new(
-                        Arc::new(PostgresUserRepository::new(pool)),
+                        Arc::new(PostgresUserRepository::new(pool.clone())),
                         Arc::new(Argon2PasswordHasher),
                     ))],
                     redirects,
                 )
                 .expect("static provider ids are valid and unique"),
             );
+            // The accept-invite route is registered (mirroring `main.rs`) so
+            // the SSO-invite test can try a token after the callback consumed
+            // it.
+            let session_service = SessionService::new(
+                sessions,
+                Arc::new(Sha256SessionTokens),
+                SessionService::DEFAULT_SESSION_TTL,
+            );
+            let account_link_service = AccountLinkService::new(
+                Arc::new(PostgresAccountTokenRepository::new(pool.clone())),
+                Arc::new(PostgresUserRepository::new(pool.clone())),
+                Arc::new(Argon2PasswordHasher),
+                Arc::new(Sha256SessionTokens),
+                session_service.clone(),
+                Arc::new(NoEmailSender),
+                String::new(),
+            );
             let app = App::new()
                 .app_data(sessions_data)
-                .app_data(web::Data::new(SessionService::new(
-                    sessions,
-                    Arc::new(Sha256SessionTokens),
-                    SessionService::DEFAULT_SESSION_TTL,
-                )))
+                .app_data(web::Data::new(session_service))
+                .app_data(web::Data::new(account_link_service))
                 .app_data(providers)
                 .app_data(web::Data::new(auth::CookieSettings { secure: false }));
             let app = match flow {
@@ -665,6 +686,10 @@ mod tests {
                 .route(
                     "/api/auth/{provider}/callback",
                     web::get().to(redirect_callback),
+                )
+                .route(
+                    "/api/auth/accept-invite",
+                    web::post().to(crate::account_links::accept_invite),
                 ),
             )
             .await
@@ -966,6 +991,87 @@ mod tests {
             .unwrap()
             .expect("identity created");
         assert_eq!(identity.user_id, user.id);
+    }
+
+    #[actix_web::test]
+    async fn an_sso_login_consumes_a_pending_invite_for_the_verified_email() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let subject = format!("sub-{}", Uuid::new_v4());
+        let email = format!("invited-{}@example.com", Uuid::new_v4());
+
+        // A pending Staff invite for the email the IdP will verify, inserted
+        // through the repository like an admin's POST /api/invites would be.
+        let pool = test_pool(&url);
+        let now = Utc::now();
+        let raw_token = Uuid::new_v4().to_string();
+        let session_tokens = Sha256SessionTokens;
+        let invite = AccountToken {
+            id: AccountTokenId::new(),
+            kind: AccountTokenKind::Invite {
+                email: email.clone(),
+                role: Role::Staff,
+            },
+            token_hash: session_tokens.hash(&raw_token),
+            created_by: None,
+            created_at: now,
+            expires_at: now + Duration::hours(48),
+            consumed_at: None,
+            revoked_at: None,
+        };
+        PostgresAccountTokenRepository::new(pool)
+            .issue(invite, now)
+            .await
+            .unwrap();
+
+        let app = test_app!(
+            vec![oidc_redirect(
+                &url,
+                claims(&subject, Some(&email), true),
+                true
+            )],
+            &url
+        );
+        let (_login, callback) = login_and_callback!(app, None);
+        assert_eq!(callback.status(), StatusCode::FOUND);
+        assert!(
+            set_cookie(&callback, "minerva_session").is_some(),
+            "session cookie set"
+        );
+
+        // The SSO-created account took the invite's role...
+        let pool = test_pool(&url);
+        let users = PostgresUserRepository::new(pool.clone());
+        let user = users
+            .find_by_email(email)
+            .await
+            .unwrap()
+            .expect("user created");
+        assert_eq!(
+            user.role,
+            Role::Staff,
+            "the SSO-created account takes the invite's role"
+        );
+
+        // ...and the invite is consumed: accepting it now fails.
+        let res = app
+            .call(
+                TestRequest::post()
+                    .uri("/api/auth/accept-invite")
+                    .set_json(serde_json::json!({
+                        "token": raw_token,
+                        "password": "long-enough-pass"
+                    }))
+                    .to_request(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = actix_web::test::read_body(res).await;
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "invalid_token");
     }
 
     #[actix_web::test]
