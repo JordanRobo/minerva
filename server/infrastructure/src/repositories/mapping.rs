@@ -14,8 +14,8 @@ use application::ports::RepositoryError;
 use domain::{
     AccountToken, AccountTokenId, AccountTokenKind, Goal, GoalId, GoalStatus, Milestone,
     MilestoneId, ProgressSnapshot, ProgressSnapshotId, ProgressTarget, Role, Session, SessionId,
-    Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId, TaskRelationType, TaskStatus,
-    User, UserId, UserIdentity, UserIdentityId,
+    SsoGroupRule, SsoGroupRuleId, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId,
+    TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserIdentityId,
 };
 
 /// A row of the `goals` table: id, title, description, status,
@@ -447,5 +447,21 @@ pub fn account_token_from_row(row: AccountTokenRow) -> Result<AccountToken, Repo
         expires_at,
         consumed_at,
         revoked_at,
+    })
+}
+
+/// A row of the `sso_group_role_rules` table: id, group_name, role,
+/// created_at, updated_at — in that order.
+pub type SsoGroupRuleRow = (Uuid, String, String, DateTime<Utc>, DateTime<Utc>);
+
+/// Build an [`SsoGroupRule`] from an `sso_group_role_rules` row.
+pub fn sso_group_rule_from_row(row: SsoGroupRuleRow) -> Result<SsoGroupRule, RepositoryError> {
+    let (id, group_name, role, created_at, updated_at) = row;
+    Ok(SsoGroupRule {
+        id: SsoGroupRuleId(id),
+        group_name,
+        role: role_from_db(&role)?,
+        created_at,
+        updated_at,
     })
 }

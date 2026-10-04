@@ -6,14 +6,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use domain::{
-    AccountToken, AccountTokenId, AccountTokenKind, Role, Session, SessionId, User, UserId,
-    UserIdentity,
+    AccountToken, AccountTokenId, AccountTokenKind, Role, Session, SessionId, SsoGroupRule,
+    SsoGroupRuleId, User, UserId, UserIdentity,
 };
 
 use crate::ports::{
     AcceptInviteOutcome, AccessChange, AccessChangeError, AccountEmailSender,
     AccountTokenRepository, EmailSendError, PasswordHashError, PasswordHasher, RepositoryError,
-    ResetPasswordOutcome, SessionRepository, SessionTokens, UserIdentityRepository, UserRepository,
+    ResetPasswordOutcome, SessionRepository, SessionTokens, SsoGroupRuleRepository,
+    UserIdentityRepository, UserRepository,
 };
 
 /// A [`SessionRepository`] that keeps sessions in a `HashMap`.
@@ -654,5 +655,146 @@ impl AccountEmailSender for RecordingEmailSender {
         _expires_at: DateTime<Utc>,
     ) -> Result<(), EmailSendError> {
         self.record(link)
+    }
+}
+
+/// A [`SsoGroupRuleRepository`] that keeps rules in a `HashMap`. The unique
+/// group name is enforced like the real repository's index: a second rule for
+/// the same name is a `Conflict`.
+#[derive(Default)]
+pub struct InMemorySsoGroupRuleRepository {
+    rules: Mutex<HashMap<SsoGroupRuleId, SsoGroupRule>>,
+}
+
+impl InMemorySsoGroupRuleRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl InMemorySsoGroupRuleRepository {
+    fn locked(&self) -> MutexGuard<'_, HashMap<SsoGroupRuleId, SsoGroupRule>> {
+        self.rules.lock().unwrap()
+    }
+}
+
+#[async_trait::async_trait]
+impl SsoGroupRuleRepository for InMemorySsoGroupRuleRepository {
+    async fn list(&self) -> Result<Vec<SsoGroupRule>, RepositoryError> {
+        let mut rules: Vec<SsoGroupRule> = self.locked().values().cloned().collect();
+        // Group name then id, like the real query.
+        rules.sort_by(|a, b| {
+            a.group_name
+                .cmp(&b.group_name)
+                .then_with(|| a.id.0.cmp(&b.id.0))
+        });
+        Ok(rules)
+    }
+
+    async fn find_by_id(
+        &self,
+        id: SsoGroupRuleId,
+    ) -> Result<Option<SsoGroupRule>, RepositoryError> {
+        Ok(self.locked().get(&id).cloned())
+    }
+
+    async fn create(&self, rule: SsoGroupRule) -> Result<SsoGroupRule, RepositoryError> {
+        let mut rules = self.locked();
+        if rules
+            .values()
+            .any(|existing| existing.group_name == rule.group_name)
+        {
+            return Err(RepositoryError::Conflict(format!(
+                "a rule for group {} already exists",
+                rule.group_name
+            )));
+        }
+        rules.insert(rule.id, rule.clone());
+        Ok(rule)
+    }
+
+    async fn update(&self, rule: SsoGroupRule) -> Result<SsoGroupRule, RepositoryError> {
+        let mut rules = self.locked();
+        if !rules.contains_key(&rule.id) {
+            return Err(RepositoryError::NotFound);
+        }
+        if rules
+            .values()
+            .any(|existing| existing.id != rule.id && existing.group_name == rule.group_name)
+        {
+            return Err(RepositoryError::Conflict(format!(
+                "a rule for group {} already exists",
+                rule.group_name
+            )));
+        }
+        rules.insert(rule.id, rule.clone());
+        Ok(rule)
+    }
+
+    async fn delete(&self, id: SsoGroupRuleId) -> Result<(), RepositoryError> {
+        if self.locked().remove(&id).is_none() {
+            return Err(RepositoryError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn any_exist(&self) -> Result<bool, RepositoryError> {
+        Ok(!self.locked().is_empty())
+    }
+}
+
+#[cfg(test)]
+mod sso_group_rule_fake_tests {
+    use super::*;
+
+    fn test_rule(group_name: &str, role: Role) -> SsoGroupRule {
+        let now = Utc::now();
+        SsoGroupRule {
+            id: SsoGroupRuleId::new(),
+            group_name: group_name.to_owned(),
+            role,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// The fake enforces the same one-rule-per-group-name rule as the
+    /// Postgres unique index, and lists in the repository's stable order.
+    #[tokio::test]
+    async fn duplicate_group_name_is_a_conflict_and_list_is_stably_ordered() {
+        let repo = InMemorySsoGroupRuleRepository::new();
+
+        assert!(!repo.any_exist().await.unwrap());
+        let zeta = test_rule("zeta", Role::Admin);
+        let alpha = test_rule("alpha", Role::Staff);
+        repo.create(zeta.clone()).await.unwrap();
+        repo.create(alpha.clone()).await.unwrap();
+        assert!(repo.any_exist().await.unwrap());
+
+        let duplicate = test_rule("zeta", Role::ReadOnly);
+        let error = repo.create(duplicate).await.expect_err("duplicate name");
+        assert!(matches!(error, RepositoryError::Conflict(_)));
+
+        let listed = repo.list().await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|rule| rule.group_name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+
+        // Renaming onto a taken name conflicts too; deleting frees the name.
+        let renamed = SsoGroupRule {
+            group_name: "zeta".to_owned(),
+            ..alpha.clone()
+        };
+        let error = repo.update(renamed).await.expect_err("taken name");
+        assert!(matches!(error, RepositoryError::Conflict(_)));
+
+        repo.delete(alpha.id).await.unwrap();
+        assert!(repo.find_by_id(alpha.id).await.unwrap().is_none());
+        let error = repo.delete(alpha.id).await.expect_err("already deleted");
+        assert!(matches!(error, RepositoryError::NotFound));
     }
 }

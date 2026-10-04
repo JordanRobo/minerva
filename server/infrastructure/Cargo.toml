@@ -22,3 +22,7 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }
 uuid = "1"
+
+[dev-dependencies]
+# `sync` only for the test files' `tokio::sync::Mutex` (see tests/sso_group_rules.rs).
+tokio = { workspace = true, features = ["sync"] }
