@@ -7,6 +7,7 @@
 //! human-readable.
 
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
+use application::account_links::AccountLinkError;
 use application::ports::RepositoryError;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -72,6 +73,24 @@ impl ApiError {
         }
     }
 
+    /// 409 — an account with the referenced email already exists.
+    pub fn account_exists(message: impl Into<String>) -> Self {
+        Self {
+            code: "account_exists".to_owned(),
+            message: message.into(),
+        }
+    }
+
+    /// 400 — the one-time link in the request is unknown or no longer usable.
+    /// One code and one message for all of them, so the answer never hints
+    /// which.
+    pub fn invalid_token(message: impl Into<String>) -> Self {
+        Self {
+            code: "invalid_token".to_owned(),
+            message: message.into(),
+        }
+    }
+
     /// 400 — the request referenced an entity that does not exist.
     pub fn invalid_reference(message: impl Into<String>) -> Self {
         Self {
@@ -96,9 +115,9 @@ impl ResponseError for ApiError {
             "unauthorized" => StatusCode::UNAUTHORIZED,
             "forbidden" => StatusCode::FORBIDDEN,
             "not_found" => StatusCode::NOT_FOUND,
-            "conflict" => StatusCode::CONFLICT,
+            "conflict" | "account_exists" => StatusCode::CONFLICT,
             "internal_error" => StatusCode::INTERNAL_SERVER_ERROR,
-            // bad_request, invalid_reference, and any unknown code
+            // bad_request, invalid_reference, invalid_token, and any unknown code
             _ => StatusCode::BAD_REQUEST,
         }
     }
@@ -119,5 +138,29 @@ pub fn repo_error_response(err: RepositoryError) -> ApiError {
         RepositoryError::Conflict(detail) => ApiError::conflict(detail),
         RepositoryError::InvalidReference(detail) => ApiError::invalid_reference(detail),
         RepositoryError::Unexpected(_) => ApiError::internal_error(),
+    }
+}
+
+/// Translate an [`AccountLinkError`] into the [`ApiError`] it renders as:
+/// an unusable link -> 400 `invalid_token` (one answer for unknown, expired,
+/// used and revoked alike), bad input -> 400 `bad_request`, a registered
+/// email -> 409 `account_exists`, the remaining policy rejections -> 409
+/// `conflict` with the service's message, a missing id -> 404. Repository
+/// failures map like any other; a hash failure is a 500 whose detail is
+/// logged server-side only (never a token or a link).
+pub fn account_link_error_response(error: AccountLinkError) -> ApiError {
+    match error {
+        AccountLinkError::InvalidToken => ApiError::invalid_token(error.to_string()),
+        AccountLinkError::InvalidEmail(_) | AccountLinkError::PasswordTooShort => {
+            ApiError::bad_request(error.to_string())
+        }
+        AccountLinkError::EmailAlreadyRegistered => ApiError::account_exists(error.to_string()),
+        AccountLinkError::NotFound => ApiError::not_found(),
+        AccountLinkError::Repository(err) => repo_error_response(err),
+        AccountLinkError::Hash(err) => {
+            eprintln!("password hashing failed: {err}");
+            ApiError::internal_error()
+        }
+        other => ApiError::conflict(other.to_string()),
     }
 }

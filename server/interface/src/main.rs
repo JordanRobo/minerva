@@ -1,9 +1,11 @@
 mod access;
+mod account_links;
 mod auth;
 mod config;
 mod debug;
 mod error;
 mod goals;
+mod invites;
 mod milestones;
 mod openapi;
 mod redirect;
@@ -19,6 +21,7 @@ mod public_routes;
 
 use actix_web::cookie::Key;
 use actix_web::{App, HttpServer, web};
+use application::account_links::AccountLinkService;
 use application::auth::SessionService;
 use application::auth::oidc::OidcAuthProvider;
 use application::auth::password::PasswordAuthProvider;
@@ -26,20 +29,22 @@ use application::auth::provider::{AuthProviders, RedirectProvider};
 use application::bootstrap::{BootstrapAdmin, BootstrapOutcome, bootstrap_admin};
 use application::oidc_login::LoginPolicy;
 use application::ports::{
-    OidcProvider, PasswordHasher, SessionRepository, UserIdentityRepository, UserRepository,
+    AccountEmailSender, AccountTokenRepository, OidcProvider, PasswordHasher, SessionRepository,
+    SessionTokens, UserIdentityRepository, UserRepository,
 };
 use application::user_admin::UserAdminService;
 use chrono::Utc;
 use infrastructure::Argon2PasswordHasher;
+use infrastructure::NoEmailSender;
 use infrastructure::Sha256SessionTokens;
 use infrastructure::db::build_pool;
 use infrastructure::migrations::run_migrations;
 use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
 use infrastructure::repositories::{
-    PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
-    PostgresProgressSnapshotRepository, PostgresSessionRepository, PostgresTaskRelationRepository,
-    PostgresTaskRepository, PostgresUserIdentityRepository, PostgresUserRepository,
-    RedisSessionRepository,
+    PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
+    PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
+    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserIdentityRepository,
+    PostgresUserRepository, RedisSessionRepository,
 };
 use std::sync::Arc;
 
@@ -100,6 +105,10 @@ async fn main() -> std::io::Result<()> {
     // registered as trait objects (the same way sessions below are).
     let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
     let users_data: web::Data<dyn UserRepository> = users.clone().into();
+    // The token store behind invites and password resets (roadmap 2.6); the
+    // account-link service below consumes it.
+    let account_tokens: Arc<dyn AccountTokenRepository> =
+        Arc::new(PostgresAccountTokenRepository::new(pool.clone()));
     // The OIDC provider below also takes these ports, so the Arcs stay
     // around instead of being converted straight to `web::Data`.
     let user_identities: Arc<dyn UserIdentityRepository> =
@@ -128,9 +137,12 @@ async fn main() -> std::io::Result<()> {
     // through the service (the TTL is the fixed 30 days), but code that needs
     // session storage directly can still extract the port.
     let sessions_data: web::Data<dyn SessionRepository> = sessions.clone().into();
+    // The raw-token generator is shared between the session service and the
+    // account-link service, so both kinds of token come from one port.
+    let session_tokens: Arc<dyn SessionTokens> = Arc::new(Sha256SessionTokens);
     let session_service = web::Data::new(SessionService::new(
         sessions,
-        Arc::new(Sha256SessionTokens),
+        session_tokens.clone(),
         SessionService::DEFAULT_SESSION_TTL,
     ));
     // User administration goes through the service so the self-modification
@@ -142,6 +154,22 @@ async fn main() -> std::io::Result<()> {
     // The password hasher holds no state; the password provider and the
     // bootstrap admin below both need it, so it is built once here.
     let password_hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2PasswordHasher);
+    // Account links (roadmap 2.6): invites and password resets go through the
+    // service so the link rules live in one place. Email delivery is not
+    // configured yet (roadmap 7.3), so NoEmailSender: every send fails and
+    // the endpoints return the links to the caller instead of emailing them.
+    let email: Arc<dyn AccountEmailSender> = Arc::new(NoEmailSender);
+    let account_link_service = web::Data::new(AccountLinkService::new(
+        account_tokens,
+        users.clone(),
+        password_hasher.clone(),
+        session_tokens,
+        session_service.get_ref().clone(),
+        email,
+        // Links are built from server.web_base_url — already trailing-slash-
+        // stripped when set, empty for site-relative links.
+        config.server.web_base_url.clone(),
+    ));
     // First-admin bootstrap (roadmap 2.5): while the database has no users,
     // create the configured admin so there is someone who can log in and
     // start inviting people. The repository decides atomically whether the
@@ -254,6 +282,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(sessions_data.clone())
             .app_data(session_service.clone())
             .app_data(user_admin.clone())
+            .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())
             .app_data(cookies.clone());
         // Registered only when at least one redirect provider exists; the

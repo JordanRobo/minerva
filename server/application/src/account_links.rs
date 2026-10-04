@@ -252,19 +252,29 @@ impl AccountLinkService {
             .map_err(AccountLinkError::Repository)
     }
 
-    /// Cancel an invite before it is used. Revoking an already-revoked
-    /// invite is a successful no-op; an accepted one cannot be undone.
-    pub async fn revoke_invite(&self, id: AccountTokenId) -> Result<(), AccountLinkError> {
-        let token = self.find_token(id).await?;
-        match token.status(Utc::now()) {
+    /// Cancel an invite before it is used, returning the updated token.
+    /// Revoking an already-revoked invite is a successful no-op; an accepted
+    /// one cannot be undone. A password-reset token's id is "no such invite",
+    /// as in [`reissue`](Self::reissue_invite).
+    pub async fn revoke_invite(
+        &self,
+        id: AccountTokenId,
+    ) -> Result<AccountToken, AccountLinkError> {
+        let mut token = self.find_token(id).await?;
+        if !matches!(token.kind, AccountTokenKind::Invite { .. }) {
+            return Err(AccountLinkError::NotFound);
+        }
+        let now = Utc::now();
+        match token.status(now) {
             AccountTokenStatus::Accepted => Err(AccountLinkError::InviteAlreadyAccepted),
-            AccountTokenStatus::Revoked => Ok(()),
+            AccountTokenStatus::Revoked => Ok(token),
             _ => {
                 self.tokens
-                    .revoke(id, Utc::now())
+                    .revoke(id, now)
                     .await
                     .map_err(AccountLinkError::Repository)?;
-                Ok(())
+                token.revoked_at = Some(now);
+                Ok(token)
             }
         }
     }

@@ -52,6 +52,25 @@ pub enum RoleDoc {
     ReadOnly,
 }
 
+/// Wire shape of [`domain::AccountTokenStatus`]: a snake_case string.
+#[derive(ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteStatusDoc {
+    Pending,
+    Accepted,
+    Revoked,
+    Expired,
+}
+
+/// Wire shape of [`application::account_links::LinkPurpose`]: a snake_case
+/// string.
+#[derive(ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkPurposeDoc {
+    Invite,
+    PasswordReset,
+}
+
 /// Wire shape of [`domain::Status`].
 #[derive(ToSchema)]
 pub enum StatusDoc {
@@ -85,8 +104,9 @@ pub struct GoalStatusDoc {
     ),
     modifiers(&SessionCookieSecurity),
     tags(
-        (name = "auth", description = "Authentication: login, logout, and the current user."),
+        (name = "auth", description = "Authentication: login, logout, the current user, and account links (invites, password resets)."),
         (name = "goals", description = "Goals: the top-level outcomes a school works toward."),
+        (name = "invites", description = "Invites: one-time links that create new accounts. Admin only."),
         (name = "milestones", description = "Milestones: dated checkpoints within a goal."),
         (name = "tasks", description = "Tasks: day-to-day work, optionally attached to a milestone."),
         (name = "users", description = "User administration: roles and active state. Admin only."),
@@ -96,6 +116,9 @@ pub struct GoalStatusDoc {
         crate::auth::logout,
         crate::auth::me,
         crate::auth::list_auth_providers,
+        crate::account_links::inspect_token,
+        crate::account_links::accept_invite,
+        crate::account_links::reset_password,
         crate::redirect::redirect_login,
         crate::redirect::redirect_callback,
         crate::goals::create_goal,
@@ -117,6 +140,11 @@ pub struct GoalStatusDoc {
         crate::users::change_user_role,
         crate::users::deactivate_user,
         crate::users::reactivate_user,
+        crate::users::create_password_reset,
+        crate::invites::create_invite,
+        crate::invites::list_invites,
+        crate::invites::revoke_invite,
+        crate::invites::reissue_invite,
     ),
     components(schemas(
         crate::error::ApiError,
@@ -135,7 +163,17 @@ pub struct GoalStatusDoc {
         crate::tasks::TaskResponse,
         crate::users::UserAdminResponse,
         crate::users::ChangeRoleRequest,
+        crate::users::PasswordResetCreatedResponse,
+        crate::invites::CreateInviteRequest,
+        crate::invites::InviteResponse,
+        crate::invites::InviteCreatedResponse,
+        crate::account_links::InspectTokenRequest,
+        crate::account_links::LinkInfoResponse,
+        crate::account_links::AcceptInviteRequest,
+        crate::account_links::ResetPasswordRequest,
         GoalStatusDoc,
+        InviteStatusDoc,
+        LinkPurposeDoc,
         RoleDoc,
         StatusDoc,
         StatusSourceDoc,
