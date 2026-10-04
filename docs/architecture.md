@@ -95,6 +95,43 @@ construction in `interface/src/main.rs`. Nothing else changes — routing,
 cookies, session issuance, and the `/api/auth/providers` listing all follow
 from the registry.
 
+### Invites and password reset
+
+Both flows are one mechanism (roadmap 2.6): a single `account_tokens` table
+holds either an invite (an email address plus the role the new account gets)
+or a password reset (the user whose password changes). Only the SHA-256 hash
+of the token is stored — the raw value appears once, in the link. Tokens are
+single-use and expiring (7 days for invites, 24 hours for resets), and at most
+one live token may exist per subject: partial unique indexes on `(email)` and
+`(user_id)` make re-issuing replace the old token even under concurrent
+issuers, and consumption is an atomic claim, so a link opened by two people at
+once works for exactly one of them.
+
+The rules live in `application::account_links::AccountLinkService`, not in
+the handlers. The HTTP side is admin-only — `POST /api/invites`,
+`GET /api/invites`, `POST /api/invites/{id}/revoke`,
+`POST /api/invites/{id}/reissue`, `POST /api/users/{id}/password-reset` — plus
+three public routes the link itself calls: `POST /api/auth/tokens/inspect`,
+`POST /api/auth/accept-invite` and `POST /api/auth/reset-password`. Accepting
+an invite creates the user with the invited role and signs them in; resetting
+a password revokes all of the account's sessions. Links are built from
+`server.web_base_url` (`/accept-invite?token=…`, `/reset-password?token=…`)
+and are site-relative paths when that setting is unset.
+
+Email delivery goes through the `AccountEmailSender` port; today its only
+implementation is the no-op one, so a "send" fails gracefully and the link is
+returned to the caller instead — the flow works fully without SMTP (D3), and
+a real sender arrives with roadmap 7.3. Password reset is admin-initiated in
+v1: an admin issues the link for a named user. The self-service "forgot
+password" endpoint lands with 7.3, because it needs 2.8's rate limiting.
+
+One edge case is handled deliberately: if an invited email signs in via SSO
+before accepting, the account is created with the invite's role and the
+pending invite is consumed, so the link then fails (the token is already used).
+Expired or revoked invites are ignored, a pending invite never enables SSO
+signup while `oidc.auto_create_users` is off, and linking to an existing user
+never touches invites.
+
 ## Authorization
 
 Authentication answers "who is this?"; authorization answers "may they do
@@ -117,13 +154,15 @@ extractor and asking `authz` for its permission:
 |---|---|---|
 | `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes |
 | `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes |
-| `AdminAccess` | `ManageUsers` | the `/api/users` routes and the temporary `/debug/*` routes (until 3.4/3.6 replace them) |
+| `AdminAccess` | `ManageUsers` | the `/api/users` routes, the invite and password-reset routes (`/api/invites`, `/api/users/{id}/password-reset`) and the temporary `/debug/*` routes (until 3.4/3.6 replace them) |
 
 A missing or invalid session is a 401; a valid session whose role lacks the
 permission is a 403 with the standard error envelope (`forbidden`). Handlers
 declare their required level in their signature — no inline role checks.
 `GET /api/auth/me` requires only a session (any role); login, logout,
-providers, the redirect flow, `/health` and the API docs stay public. The public list is an explicit allowlist in
+providers, the redirect flow, the invite/reset token routes
+(`/api/auth/tokens/inspect`, `/api/auth/accept-invite`,
+`/api/auth/reset-password`), `/health` and the API docs stay public. The public list is an explicit allowlist in
 `interface/src/access_tests.rs`: adding a route without an extractor or an
 allowlist entry fails the tests.
 
