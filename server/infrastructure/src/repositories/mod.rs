@@ -10,8 +10,13 @@
 //! declare a default join column for such a table — two declarations for the
 //! same pair are conflicting implementations, and `print-schema` omits the
 //! ambiguous pair — so joins between `task_relations` and `tasks` must
-//! always spell out their `ON` clause explicitly.
+//! always spell out their `ON` clause explicitly. The same applies to
+//! `account_tokens`, which has two foreign keys to `users` (`user_id` and
+//! `created_by`): `schema.rs` declares the default join on `user_id` (added
+//! by hand, since `print-schema` omits the pair), so any join on
+//! `created_by` must spell out its `ON` clause.
 
+pub mod account_token_repository;
 pub mod goal_milestone_repository;
 pub mod goal_repository;
 pub mod mapping;
@@ -24,6 +29,7 @@ pub mod task_repository;
 pub mod user_identity_repository;
 pub mod user_repository;
 
+pub use account_token_repository::PostgresAccountTokenRepository;
 pub use goal_milestone_repository::PostgresGoalMilestoneRepository;
 pub use goal_repository::PostgresGoalRepository;
 pub use milestone_repository::PostgresMilestoneRepository;

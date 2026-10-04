@@ -6,6 +6,7 @@
 //! concrete implementations at startup, so the application layer stays
 //! decoupled from any specific persistence technology.
 
+pub mod account_token_repository;
 pub mod goal_milestone_repository;
 pub mod goal_repository;
 pub mod milestone_repository;
@@ -19,6 +20,9 @@ pub mod task_repository;
 pub mod user_identity_repository;
 pub mod user_repository;
 
+pub use account_token_repository::{
+    AcceptInviteOutcome, AccountTokenRepository, ResetPasswordOutcome,
+};
 pub use goal_milestone_repository::GoalMilestoneRepository;
 pub use goal_repository::GoalRepository;
 pub use milestone_repository::MilestoneRepository;

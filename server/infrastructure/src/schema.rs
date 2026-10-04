@@ -1,6 +1,22 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    account_tokens (id) {
+        id -> Uuid,
+        purpose -> Text,
+        token_hash -> Text,
+        email -> Nullable<Text>,
+        role -> Nullable<Text>,
+        user_id -> Nullable<Uuid>,
+        created_by -> Nullable<Uuid>,
+        created_at -> Timestamptz,
+        expires_at -> Timestamptz,
+        consumed_at -> Nullable<Timestamptz>,
+        revoked_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
     goal_milestones (goal_id, milestone_id) {
         goal_id -> Uuid,
         milestone_id -> Uuid,
@@ -103,6 +119,10 @@ diesel::table! {
     }
 }
 
+// `account_tokens` has two foreign keys to `users` (`user_id` and
+// `created_by`), so `print-schema` omits the pair; the default join is on
+// `user_id`. See the note in `repositories/mod.rs`.
+diesel::joinable!(account_tokens -> users (user_id));
 diesel::joinable!(goal_milestones -> goals (goal_id));
 diesel::joinable!(goal_milestones -> milestones (milestone_id));
 diesel::joinable!(progress_snapshots -> goals (goal_id));
@@ -112,6 +132,7 @@ diesel::joinable!(tasks -> milestones (milestone_id));
 diesel::joinable!(user_identities -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    account_tokens,
     goal_milestones,
     goals,
     milestones,

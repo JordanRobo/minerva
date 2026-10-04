@@ -12,9 +12,10 @@ use uuid::Uuid;
 
 use application::ports::RepositoryError;
 use domain::{
-    Goal, GoalId, GoalStatus, Milestone, MilestoneId, ProgressSnapshot, ProgressSnapshotId,
-    ProgressTarget, Role, Session, SessionId, Status, StatusSource, Task, TaskId, TaskRelation,
-    TaskRelationId, TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserIdentityId,
+    AccountToken, AccountTokenId, AccountTokenKind, Goal, GoalId, GoalStatus, Milestone,
+    MilestoneId, ProgressSnapshot, ProgressSnapshotId, ProgressTarget, Role, Session, SessionId,
+    Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId, TaskRelationType, TaskStatus,
+    User, UserId, UserIdentity, UserIdentityId,
 };
 
 /// A row of the `goals` table: id, title, description, status,
@@ -353,5 +354,98 @@ pub fn user_identity_from_row(row: UserIdentityRow) -> Result<UserIdentity, Repo
         subject,
         email,
         created_at,
+    })
+}
+
+/// The values stored in an `account_tokens.purpose` column. Kept here so
+/// repository code never names purposes with raw strings.
+pub const PURPOSE_INVITE: &str = "invite";
+pub const PURPOSE_PASSWORD_RESET: &str = "password_reset";
+
+/// A row of the `account_tokens` table: id, purpose, token_hash, email,
+/// role, user_id, created_by, created_at, expires_at, consumed_at,
+/// revoked_at — in that order. `email` and `role` are set for invites only;
+/// `user_id` for resets only (the table's CHECK constraint enforces this).
+pub type AccountTokenRow = (
+    Uuid,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<Uuid>,
+    Option<Uuid>,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+);
+
+/// The subject columns of an [`AccountTokenKind`]: the `purpose`, `email`,
+/// `role` and `user_id` values to store. An invite fills the email and role
+/// columns; a reset leaves them NULL (its subject is `user_id`).
+pub fn account_token_subject_to_db(
+    kind: &AccountTokenKind,
+) -> (
+    &'static str,
+    Option<&str>,
+    Option<&'static str>,
+    Option<Uuid>,
+) {
+    match kind {
+        AccountTokenKind::Invite { email, role } => (
+            PURPOSE_INVITE,
+            Some(email.as_str()),
+            Some(role_to_db(*role)),
+            None,
+        ),
+        AccountTokenKind::PasswordReset { user_id } => {
+            (PURPOSE_PASSWORD_RESET, None, None, Some(user_id.0))
+        }
+    }
+}
+
+/// Build an [`AccountToken`] from an `account_tokens` row.
+///
+/// The kind is reconstructed from the subject columns; a row with an unknown
+/// purpose or mixed-up subject columns violates the table's CHECK constraint
+/// and is a data-integrity problem, so it is reported as
+/// [`RepositoryError::Unexpected`] rather than guessed at.
+pub fn account_token_from_row(row: AccountTokenRow) -> Result<AccountToken, RepositoryError> {
+    let (
+        id,
+        purpose,
+        token_hash,
+        email,
+        role,
+        user_id,
+        created_by,
+        created_at,
+        expires_at,
+        consumed_at,
+        revoked_at,
+    ) = row;
+    let kind = match (purpose.as_str(), email, role, user_id) {
+        (PURPOSE_INVITE, Some(email), Some(role), None) => AccountTokenKind::Invite {
+            email,
+            role: role_from_db(&role)?,
+        },
+        (PURPOSE_PASSWORD_RESET, None, None, Some(user_id)) => AccountTokenKind::PasswordReset {
+            user_id: UserId(user_id),
+        },
+        _ => {
+            return Err(RepositoryError::Unexpected(format!(
+                "account token row with purpose {purpose:?} violates the kind invariants"
+            )));
+        }
+    };
+    Ok(AccountToken {
+        id: AccountTokenId(id),
+        kind,
+        token_hash,
+        created_by: created_by.map(UserId),
+        created_at,
+        expires_at,
+        consumed_at,
+        revoked_at,
     })
 }
