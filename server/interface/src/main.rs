@@ -106,7 +106,9 @@ async fn main() -> std::io::Result<()> {
     let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
     let users_data: web::Data<dyn UserRepository> = users.clone().into();
     // The token store behind invites and password resets (roadmap 2.6); the
-    // account-link service below consumes it.
+    // account-link service below and the OIDC provider (when enabled) both
+    // take it — the latter to consume a pending invite when an invited email
+    // signs in via SSO before accepting it.
     let account_tokens: Arc<dyn AccountTokenRepository> =
         Arc::new(PostgresAccountTokenRepository::new(pool.clone()));
     // The OIDC provider below also takes these ports, so the Arcs stay
@@ -160,7 +162,7 @@ async fn main() -> std::io::Result<()> {
     // the endpoints return the links to the caller instead of emailing them.
     let email: Arc<dyn AccountEmailSender> = Arc::new(NoEmailSender);
     let account_link_service = web::Data::new(AccountLinkService::new(
-        account_tokens,
+        account_tokens.clone(),
         users.clone(),
         password_hasher.clone(),
         session_tokens,
@@ -229,6 +231,7 @@ async fn main() -> std::io::Result<()> {
             protocol,
             users.clone(),
             user_identities.clone(),
+            account_tokens,
             LoginPolicy {
                 auto_create_users: config.oidc.auto_create_users,
             },
