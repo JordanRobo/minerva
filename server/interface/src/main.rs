@@ -10,6 +10,7 @@ mod milestones;
 mod openapi;
 mod redirect;
 mod routes;
+mod sso_rules;
 mod tasks;
 mod users;
 
@@ -32,6 +33,7 @@ use application::ports::{
     AccountEmailSender, AccountTokenRepository, OidcProvider, PasswordHasher, SessionRepository,
     SessionTokens, UserIdentityRepository, UserRepository,
 };
+use application::sso_rules::SsoGroupRuleService;
 use application::user_admin::UserAdminService;
 use chrono::Utc;
 use infrastructure::Argon2PasswordHasher;
@@ -43,8 +45,8 @@ use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
 use infrastructure::repositories::{
     PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
     PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
-    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserIdentityRepository,
-    PostgresUserRepository, RedisSessionRepository,
+    PostgresSsoGroupRuleRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
+    PostgresUserIdentityRepository, PostgresUserRepository, RedisSessionRepository,
 };
 use std::sync::Arc;
 
@@ -90,7 +92,7 @@ async fn main() -> std::io::Result<()> {
         println!("run_migrations is false; skipping migrations");
     }
 
-    // One shared pool, nine repositories. Each is registered as its own
+    // One shared pool, ten repositories. Each is registered as its own
     // `web::Data` rather than wrapped in a single AppState struct: every
     // handler uses exactly one repository, so per-repo Data keeps each
     // handler's signature naming only the repo it actually calls. (The pool
@@ -101,6 +103,12 @@ async fn main() -> std::io::Result<()> {
     let tasks = web::Data::new(PostgresTaskRepository::new(pool.clone()));
     let task_relations = web::Data::new(PostgresTaskRelationRepository::new(pool.clone()));
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
+    // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
+    // service so name validation and the duplicate-name conflict live in one
+    // place (see application::sso_rules).
+    let sso_group_rules = web::Data::new(SsoGroupRuleService::new(Arc::new(
+        PostgresSsoGroupRuleRepository::new(pool.clone()),
+    )));
     // The auth handlers take ports, not concrete repositories, so these are
     // registered as trait objects (the same way sessions below are).
     let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
@@ -280,6 +288,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(tasks.clone())
             .app_data(task_relations.clone())
             .app_data(progress_snapshots.clone())
+            .app_data(sso_group_rules.clone())
             .app_data(users_data.clone())
             .app_data(user_identities_data.clone())
             .app_data(sessions_data.clone())

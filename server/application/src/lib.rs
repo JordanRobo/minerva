@@ -8,4 +8,5 @@ pub mod authz;
 pub mod bootstrap;
 pub mod oidc_login;
 pub mod ports;
+pub mod sso_rules;
 pub mod user_admin;

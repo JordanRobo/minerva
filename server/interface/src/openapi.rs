@@ -1,6 +1,6 @@
 //! OpenAPI document for the Minerva API, assembled from the
 //! `#[utoipa::path]` annotations on the handlers in `auth`, `goals`,
-//! `milestones`, `redirect`, `tasks`, and `users`. Served as JSON at `/api-docs/openapi.json` and
+//! `milestones`, `redirect`, `sso_rules`, `tasks`, and `users`. Served as JSON at `/api-docs/openapi.json` and
 //! rendered by Swagger UI at `/api-docs/swagger-ui/` (wired up in `main.rs`).
 //!
 //! The `*Doc` schema types mirror the wire shape of domain status types:
@@ -108,6 +108,7 @@ pub struct GoalStatusDoc {
         (name = "goals", description = "Goals: the top-level outcomes a school works toward."),
         (name = "invites", description = "Invites: one-time links that create new accounts. Admin only."),
         (name = "milestones", description = "Milestones: dated checkpoints within a goal."),
+        (name = "sso", description = "SSO group-to-role rules: which IdP group maps to which role while any rule exists. Admin only."),
         (name = "tasks", description = "Tasks: day-to-day work, optionally attached to a milestone."),
         (name = "users", description = "User administration: roles and active state. Admin only."),
     ),
@@ -131,6 +132,10 @@ pub struct GoalStatusDoc {
         crate::milestones::get_milestone,
         crate::milestones::update_milestone,
         crate::milestones::delete_milestone,
+        crate::sso_rules::list_group_rules,
+        crate::sso_rules::create_group_rule,
+        crate::sso_rules::update_group_rule,
+        crate::sso_rules::delete_group_rule,
         crate::tasks::create_task,
         crate::tasks::list_tasks,
         crate::tasks::get_task,
@@ -161,6 +166,8 @@ pub struct GoalStatusDoc {
         crate::tasks::TaskListQuery,
         crate::tasks::TaskRequest,
         crate::tasks::TaskResponse,
+        crate::sso_rules::SsoGroupRuleResponse,
+        crate::sso_rules::GroupRuleRequest,
         crate::users::UserAdminResponse,
         crate::users::ChangeRoleRequest,
         crate::users::PasswordResetCreatedResponse,

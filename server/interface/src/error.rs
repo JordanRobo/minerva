@@ -81,6 +81,14 @@ impl ApiError {
         }
     }
 
+    /// 409 — a group rule for this IdP group name already exists.
+    pub fn group_rule_exists(message: impl Into<String>) -> Self {
+        Self {
+            code: "group_rule_exists".to_owned(),
+            message: message.into(),
+        }
+    }
+
     /// 400 — the one-time link in the request is unknown or no longer usable.
     /// One code and one message for all of them, so the answer never hints
     /// which.
@@ -115,7 +123,7 @@ impl ResponseError for ApiError {
             "unauthorized" => StatusCode::UNAUTHORIZED,
             "forbidden" => StatusCode::FORBIDDEN,
             "not_found" => StatusCode::NOT_FOUND,
-            "conflict" | "account_exists" => StatusCode::CONFLICT,
+            "conflict" | "account_exists" | "group_rule_exists" => StatusCode::CONFLICT,
             "internal_error" => StatusCode::INTERNAL_SERVER_ERROR,
             // bad_request, invalid_reference, invalid_token, and any unknown code
             _ => StatusCode::BAD_REQUEST,
