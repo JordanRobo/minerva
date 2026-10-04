@@ -2,14 +2,18 @@
 //! Redis. Test-only: compiled under `#[cfg(test)]` in [`super`].
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
-use domain::{Role, Session, SessionId, User, UserId, UserIdentity};
+use domain::{
+    AccountToken, AccountTokenId, AccountTokenKind, Role, Session, SessionId, User, UserId,
+    UserIdentity,
+};
 
 use crate::ports::{
-    AccessChange, AccessChangeError, PasswordHashError, PasswordHasher, RepositoryError,
-    SessionRepository, SessionTokens, UserIdentityRepository, UserRepository,
+    AcceptInviteOutcome, AccessChange, AccessChangeError, AccountEmailSender,
+    AccountTokenRepository, EmailSendError, PasswordHashError, PasswordHasher, RepositoryError,
+    ResetPasswordOutcome, SessionRepository, SessionTokens, UserIdentityRepository, UserRepository,
 };
 
 /// A [`SessionRepository`] that keeps sessions in a `HashMap`.
@@ -340,5 +344,315 @@ impl UserRepository for FailingUserRepository {
         Err(AccessChangeError::Repository(RepositoryError::Unexpected(
             "faking a repository failure".to_owned(),
         )))
+    }
+}
+
+/// An [`AccountTokenRepository`] that keeps tokens in a `Vec`; the mutex
+/// plays the part of the Postgres transactions, so the fake produces the same
+/// outcomes as the real one (issue revokes live siblings, accept_invite rolls
+/// its claim back on a taken email, ...). It also holds the user store it
+/// checks for the taken-email rule, standing in for the real repository's
+/// users table.
+pub struct InMemoryAccountTokenRepository {
+    tokens: Mutex<Vec<AccountToken>>,
+    users: Arc<InMemoryUserRepository>,
+}
+
+impl InMemoryAccountTokenRepository {
+    pub fn new(users: Arc<InMemoryUserRepository>) -> Self {
+        Self {
+            tokens: Mutex::new(Vec::new()),
+            users,
+        }
+    }
+
+    /// Seed a token directly (e.g. an expired one the service would never
+    /// create).
+    pub fn insert(&self, token: AccountToken) {
+        self.tokens.lock().unwrap().push(token);
+    }
+
+    fn locked(&self) -> MutexGuard<'_, Vec<AccountToken>> {
+        self.tokens.lock().unwrap()
+    }
+}
+
+/// Whether a token is live in the repository's sense: unconsumed and
+/// unrevoked, expired or not.
+fn token_is_live(token: &AccountToken) -> bool {
+    token.consumed_at.is_none() && token.revoked_at.is_none()
+}
+
+/// Whether two tokens are for the same subject: the same email for invites,
+/// the same user for resets.
+fn tokens_share_subject(a: &AccountTokenKind, b: &AccountTokenKind) -> bool {
+    match (a, b) {
+        (AccountTokenKind::Invite { email: a, .. }, AccountTokenKind::Invite { email: b, .. }) => {
+            a == b
+        }
+        (
+            AccountTokenKind::PasswordReset { user_id: a },
+            AccountTokenKind::PasswordReset { user_id: b },
+        ) => a == b,
+        _ => false,
+    }
+}
+
+#[async_trait::async_trait]
+impl AccountTokenRepository for InMemoryAccountTokenRepository {
+    async fn issue(
+        &self,
+        token: AccountToken,
+        now: DateTime<Utc>,
+    ) -> Result<AccountToken, RepositoryError> {
+        let mut tokens = self.locked();
+        // Revoke the subject's live token first, like the Postgres
+        // transaction.
+        for old in tokens.iter_mut() {
+            if token_is_live(old) && tokens_share_subject(&old.kind, &token.kind) {
+                old.revoked_at = Some(now);
+            }
+        }
+        tokens.push(token.clone());
+        Ok(token)
+    }
+
+    async fn find_by_token_hash(
+        &self,
+        token_hash: String,
+    ) -> Result<Option<AccountToken>, RepositoryError> {
+        Ok(self
+            .locked()
+            .iter()
+            .find(|token| token.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn find_by_id(
+        &self,
+        id: AccountTokenId,
+    ) -> Result<Option<AccountToken>, RepositoryError> {
+        Ok(self.locked().iter().find(|token| token.id == id).cloned())
+    }
+
+    async fn list_invites(&self) -> Result<Vec<AccountToken>, RepositoryError> {
+        let mut invites = self
+            .locked()
+            .iter()
+            .filter(|token| matches!(token.kind, AccountTokenKind::Invite { .. }))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Newest first; the id breaks created_at ties, like the real query.
+        invites.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.0.cmp(&a.id.0))
+        });
+        Ok(invites)
+    }
+
+    async fn find_pending_invite_for_email(
+        &self,
+        email: String,
+        now: DateTime<Utc>,
+    ) -> Result<Option<AccountToken>, RepositoryError> {
+        // Stored emails are normalized (trimmed, lowercased); match that.
+        let email = email.trim().to_lowercase();
+        Ok(self
+            .locked()
+            .iter()
+            .find(|token| {
+                matches!(&token.kind, AccountTokenKind::Invite { email: e, .. } if *e == email)
+                    && token.consumed_at.is_none()
+                    && token.revoked_at.is_none()
+                    && token.expires_at > now
+            })
+            .cloned())
+    }
+
+    async fn revoke(&self, id: AccountTokenId, now: DateTime<Utc>) -> Result<(), RepositoryError> {
+        let mut tokens = self.locked();
+        let Some(token) = tokens.iter_mut().find(|token| token.id == id) else {
+            return Err(RepositoryError::NotFound);
+        };
+        // Only a live token flips; an already-consumed or revoked one is an
+        // idempotent no-op.
+        if token_is_live(token) {
+            token.revoked_at = Some(now);
+        }
+        Ok(())
+    }
+
+    async fn consume(
+        &self,
+        id: AccountTokenId,
+        now: DateTime<Utc>,
+    ) -> Result<bool, RepositoryError> {
+        let mut tokens = self.locked();
+        let Some(token) = tokens.iter_mut().find(|token| token.id == id) else {
+            return Ok(false);
+        };
+        if token_is_live(token) && token.expires_at > now {
+            token.consumed_at = Some(now);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn accept_invite(
+        &self,
+        id: AccountTokenId,
+        user: User,
+        now: DateTime<Utc>,
+    ) -> Result<AcceptInviteOutcome, RepositoryError> {
+        // The taken-email check runs before the claim so no lock is held
+        // across an await; single-threaded tests see the same outcome as the
+        // Postgres transaction either way.
+        let email_taken = self
+            .users
+            .find_by_email(user.email.clone())
+            .await?
+            .is_some();
+        // Claim under the tokens lock, like the Postgres transaction...
+        let claimed = {
+            let mut tokens = self.locked();
+            match tokens.iter_mut().find(|token| token.id == id) {
+                Some(token) if token.is_pending(now) => {
+                    token.consumed_at = Some(now);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !claimed {
+            return Ok(AcceptInviteOutcome::TokenUnusable);
+        }
+        if email_taken {
+            // ...and roll the claim back when the email is taken, so a failed
+            // attempt does not burn the invite.
+            let mut tokens = self.locked();
+            if let Some(token) = tokens.iter_mut().find(|token| token.id == id) {
+                token.consumed_at = None;
+            }
+            return Ok(AcceptInviteOutcome::EmailTaken);
+        }
+        self.users.create(user.clone()).await?;
+        Ok(AcceptInviteOutcome::Accepted(user))
+    }
+
+    async fn reset_password(
+        &self,
+        id: AccountTokenId,
+        user_id: UserId,
+        password_hash: String,
+        now: DateTime<Utc>,
+    ) -> Result<ResetPasswordOutcome, RepositoryError> {
+        // Claim under the tokens lock...
+        let claimed = {
+            let mut tokens = self.locked();
+            match tokens.iter_mut().find(|token| token.id == id) {
+                Some(token) if token.is_pending(now) => {
+                    token.consumed_at = Some(now);
+                    Some(token.kind.clone())
+                }
+                _ => None,
+            }
+        };
+        let Some(kind) = claimed else {
+            return Ok(ResetPasswordOutcome::TokenUnusable);
+        };
+        // ...then apply the user change outside it (no lock is held across an
+        // await).
+        match self.users.find_by_id(user_id).await? {
+            None => {
+                // Roll the claim back when the user is gone.
+                let mut tokens = self.locked();
+                if let Some(token) = tokens.iter_mut().find(|token| token.id == id) {
+                    token.consumed_at = None;
+                }
+                Ok(ResetPasswordOutcome::UserNotFound)
+            }
+            Some(mut user) => {
+                user.password_hash = Some(password_hash);
+                user.updated_at = now;
+                self.users.update(user).await?;
+                // Any other live reset link for this user stops working now.
+                let mut tokens = self.locked();
+                for old in tokens.iter_mut() {
+                    if token_is_live(old) && tokens_share_subject(&old.kind, &kind) {
+                        old.revoked_at = Some(now);
+                    }
+                }
+                Ok(ResetPasswordOutcome::Done)
+            }
+        }
+    }
+}
+
+/// An [`AccountEmailSender`] for tests: delivery succeeds or fails on demand,
+/// and every successfully sent link is recorded so tests can assert what was
+/// emailed.
+pub struct RecordingEmailSender {
+    fail: Mutex<bool>,
+    sent: Mutex<Vec<String>>,
+}
+
+impl Default for RecordingEmailSender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RecordingEmailSender {
+    pub fn new() -> Self {
+        Self {
+            fail: Mutex::new(false),
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Make every send fail (or succeed again).
+    pub fn set_fail(&self, fail: bool) {
+        *self.fail.lock().unwrap() = fail;
+    }
+
+    /// The links that were actually sent.
+    pub fn sent_links(&self) -> Vec<String> {
+        self.sent.lock().unwrap().clone()
+    }
+
+    fn record(&self, link: &str) -> Result<(), EmailSendError> {
+        if *self.fail.lock().unwrap() {
+            return Err(EmailSendError("faking a delivery failure".to_owned()));
+        }
+        self.sent.lock().unwrap().push(link.to_owned());
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl AccountEmailSender for RecordingEmailSender {
+    fn is_configured(&self) -> bool {
+        !*self.fail.lock().unwrap()
+    }
+
+    async fn send_invite(
+        &self,
+        _to_email: &str,
+        link: &str,
+        _role: Role,
+        _expires_at: DateTime<Utc>,
+    ) -> Result<(), EmailSendError> {
+        self.record(link)
+    }
+
+    async fn send_password_reset(
+        &self,
+        _to_email: &str,
+        link: &str,
+        _expires_at: DateTime<Utc>,
+    ) -> Result<(), EmailSendError> {
+        self.record(link)
     }
 }

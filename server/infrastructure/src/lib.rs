@@ -7,6 +7,7 @@
 //! read from environment variables.
 
 pub mod db;
+pub mod email;
 pub mod error;
 pub mod migrations;
 pub mod oidc;
@@ -14,6 +15,7 @@ pub mod password_hasher;
 pub mod repositories;
 pub mod session_tokens;
 
+pub use email::NoEmailSender;
 pub use password_hasher::Argon2PasswordHasher;
 pub use session_tokens::Sha256SessionTokens;
 
