@@ -414,13 +414,23 @@ mod tests {
     }
 
     fn claims(subject: &str, email: Option<&str>, verified: bool) -> OidcClaims {
+        claims_with_groups(subject, email, verified, &[])
+    }
+
+    /// The same claims with the IdP's groups, for the group-to-role tests.
+    fn claims_with_groups(
+        subject: &str,
+        email: Option<&str>,
+        verified: bool,
+        groups: &[&str],
+    ) -> OidcClaims {
         OidcClaims {
             issuer: "https://idp.example".to_owned(),
             subject: subject.to_owned(),
             email: email.map(str::to_owned),
             email_verified: verified,
             display_name: None,
-            groups: Vec::new(),
+            groups: groups.iter().copied().map(str::to_owned).collect(),
         }
     }
 

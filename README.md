@@ -222,6 +222,9 @@ while `oidc.issuer_url` is blank; to enable it, set in `minerva.toml` (or via
   and registered at the provider; for the dev compose stack that is
   `http://localhost:3010/api/auth/oidc/callback`
 - `oidc.state_secret` — at least 32 bytes; generate with `openssl rand -hex 32`
+- `oidc.groups_claim` — name of the ID-token claim holding the user's
+  groups (default "groups"); read at SSO login for the group-to-role rules
+  (roadmap 2.7)
 - `server.web_base_url` — absolute public URL of the API origin, e.g.
   `http://localhost:3010` for the dev stack
 
@@ -229,6 +232,13 @@ The server fails at startup, naming every problem it finds, if you set
 `oidc.issuer_url` but leave anything else required missing or invalid. It
 works with any standards-compliant OIDC provider; it has been tested with
 Authentik.
+
+For the group-to-role rules (roadmap 2.7) to work, your identity provider
+must release the groups claim in the ID token; depending on the provider
+this may also mean adjusting `oidc.scopes` so the claim is included — check
+your provider's documentation, as Minerva has not verified this against a
+live IdP yet. While the claim is missing or malformed the server logs a
+warning per login and proceeds with no groups.
 
 ## License
 

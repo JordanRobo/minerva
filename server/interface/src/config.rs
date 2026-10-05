@@ -803,6 +803,20 @@ mod tests {
     }
 
     #[test]
+    fn groups_claim_overrides_the_default_and_blank_falls_back() {
+        let toml = format!("{DB_TOML}[oidc]\ngroups_claim = \"app_groups\"\n");
+        let (config, problems) = sources(Some(&toml), &[], &[]).expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.oidc.groups_claim, "app_groups");
+
+        // A blank value counts as unset: the default stands.
+        let toml = format!("{DB_TOML}[oidc]\ngroups_claim = \"   \"\n");
+        let (config, problems) = sources(Some(&toml), &[], &[]).expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.oidc.groups_claim, DEFAULT_GROUPS_CLAIM);
+    }
+
+    #[test]
     fn blank_values_count_as_unset() {
         // Blank env vars: the issuer stays "unset", so OIDC is disabled even
         // though the variable is present; a blank PORT falls back to default.

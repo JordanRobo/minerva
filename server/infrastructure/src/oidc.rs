@@ -210,7 +210,9 @@ type GroupsIdToken = IdToken<
 >;
 
 /// Read the groups claim, tolerating an absent claim, a single string, or an
-/// array of strings (non-string items are dropped).
+/// array of strings (non-string items are dropped). A missing claim or any
+/// other shape logs a warning and yields an empty list; group contents and
+/// tokens are never logged.
 fn extract_groups(claims: &ExtraIdTokenClaims, claim_name: &str) -> Vec<String> {
     match claims.extra.get(claim_name) {
         Some(Value::Array(items)) => items
@@ -218,7 +220,20 @@ fn extract_groups(claims: &ExtraIdTokenClaims, claim_name: &str) -> Vec<String> 
             .filter_map(|item| item.as_str().map(str::to_owned))
             .collect(),
         Some(Value::String(group)) => vec![group.clone()],
-        _ => Vec::new(),
+        Some(_) => {
+            eprintln!(
+                "warning: the \"{claim_name}\" claim in the ID token is not a string or an \
+                 array of strings; no groups were read for this login"
+            );
+            Vec::new()
+        }
+        None => {
+            eprintln!(
+                "warning: the ID token has no \"{claim_name}\" claim; no groups were read \
+                 for this login"
+            );
+            Vec::new()
+        }
     }
 }
 
