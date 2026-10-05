@@ -62,6 +62,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    rate_limit_counters (key, window_start) {
+        key -> Text,
+        window_start -> Timestamptz,
+        count -> Int4,
+    }
+}
+
+diesel::table! {
     sessions (id) {
         id -> Uuid,
         user_id -> Uuid,
@@ -149,6 +157,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     goals,
     milestones,
     progress_snapshots,
+    rate_limit_counters,
     sessions,
     sso_group_role_rules,
     task_relations,

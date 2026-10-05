@@ -9,7 +9,7 @@ communicates with the backend over HTTP only.
 | Crate | Kind | Responsibility | May depend on |
 |---|---|---|---|
 | `domain` | lib | Core business concepts and invariants (goals, milestones, ...). Pure logic, no I/O. | nothing but the `uuid`, `chrono`, `serde` value-type exceptions |
-| `application` | lib | Use cases: orchestrate domain objects to fulfill a request. Transaction boundaries live here. | `domain` |
+| `application` | lib | Use cases: orchestrate domain objects to fulfill a request. Transaction boundaries live here. | `domain`, plus `sha2` for one-way subject hashing in rate limiting |
 | `infrastructure` | lib | Adapters for external systems: Postgres (Diesel), Redis; S3 (`object_store`) declared but not yet implemented (roadmap 7.1). Receives ready-made configuration values; reads no files or environment itself. | `domain`, `application` (ports) |
 | `interface` | bin | HTTP API server (Actix-web). Routing and request/response mapping; the composition root that wires the other crates together at startup. Owns all configuration: typed, validated settings from an optional `minerva.toml` layered with environment variables (`src/config.rs`). | all of the above |
 
@@ -115,9 +115,10 @@ lock with a try-lock — when another node holds it the tick skips silently, so
 however many API nodes run, exactly one purges per tick; the first tick lands
 about 30 seconds after startup. While holding the lock it calls
 `SessionRepository::purge_expired` and logs the removed count only when it is
-non-zero; a failing tick warns and retries on the next hour. Jobs are
-registered as small `MaintenanceJob`s (name + advisory lock key + async fn)
-so later jobs — the rate-limit counter cleanup in 2.8 — need no new plumbing.
+non-zero; a failing tick warns and retries on the next hour. The rate-limit
+counter purge is registered as a second `MaintenanceJob` (name + advisory
+lock key + async fn) on the same Postgres branch, with its own lock key so
+the two jobs tick independently.
 
 The redirect flow (`interface/src/redirect.rs`) is generic over providers:
 
@@ -141,6 +142,24 @@ and identity creation.
 construction in `interface/src/main.rs`. Nothing else changes — routing,
 cookies, session issuance, and the `/api/auth/providers` listing all follow
 from the registry.
+
+**Rate limiting** (roadmap 2.8) caps login attempts per client IP and per
+IP-and-email pair, token-link uses per client IP, and invite/reset issuances
+per actor with fixed windows aligned to the epoch, so every node computes
+the same boundaries from its own clock. Counters sit behind the
+`RateLimiter` port (`application::rate_limit`) with the same storage
+selection as sessions: Redis when `redis.url` is configured (a hit is one
+atomic INCR+EXPIRE pipeline; native TTLs evict expired windows), Postgres
+otherwise (one row per key and window, incremented by a single atomic
+upsert). The service hashes subjects with SHA-256 before they reach the
+store — raw IPs and emails never touch it — and fails open: a store error
+is logged at warn and the request allowed, because rate limiting must never
+take login down. `rate_limit.client_ip_header` names the proxy header
+carrying the real client address (the first comma-separated value wins),
+falling back to the TCP peer address; with Postgres counters, the hourly
+maintenance runner purges windows older than the longest policy window. The
+limiter is wired at startup but not yet attached to routes — step 5 of 2.8
+does that.
 
 ### Invites and password reset
 

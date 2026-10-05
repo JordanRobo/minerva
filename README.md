@@ -257,6 +257,20 @@ marked "managed by SSO" and cannot be changed through `/api/users` while any
 rule exists; delete every rule to hand-edit them again. Without any rule,
 SSO sign-ins never touch roles.
 
+### Rate limiting
+
+Login and token-link requests are rate-limited per client IP (logins also per
+IP-and-email pair) with fixed-window counters (roadmap 2.8). Counters live in
+Redis when `redis.url` is configured, in Postgres otherwise; subjects are
+hashed before they reach the store, and a failing counter store allows the
+request rather than taking login down.
+
+- `rate_limit.enabled` — default `true`; set `false` to disable all limits
+- `rate_limit.client_ip_header` — default: none (the TCP peer address is
+  used). Behind a reverse proxy, set it to the header carrying the real
+  client address (e.g. `X-Forwarded-For`) or every user shares the proxy's
+  own address and one blocked IP locks everyone out
+
 ## License
 
 TBD — Minerva will be released under the Elastic License 2.0 (see

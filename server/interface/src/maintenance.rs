@@ -4,6 +4,7 @@
 //! however many API nodes run, exactly one does the work per tick.
 
 use application::ports::{RepositoryError, SessionRepository};
+use application::rate_limit::{RateLimiter, longest_policy_window};
 use chrono::Utc;
 use infrastructure::db::{PgPool, try_acquire_advisory_lock};
 use std::future::Future;
@@ -23,6 +24,11 @@ const FIRST_TICK_DELAY: Duration = Duration::from_secs(30);
 /// across nodes and releases; "MNVRPRGE" read as ASCII, like the migration
 /// lock key (see `infrastructure::migrations`).
 const PURGE_LOCK_KEY: i64 = 0x4D4E5652_50524745;
+
+/// Advisory lock key for the rate-limit counter purge job; "MNVRRLIM" read as
+/// ASCII, distinct from the session purge's key so the two jobs tick
+/// independently.
+const RATE_LIMIT_PURGE_LOCK_KEY: i64 = 0x4D4E5652_524C494D;
 
 /// The work a maintenance job does: how many items it processed, or the
 /// storage error that stopped it.
@@ -61,6 +67,29 @@ pub fn purge_expired_sessions(sessions: Arc<dyn SessionRepository>) -> Maintenan
         let sessions = sessions.clone();
         async move { sessions.purge_expired(Utc::now()).await }
     })
+}
+
+/// The rate-limit counter purge job (roadmap 2.8): deletes Postgres rows for
+/// windows that ended more than the longest policy window ago — older than
+/// that, no policy can receive hits in them any more. With Redis this is a
+/// no-op (native TTLs evict keys), so the job is registered only when
+/// Postgres holds the counters.
+pub fn purge_rate_limit_counters(limiter: Arc<dyn RateLimiter>) -> MaintenanceJob {
+    MaintenanceJob::new(
+        "purge_rate_limit_counters",
+        RATE_LIMIT_PURGE_LOCK_KEY,
+        move || {
+            let limiter = limiter.clone();
+            async move {
+                let cutoff = Utc::now()
+                    - chrono::Duration::seconds(longest_policy_window().as_secs() as i64);
+                limiter
+                    .purge_before(cutoff)
+                    .await
+                    .map_err(|err| RepositoryError::Unexpected(err.to_string()))
+            }
+        },
+    )
 }
 
 /// One maintenance tick: take the job's advisory lock (skipping silently
