@@ -384,6 +384,8 @@ async fn user_identity_repository_round_trip() {
         display_name: "Identity test user".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -445,6 +447,8 @@ async fn user_repository_round_trip() {
         display_name: "Round trip user".into(),
         role: Role::Staff,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -475,6 +479,8 @@ async fn user_repository_round_trip() {
         display_name: "Duplicate".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -504,6 +510,8 @@ async fn user_repository_round_trip() {
         display_name: "Passwordless".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -532,6 +540,8 @@ async fn user_repository_round_trip() {
         display_name: "Mixed case".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -573,6 +583,8 @@ async fn create_if_no_users_refuses_when_any_user_exists() {
         display_name: "Bootstrap blocker".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -585,6 +597,8 @@ async fn create_if_no_users_refuses_when_any_user_exists() {
         display_name: "Second admin".into(),
         role: Role::Admin,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };

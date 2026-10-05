@@ -126,6 +126,8 @@ diesel::table! {
         updated_at -> Timestamptz,
         role -> Text,
         deactivated_at -> Nullable<Timestamptz>,
+        role_managed_by_sso -> Bool,
+        sso_role_exempt -> Bool,
     }
 }
 

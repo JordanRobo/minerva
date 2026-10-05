@@ -456,6 +456,8 @@ impl AccountLinkService {
             display_name,
             role,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         };
@@ -622,6 +624,8 @@ mod tests {
             display_name: "Test".to_owned(),
             role,
             deactivated_at: deactivated.then_some(now),
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         }
@@ -825,6 +829,10 @@ mod tests {
         assert_eq!(user.role, Role::Staff);
         assert_eq!(user.display_name, "New Person");
         assert!(user.deactivated_at.is_none());
+        // D15: normal creations never set the SSO flags; only the bootstrap
+        // admin is exempt from recomputation.
+        assert!(!user.role_managed_by_sso);
+        assert!(!user.sso_role_exempt);
         // The password is stored hashed — never the plaintext.
         assert_eq!(
             user.password_hash.as_deref(),

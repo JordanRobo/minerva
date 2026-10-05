@@ -106,9 +106,10 @@ async fn main() -> std::io::Result<()> {
     // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
     // service so name validation and the duplicate-name conflict live in one
     // place (see application::sso_rules).
-    let sso_group_rules = web::Data::new(SsoGroupRuleService::new(Arc::new(
-        PostgresSsoGroupRuleRepository::new(pool.clone()),
-    )));
+    // The user-admin service below shares the same repository: it asks
+    // whether any rule exists to lock SSO-managed roles against hand edits.
+    let sso_group_rules_repo = Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone()));
+    let sso_group_rules = web::Data::new(SsoGroupRuleService::new(sso_group_rules_repo.clone()));
     // The auth handlers take ports, not concrete repositories, so these are
     // registered as trait objects (the same way sessions below are).
     let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
@@ -159,6 +160,7 @@ async fn main() -> std::io::Result<()> {
     // and last-admin rules live in one place (see application::user_admin).
     let user_admin = web::Data::new(UserAdminService::new(
         users.clone(),
+        sso_group_rules_repo,
         session_service.get_ref().clone(),
     ));
     // The password hasher holds no state; the password provider and the

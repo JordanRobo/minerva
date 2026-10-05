@@ -192,6 +192,12 @@ nothing. Set in `minerva.toml` (or via
 The bootstrap only takes effect while no users exist: it never resets an
 existing password or modifies an existing account.
 
+The bootstrap admin is created with `sso_role_exempt = true`, so SSO
+group-to-role rules (roadmap 2.7) can never recompute or lock its role;
+every other account starts with both flags false. If your database was
+bootstrapped before that column existed, set the flag once by hand:
+`UPDATE users SET sso_role_exempt = true WHERE email = '<admin email>';`
+
 ### Inviting people
 
 There is no public signup: an administrator creates an invite through the API

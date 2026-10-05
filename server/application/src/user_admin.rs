@@ -11,7 +11,9 @@ use std::sync::Arc;
 use domain::{Role, User, UserId};
 
 use crate::auth::SessionService;
-use crate::ports::{AccessChange, AccessChangeError, RepositoryError, UserRepository};
+use crate::ports::{
+    AccessChange, AccessChangeError, RepositoryError, SsoGroupRuleRepository, UserRepository,
+};
 
 /// A failed user-administration operation.
 #[derive(Debug)]
@@ -22,6 +24,9 @@ pub enum UserAdminError {
     CannotModifySelf,
     /// The change would leave the system without an active admin.
     LastAdmin,
+    /// The target's role was recomputed from SSO groups (D15) and a group
+    /// rule still exists, so hand edits are locked out.
+    RoleManagedBySso,
     /// Something unexpected went wrong in storage.
     Repository(RepositoryError),
 }
@@ -36,6 +41,10 @@ impl std::fmt::Display for UserAdminError {
             UserAdminError::LastAdmin => {
                 write!(f, "there must always be at least one active administrator")
             }
+            UserAdminError::RoleManagedBySso => write!(
+                f,
+                "This user's role is set by your single sign-on groups; change it in your identity provider"
+            ),
             UserAdminError::Repository(err) => write!(f, "{err}"),
         }
     }
@@ -47,12 +56,21 @@ impl std::error::Error for UserAdminError {}
 /// the active state.
 pub struct UserAdminService {
     users: Arc<dyn UserRepository>,
+    sso_rules: Arc<dyn SsoGroupRuleRepository>,
     sessions: SessionService,
 }
 
 impl UserAdminService {
-    pub fn new(users: Arc<dyn UserRepository>, sessions: SessionService) -> Self {
-        Self { users, sessions }
+    pub fn new(
+        users: Arc<dyn UserRepository>,
+        sso_rules: Arc<dyn SsoGroupRuleRepository>,
+        sessions: SessionService,
+    ) -> Self {
+        Self {
+            users,
+            sso_rules,
+            sessions,
+        }
     }
 
     /// Every user, for the admin list view.
@@ -61,17 +79,43 @@ impl UserAdminService {
     }
 
     /// Change `target`'s role. Re-applying the current role is a successful
-    /// no-op; taking it from the last active admin is a [`UserAdminError::LastAdmin`].
+    /// no-op; taking it from the last active admin is a [`UserAdminError::LastAdmin`];
+    /// while any group rule exists, a role SSO recomputed (D15) is locked:
+    /// [`UserAdminError::RoleManagedBySso`].
     pub async fn change_role(
         &self,
         actor: &User,
         target_id: UserId,
         role: Role,
     ) -> Result<User, UserAdminError> {
+        // Check order is part of the API contract: NotFound, then the
+        // self-edit lock, then the SSO-managed lock, and only then the
+        // last-admin guard inside the repository's locked transaction. The
+        // SSO check reads two committed facts (the flag, the rule count), so
+        // a stale read can only delay the lock, never break it.
+        let target = self
+            .users
+            .find_by_id(target_id)
+            .await
+            .map_err(UserAdminError::Repository)?
+            .ok_or(UserAdminError::NotFound)?;
         if target_id == actor.id {
             return Err(UserAdminError::CannotModifySelf);
         }
+        if target.role_managed_by_sso && self.sso_rules_exist().await? {
+            return Err(UserAdminError::RoleManagedBySso);
+        }
         self.apply(target_id, AccessChange::Role(role)).await
+    }
+
+    /// Whether any SSO group-to-role rule exists (D15): the condition that
+    /// makes `role_managed_by_sso` roles locked against hand edits. Each HTTP
+    /// request asks once and applies the answer to every user it reports.
+    pub async fn sso_rules_exist(&self) -> Result<bool, UserAdminError> {
+        self.sso_rules
+            .any_exist()
+            .await
+            .map_err(UserAdminError::Repository)
     }
 
     /// Deactivate `target`: the role is kept, but the account can no longer
@@ -119,10 +163,12 @@ impl UserAdminService {
 mod tests {
     use super::*;
     use crate::auth::SessionService;
-    use crate::auth::fakes::{InMemorySessionRepository, InMemoryUserRepository};
+    use crate::auth::fakes::{
+        InMemorySessionRepository, InMemorySsoGroupRuleRepository, InMemoryUserRepository,
+    };
     use crate::ports::SessionTokens;
     use chrono::Utc;
-    use domain::{Role, UserId};
+    use domain::{Role, SsoGroupRule, SsoGroupRuleId, UserId};
 
     /// A deterministic token generator for the session service.
     #[derive(Default)]
@@ -146,9 +192,64 @@ mod tests {
             display_name: "Test".into(),
             role,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// A user whose role SSO recomputed (D15): the flag that locks it
+    /// against hand edits while any group rule exists.
+    fn managed_user(email: &str, role: Role) -> User {
+        let mut user = user(email, role);
+        user.role_managed_by_sso = true;
+        user
+    }
+
+    /// A group rule for the D15 lock tests, built like the API would.
+    fn rule() -> SsoGroupRule {
+        let now = Utc::now();
+        SsoGroupRule {
+            id: SsoGroupRuleId::new(),
+            group_name: "teachers".to_owned(),
+            role: Role::Admin,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// An admin actor and an SSO-managed staff target over in-memory fakes;
+    /// `with_rule` decides whether the group-rule store starts with a rule.
+    async fn sso_managed(
+        with_rule: bool,
+    ) -> (
+        UserAdminService,
+        User,
+        User,
+        Arc<InMemorySsoGroupRuleRepository>,
+        Arc<InMemoryUserRepository>,
+    ) {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let sessions = Arc::new(InMemorySessionRepository::new());
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        if with_rule {
+            rules.create(rule()).await.unwrap();
+        }
+        let service = UserAdminService::new(
+            users.clone(),
+            rules.clone(),
+            SessionService::new(
+                sessions,
+                Arc::new(Tokens),
+                SessionService::DEFAULT_SESSION_TTL,
+            ),
+        );
+        let admin = user("a@example.com", Role::Admin);
+        let managed = managed_user("managed@example.com", Role::Staff);
+        users.create(admin.clone()).await.unwrap();
+        users.create(managed.clone()).await.unwrap();
+        (service, admin, managed, rules, users)
     }
 
     /// A service over in-memory fakes with two admins and one staff member.
@@ -157,6 +258,7 @@ mod tests {
         let sessions = Arc::new(InMemorySessionRepository::new());
         let service = UserAdminService::new(
             users.clone(),
+            Arc::new(InMemorySsoGroupRuleRepository::new()),
             SessionService::new(
                 sessions,
                 Arc::new(Tokens),
@@ -258,6 +360,7 @@ mod tests {
         users.create(staff.clone()).await.unwrap();
         let service = UserAdminService::new(
             users,
+            Arc::new(InMemorySsoGroupRuleRepository::new()),
             SessionService::new(
                 sessions.clone(),
                 Arc::new(Tokens),
@@ -295,6 +398,108 @@ mod tests {
         assert!(matches!(
             service.reactivate(UserId::new()).await,
             Err(UserAdminError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_sso_managed_role_is_locked_while_any_rule_exists() {
+        let (service, admin, managed, _rules, _users) = sso_managed(true).await;
+        assert!(matches!(
+            service.change_role(&admin, managed.id, Role::Admin).await,
+            Err(UserAdminError::RoleManagedBySso)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_sso_managed_role_unlocks_when_the_rules_are_deleted() {
+        let (service, admin, managed, rules, _users) = sso_managed(true).await;
+        // Deleting the last rule frees the role for hand edits again.
+        let listed = rules.list().await.unwrap();
+        let [rule] = listed.as_slice() else {
+            panic!("expected exactly one rule");
+        };
+        rules.delete(rule.id).await.unwrap();
+        let changed = service
+            .change_role(&admin, managed.id, Role::Admin)
+            .await
+            .unwrap();
+        assert_eq!(changed.role, Role::Admin);
+    }
+
+    #[tokio::test]
+    async fn an_unmanaged_role_changes_fine_while_rules_exist() {
+        let (service, admin, _managed, _rules, users) = sso_managed(true).await;
+        // The lock follows the flag: a user SSO never recomputed is editable.
+        let plain = user("plain@example.com", Role::Staff);
+        users.create(plain.clone()).await.unwrap();
+        let changed = service
+            .change_role(&admin, plain.id, Role::Admin)
+            .await
+            .unwrap();
+        assert_eq!(changed.role, Role::Admin);
+    }
+
+    #[tokio::test]
+    async fn deactivating_an_sso_managed_user_is_unaffected_by_the_lock() {
+        let (service, admin, managed, _rules, _users) = sso_managed(true).await;
+        // The lock covers role changes only: deactivation and reactivation
+        // still go through while a rule exists.
+        let off = service.deactivate(&admin, managed.id).await.unwrap();
+        assert!(!off.is_active());
+        let back_on = service.reactivate(managed.id).await.unwrap();
+        assert!(back_on.is_active());
+    }
+
+    #[tokio::test]
+    async fn not_found_and_self_edit_precede_the_sso_lock() {
+        let (service, admin, _managed, _rules, users) = sso_managed(true).await;
+        // Unknown id: NotFound, even with a rule present.
+        assert!(matches!(
+            service
+                .change_role(&admin, UserId::new(), Role::Staff)
+                .await,
+            Err(UserAdminError::NotFound)
+        ));
+        // The self-edit lock beats the SSO lock: an admin who is themselves
+        // SSO-managed still gets CannotModifySelf.
+        let self_managed = managed_user("self@example.com", Role::Admin);
+        users.create(self_managed.clone()).await.unwrap();
+        assert!(matches!(
+            service
+                .change_role(&self_managed, self_managed.id, Role::Staff)
+                .await,
+            Err(UserAdminError::CannotModifySelf)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_sso_lock_precedes_the_last_admin_guard() {
+        // One active admin, SSO-managed, with a rule present: demoting them
+        // would both break the lock and strand the system without an admin —
+        // the lock reports first. (The actor's role is enforced by the HTTP
+        // layer, not here.)
+        let users = Arc::new(InMemoryUserRepository::new());
+        let sessions = Arc::new(InMemorySessionRepository::new());
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        rules.create(rule()).await.unwrap();
+        let service = UserAdminService::new(
+            users.clone(),
+            rules,
+            SessionService::new(
+                sessions,
+                Arc::new(Tokens),
+                SessionService::DEFAULT_SESSION_TTL,
+            ),
+        );
+        let last_admin = managed_user("last@example.com", Role::Admin);
+        let actor = user("actor@example.com", Role::Staff);
+        users.create(last_admin.clone()).await.unwrap();
+        users.create(actor.clone()).await.unwrap();
+        assert!(matches!(
+            service
+                .change_role(&actor, last_admin.id, Role::Staff)
+                .await,
+            Err(UserAdminError::RoleManagedBySso)
         ));
     }
 }

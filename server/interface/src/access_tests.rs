@@ -134,6 +134,7 @@ macro_rules! test_app {
                 ))))
                 .app_data(web::Data::new(UserAdminService::new(
                     users,
+                    Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone())),
                     session_service,
                 )))
                 .app_data(providers)
@@ -178,6 +179,8 @@ async fn create_user(pool: &PgPool, email: String, role: Role) -> User {
         display_name: "Access test user".into(),
         role,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -200,6 +203,8 @@ async fn create_password_user(pool: &PgPool, email: String) -> User {
         display_name: "Access test user".into(),
         role: Role::Admin,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };

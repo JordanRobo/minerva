@@ -1136,6 +1136,8 @@ mod tests {
             display_name: "Existing".into(),
             role: Role::Admin,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         };

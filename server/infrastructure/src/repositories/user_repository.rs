@@ -89,6 +89,8 @@ impl UserRepository for PostgresUserRepository {
                     users::updated_at.eq(&user.updated_at),
                     users::role.eq(role_to_db(user.role)),
                     users::deactivated_at.eq(&user.deactivated_at),
+                    users::role_managed_by_sso.eq(user.role_managed_by_sso),
+                    users::sso_role_exempt.eq(user.sso_role_exempt),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
@@ -184,6 +186,8 @@ impl UserRepository for PostgresUserRepository {
                     users::updated_at.eq(&user.updated_at),
                     users::role.eq(role_to_db(user.role)),
                     users::deactivated_at.eq(&user.deactivated_at),
+                    users::role_managed_by_sso.eq(user.role_managed_by_sso),
+                    users::sso_role_exempt.eq(user.sso_role_exempt),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;

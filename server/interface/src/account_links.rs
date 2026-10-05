@@ -176,7 +176,8 @@ mod tests {
     use infrastructure::repositories::{
         PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
         PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
-        PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserRepository,
+        PostgresSsoGroupRuleRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
+        PostgresUserRepository,
     };
     use infrastructure::{Argon2PasswordHasher, NoEmailSender, Sha256SessionTokens};
     use std::sync::Arc;
@@ -275,6 +276,7 @@ mod tests {
                     .app_data(web::Data::new(account_link_service))
                     .app_data(web::Data::new(UserAdminService::new(
                         users,
+                        Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone())),
                         session_service,
                     )))
                     .app_data(providers)
@@ -318,6 +320,8 @@ mod tests {
             display_name: "Account links API test user".into(),
             role,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         };
@@ -339,6 +343,8 @@ mod tests {
             display_name: "Account links API test user".into(),
             role,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         };
@@ -360,6 +366,8 @@ mod tests {
             display_name: "Account links API test user".into(),
             role: Role::Staff,
             deactivated_at: Some(now),
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         };

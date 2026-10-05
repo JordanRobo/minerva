@@ -188,6 +188,8 @@ impl UserRepository for InMemoryUserRepository {
                 }
                 User {
                     deactivated_at: Some(now),
+                    role_managed_by_sso: false,
+                    sso_role_exempt: false,
                     updated_at: now,
                     ..user.clone()
                 }
@@ -198,6 +200,8 @@ impl UserRepository for InMemoryUserRepository {
                 }
                 User {
                     deactivated_at: None,
+                    role_managed_by_sso: false,
+                    sso_role_exempt: false,
                     updated_at: now,
                     ..user.clone()
                 }

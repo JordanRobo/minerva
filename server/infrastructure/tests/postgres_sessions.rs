@@ -59,6 +59,8 @@ async fn create_user(pool: &PgPool) -> User {
         display_name: "Session test user".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };

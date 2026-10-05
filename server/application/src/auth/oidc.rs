@@ -433,6 +433,8 @@ mod tests {
             display_name: "Existing user".to_owned(),
             role: Role::Admin,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         }
@@ -771,6 +773,8 @@ mod tests {
             display_name: "Known user".to_owned(),
             role: Role::Admin,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
