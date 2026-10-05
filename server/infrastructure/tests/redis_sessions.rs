@@ -121,6 +121,51 @@ async fn expired_session_is_evicted_by_redis_ttl() {
 }
 
 #[tokio::test]
+async fn create_leaves_every_key_present_with_its_ttl() {
+    let Some(repo) = repo() else { return };
+    let user_id = UserId(Uuid::new_v4());
+    let session = test_session(user_id, 3600);
+    repo.create(session.clone()).await.expect("create");
+
+    // Inspect the raw keys: `create` is one MULTI/EXEC pipeline, so after it
+    // returns the session hash, its id mapping and the index entry all exist
+    // with their TTLs — as separate commands, a crash mid-create could leave
+    // the session without any of them.
+    let url = std::env::var("REDIS_URL").expect("repo() connected");
+    let mut conn = redis::Client::open(url)
+        .expect("client")
+        .get_connection()
+        .expect("connection");
+    let pttl_session: i64 = redis::cmd("PTTL")
+        .arg(format!("session:{}", session.token_hash))
+        .query(&mut conn)
+        .expect("pttl of the session key");
+    let pttl_id: i64 = redis::cmd("PTTL")
+        .arg(format!("session_id:{}", session.id.0))
+        .query(&mut conn)
+        .expect("pttl of the id-mapping key");
+    let in_index: bool = redis::cmd("SISMEMBER")
+        .arg(format!("user_sessions:{}", user_id.0))
+        .arg(&session.token_hash)
+        .query(&mut conn)
+        .expect("index membership");
+    assert!(
+        pttl_session > 0,
+        "the session key must carry a TTL, got {pttl_session}"
+    );
+    assert!(
+        pttl_id > 0,
+        "the id-mapping key must carry a TTL, got {pttl_id}"
+    );
+    assert!(in_index, "the token hash must be in the user's index set");
+
+    // The purge job is a no-op here: native TTLs evict expired keys.
+    assert_eq!(repo.purge_expired(now()).await.expect("purge"), 0);
+
+    repo.delete_all_for_user(user_id).await.expect("cleanup");
+}
+
+#[tokio::test]
 async fn touch_missing_session_is_not_found() {
     let Some(repo) = repo() else { return };
     let missing = SessionId(Uuid::new_v4());

@@ -232,3 +232,43 @@ async fn expired_session_is_still_returned() {
 
     delete_user(&pool, user.id);
 }
+
+#[tokio::test]
+async fn purge_expired_removes_only_past_expiry() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresSessionRepository::new(pool.clone());
+    let user = create_user(&pool).await;
+    let expired = test_session(user.id, -3600);
+    let live = test_session(user.id, 3600);
+    repo.create(expired.clone()).await.expect("create expired");
+    repo.create(live.clone()).await.expect("create live");
+
+    // The purge is table-wide and other tests running in parallel may hold
+    // their own expired rows at the same moment, so only a lower bound on the
+    // count — the per-session checks below carry the "only past expiry" rule.
+    let removed = repo.purge_expired(now()).await.expect("purge");
+    assert!(
+        removed >= 1,
+        "at least this user's expired session must be gone"
+    );
+    assert!(
+        repo.find_by_token_hash(expired.token_hash.clone())
+            .await
+            .expect("find expired")
+            .is_none(),
+        "the expired session must be gone"
+    );
+    assert!(
+        repo.find_by_token_hash(live.token_hash.clone())
+            .await
+            .expect("find live")
+            .is_some(),
+        "the live session must survive"
+    );
+
+    // A second purge still succeeds once there is nothing left of its own.
+    repo.purge_expired(now()).await.expect("purge again");
+
+    repo.delete_all_for_user(user.id).await.expect("cleanup");
+    delete_user(&pool, user.id);
+}

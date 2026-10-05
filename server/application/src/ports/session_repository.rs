@@ -36,4 +36,10 @@ pub trait SessionRepository: Send + Sync {
         last_seen_at: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError>;
+
+    /// Delete every session past its expiry, returning how many were removed.
+    /// The Redis store is a no-op here (native TTLs evict expired keys); it
+    /// exists for the Postgres store, where the hourly maintenance job that
+    /// calls this is the only thing that removes expired rows (roadmap 2.8).
+    async fn purge_expired(&self, now: DateTime<Utc>) -> Result<u64, RepositoryError>;
 }

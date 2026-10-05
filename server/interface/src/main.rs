@@ -6,6 +6,7 @@ mod debug;
 mod error;
 mod goals;
 mod invites;
+mod maintenance;
 mod milestones;
 mod openapi;
 mod redirect;
@@ -140,7 +141,17 @@ async fn main() -> std::io::Result<()> {
     let sessions: Arc<dyn SessionRepository> = match config.redis.url.expose().trim() {
         "" => {
             println!("redis not configured; using Postgres for session storage");
-            Arc::new(PostgresSessionRepository::new(pool))
+            let sessions = Arc::new(PostgresSessionRepository::new(pool.clone()));
+            // With Postgres as the session store, expired rows are only
+            // removed by this hourly maintenance job (with Redis, native
+            // TTLs evict keys instead). Every node runs it; its advisory
+            // lock means exactly one of them does the work per tick
+            // (roadmap 2.8).
+            maintenance::start(
+                pool,
+                vec![maintenance::purge_expired_sessions(sessions.clone())],
+            );
+            sessions
         }
         redis_url => {
             println!("using Redis for session storage");

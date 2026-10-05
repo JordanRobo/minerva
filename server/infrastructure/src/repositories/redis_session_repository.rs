@@ -4,6 +4,10 @@
 //! TTL matching `expires_at`, so expired sessions are evicted by Redis
 //! itself — no cleanup job needed. A per-user set indexes that user's
 //! session tokens for `list_for_user` and `delete_all_for_user`.
+//!
+//! Every operation that writes more than one key issues its writes as a
+//! single MULTI/EXEC pipeline, so a crash between commands cannot leave a
+//! session without its id mapping or index entry.
 
 use application::ports::{RepositoryError, SessionRepository};
 use chrono::{DateTime, Utc};
@@ -118,28 +122,37 @@ impl SessionRepository for RedisSessionRepository {
             // a TTL instead of living forever.
             let ttl = (session.expires_at - Utc::now()).num_seconds().max(1);
             let key = session_key(&session.token_hash);
-            for (name, value) in [
-                ("id", session.id.0.to_string()),
-                ("user_id", session.user_id.0.to_string()),
-                ("token_hash", session.token_hash.clone()),
-                ("created_at", ts_to_str(session.created_at)),
-                ("expires_at", ts_to_str(session.expires_at)),
-                ("last_seen_at", ts_to_str(session.last_seen_at)),
-            ] {
-                let _: usize = conn.hset(&key, name, value).map_err(map_redis_error)?;
-            }
-            let _: bool = conn.expire(&key, ttl).map_err(map_redis_error)?;
             let id_key = session_id_key(&session.id);
-            let _: () = conn
-                .set(&id_key, &session.token_hash)
-                .map_err(map_redis_error)?;
-            let _: bool = conn.expire(&id_key, ttl).map_err(map_redis_error)?;
+            // One MULTI/EXEC pipeline: as separate commands, a crash between
+            // the writes could leave the session hash without its id mapping
+            // or index entry (or with TTLs on only some of them), and no
+            // later operation would ever find it again.
+            let mut pipe = redis::Pipeline::with_capacity(5);
+            pipe.atomic();
+            pipe.cmd("HSET")
+                .arg(&key)
+                .arg("id")
+                .arg(session.id.0.to_string())
+                .arg("user_id")
+                .arg(session.user_id.0.to_string())
+                .arg("token_hash")
+                .arg(&session.token_hash)
+                .arg("created_at")
+                .arg(ts_to_str(session.created_at))
+                .arg("expires_at")
+                .arg(ts_to_str(session.expires_at))
+                .arg("last_seen_at")
+                .arg(ts_to_str(session.last_seen_at));
+            pipe.cmd("EXPIRE").arg(&key).arg(ttl);
+            pipe.cmd("SET").arg(&id_key).arg(&session.token_hash);
+            pipe.cmd("EXPIRE").arg(&id_key).arg(ttl);
             // The index set has no TTL: stale members are harmless (their
             // session keys are already evicted) and get removed the next
             // time delete_all_for_user runs for this user.
-            let _: usize = conn
-                .sadd(user_sessions_key(&session.user_id), &session.token_hash)
-                .map_err(map_redis_error)?;
+            pipe.cmd("SADD")
+                .arg(user_sessions_key(&session.user_id))
+                .arg(&session.token_hash);
+            pipe.exec(&mut conn).map_err(map_redis_error)?;
             Ok(session)
         })
         .await
@@ -201,12 +214,18 @@ impl SessionRepository for RedisSessionRepository {
             let key = session_key(&token_hash);
             // The user id is needed to remove the session from the index set.
             let user_id: Option<String> = conn.hget(&key, "user_id").map_err(map_redis_error)?;
-            let _: usize = conn.del(&key).map_err(map_redis_error)?;
-            let _: usize = conn.del(&id_key).map_err(map_redis_error)?;
+            // One pipeline for the removals: a crash between separate DELs
+            // could leave the id mapping or an index member pointing at a
+            // deleted session.
+            let mut pipe = redis::Pipeline::with_capacity(3);
+            pipe.atomic();
+            pipe.cmd("DEL").arg(&key).arg(&id_key);
             if let Some(user_id) = user_id {
-                let set_key = format!("user_sessions:{user_id}");
-                let _: usize = conn.srem(&set_key, &token_hash).map_err(map_redis_error)?;
+                pipe.cmd("SREM")
+                    .arg(format!("user_sessions:{user_id}"))
+                    .arg(&token_hash);
             }
+            pipe.exec(&mut conn).map_err(map_redis_error)?;
             Ok(())
         })
         .await
@@ -219,15 +238,18 @@ impl SessionRepository for RedisSessionRepository {
             let token_hashes: Vec<String> = conn
                 .smembers(user_sessions_key(&user_id))
                 .map_err(map_redis_error)?;
+            // All removals in one pipeline: a crash mid-loop could otherwise
+            // leave some of the user's sessions alive after a revoke-all.
+            let mut pipe = redis::Pipeline::with_capacity(token_hashes.len() + 1);
+            pipe.atomic();
             for token_hash in &token_hashes {
                 // The `session_id:*` mapping keys carry the same TTL as their
                 // session keys and evict with them, so only the session keys
                 // and the index need explicit removal.
-                let _: usize = conn.del(session_key(token_hash)).map_err(map_redis_error)?;
+                pipe.cmd("DEL").arg(session_key(token_hash));
             }
-            let _: usize = conn
-                .del(user_sessions_key(&user_id))
-                .map_err(map_redis_error)?;
+            pipe.cmd("DEL").arg(user_sessions_key(&user_id));
+            pipe.exec(&mut conn).map_err(map_redis_error)?;
             Ok(())
         })
         .await
@@ -255,25 +277,35 @@ impl SessionRepository for RedisSessionRepository {
             if !exists {
                 return Err(RepositoryError::NotFound);
             }
-            // Both stored timestamps move... (one HSET per field, like `create`).
-            let _: usize = conn
-                .hset(&key, "last_seen_at", ts_to_str(last_seen_at))
-                .map_err(map_redis_error)?;
-            let _: usize = conn
-                .hset(&key, "expires_at", ts_to_str(expires_at))
-                .map_err(map_redis_error)?;
-            // ...and so do the native TTLs: Redis evicts on the key's TTL,
-            // which must follow expires_at or the session dies at its old
-            // expiry. The id-mapping key carries the same TTL as its session.
+            // Redis evicts on the key's TTL, which must follow expires_at or
+            // the session dies at its old expiry. The id-mapping key carries
+            // the same TTL as its session. One pipeline for all four writes:
+            // a crash between separate commands could move the stored
+            // timestamps without moving the TTLs (or vice versa). ponytail:
+            // the EXISTS check above and this EXEC are not themselves atomic
+            // — a revocation landing in that gap would be resurrected; switch
+            // to a Lua script if it matters.
             let ttl = (expires_at - Utc::now()).num_seconds().max(1);
-            let _: bool = conn.expire(&key, ttl).map_err(map_redis_error)?;
-            let _: bool = conn
-                .expire(session_id_key(&id), ttl)
-                .map_err(map_redis_error)?;
+            let mut pipe = redis::Pipeline::with_capacity(3);
+            pipe.atomic();
+            pipe.cmd("HSET")
+                .arg(&key)
+                .arg("last_seen_at")
+                .arg(ts_to_str(last_seen_at))
+                .arg("expires_at")
+                .arg(ts_to_str(expires_at));
+            pipe.cmd("EXPIRE").arg(&key).arg(ttl);
+            pipe.cmd("EXPIRE").arg(session_id_key(&id)).arg(ttl);
+            pipe.exec(&mut conn).map_err(map_redis_error)?;
             // The per-user index set has no TTL (see `create`), so there is
             // nothing to refresh there.
             Ok(())
         })
         .await
+    }
+
+    async fn purge_expired(&self, _now: DateTime<Utc>) -> Result<u64, RepositoryError> {
+        // Native TTLs evict expired keys; there is nothing to delete.
+        Ok(0)
     }
 }

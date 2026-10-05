@@ -87,6 +87,26 @@ sliding expiry the server-side `expires_at` is the authority on validity,
 and a cookie that outlives its session is harmless — the token simply stops
 resolving.
 
+Every Redis operation that writes more than one key issues its writes as a
+single MULTI/EXEC pipeline: `create` writes the session hash, its id mapping
+and the per-user index entry (with both TTLs) in one shot, and `delete`,
+`delete_all_for_user` and the write phase of `touch_last_seen` do the same
+for their removals and TTL refreshes — a crash mid-write cannot leave a
+session without its id mapping or index entry. In Redis, expiry itself needs
+no maintenance: the keys' native TTLs evict expired sessions, so
+`purge_expired` there is a no-op.
+
+When Postgres holds the sessions, expired rows are removed by an hourly
+maintenance job in `interface` (`src/maintenance.rs`), started only on that
+branch of startup. Each tick first takes a session-level Postgres advisory
+lock with a try-lock — when another node holds it the tick skips silently, so
+however many API nodes run, exactly one purges per tick; the first tick lands
+about 30 seconds after startup. While holding the lock it calls
+`SessionRepository::purge_expired` and logs the removed count only when it is
+non-zero; a failing tick warns and retries on the next hour. Jobs are
+registered as small `MaintenanceJob`s (name + advisory lock key + async fn)
+so later jobs — the rate-limit counter cleanup in 2.8 — need no new plumbing.
+
 The redirect flow (`interface/src/redirect.rs`) is generic over providers:
 
 - `GET /api/auth/{provider}/login?next=` asks the provider for its

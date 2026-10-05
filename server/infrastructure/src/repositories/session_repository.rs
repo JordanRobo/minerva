@@ -128,4 +128,15 @@ impl SessionRepository for PostgresSessionRepository {
         })
         .await
     }
+
+    async fn purge_expired(&self, now: DateTime<Utc>) -> Result<u64, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            diesel::delete(sessions::table.filter(sessions::expires_at.le(now)))
+                .execute(conn)
+                .map(|removed| removed as u64)
+                .map_err(map_diesel_error)
+        })
+        .await
+    }
 }

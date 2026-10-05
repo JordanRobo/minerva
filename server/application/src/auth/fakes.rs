@@ -90,6 +90,19 @@ impl SessionRepository for InMemorySessionRepository {
             _ => Err(RepositoryError::NotFound),
         }
     }
+
+    async fn purge_expired(&self, now: DateTime<Utc>) -> Result<u64, RepositoryError> {
+        let mut removed = 0u64;
+        self.locked().retain(|_, session| {
+            if session.is_expired(now) {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        Ok(removed)
+    }
 }
 
 /// An [`InMemorySessionRepository`] whose `touch_last_seen` always fails, so
@@ -136,6 +149,10 @@ impl SessionRepository for FailingTouchSessionRepository {
         Err(RepositoryError::Unexpected(
             "faking a touch failure".to_owned(),
         ))
+    }
+
+    async fn purge_expired(&self, now: DateTime<Utc>) -> Result<u64, RepositoryError> {
+        self.0.purge_expired(now).await
     }
 }
 
