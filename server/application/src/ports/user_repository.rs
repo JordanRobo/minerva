@@ -10,6 +10,9 @@ use crate::ports::RepositoryError;
 pub enum AccessChange {
     /// Set the user's role to `role`.
     Role(Role),
+    /// Set the user's role to `role` and mark it SSO-managed
+    /// (`role_managed_by_sso = true`) in one locked write (roadmap 2.7, D15).
+    RoleManagedBySso(Role),
     /// Deactivate the account (the caller revokes its sessions).
     Deactivate,
     /// Reactivate a deactivated account.
@@ -62,8 +65,9 @@ pub trait UserRepository: Send + Sync {
     /// by a check-then-write in the caller: the implementation re-reads the
     /// target and counts the other active admins under a lock inside one
     /// transaction, so concurrent changes serialize instead of racing.
-    /// Re-applying the current state (the same role, an already deactivated
-    /// or already active account) is a successful no-op.
+    /// Re-applying the current state (the same role — for
+    /// [`AccessChange::RoleManagedBySso`], with the flag already set — an
+    /// already deactivated or already active account) is a successful no-op.
     async fn apply_access_change(
         &self,
         target: UserId,

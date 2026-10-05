@@ -204,6 +204,47 @@ created by SSO (while `oidc.auto_create_users` is set) and, later, by
 invites (roadmap 2.6); afterwards, admins manage roles and active state
 through this API.
 
+### SSO group mapping
+
+While at least one group-to-role rule exists, the role of every user signing
+in via SSO is recomputed from the IdP's groups claim (roadmap 2.7, D15);
+while none exists, roles and flags are never touched. The rules live in
+`sso_group_role_rules` — one per group name, admin-managed through the
+admin-only `/api/sso/group-rules` API — and the mapping itself is pure domain
+logic: `domain::resolve_role` matches exact, case-sensitive trimmed group
+names, keeps the **least permissive** of several matched roles, and falls
+back to Read-only (`SSO_FALLBACK_ROLE`) when nothing matches — including a
+missing or malformed groups claim.
+
+The application service is `application::sso_roles::SsoRoleService`, called
+by the OIDC provider after the user is resolved or created and after the
+deactivated-account rejection:
+
+- A new SSO account is created with the computed role and
+  `role_managed_by_sso = true`; a pending invite for its email is still
+  consumed, but its role is ignored while rules exist (honoured when they do
+  not).
+- An existing user's role moves to the computed one at every login — the IdP
+  is the source of truth. Linking an existing account to an SSO identity
+  follows the same rule.
+- The first-admin bootstrap account is exempt via `sso_role_exempt` and is
+  never recomputed.
+- As a backstop for everyone, recomputation never demotes the last active
+  administrator: the change is skipped (role and flag both untouched) and a
+  warning names the account's email and the computed role.
+
+The write goes through `UserRepository::apply_access_change` with
+`AccessChange::RoleManagedBySso`, so the role and the flag change in the same
+advisory-locked transaction as every other access change, under the same
+last-admin guard. Roles are re-resolved per request (above), so a changed
+role takes effect on the user's next request without any session revocation.
+
+While any rule exists, a role SSO recomputed (`role_managed_by_sso = true`)
+is locked against hand edits: `UserAdminService::change_role` answers 409
+(`role_managed_by_sso`) and every user response reports the flag's effective
+value (the flag AND any rule exists). Deleting the last rule frees such roles
+for hand edits again; the stored flag then simply stops being enforced.
+
 ## API documentation
 
 The `interface` crate generates an OpenAPI 3 document from code annotations

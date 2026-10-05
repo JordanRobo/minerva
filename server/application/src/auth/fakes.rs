@@ -179,6 +179,26 @@ impl UserRepository for InMemoryUserRepository {
                     ..user.clone()
                 }
             }
+            AccessChange::RoleManagedBySso(role) => {
+                // The flag is part of the state: same role but an unflagged
+                // row still needs the write.
+                if user.role == role && user.role_managed_by_sso {
+                    return Ok(user.clone());
+                }
+                if user.role == Role::Admin
+                    && user.is_active()
+                    && role != Role::Admin
+                    && other_active_admins == 0
+                {
+                    return Err(AccessChangeError::LastAdmin);
+                }
+                User {
+                    role,
+                    role_managed_by_sso: true,
+                    updated_at: now,
+                    ..user.clone()
+                }
+            }
             AccessChange::Deactivate => {
                 if !user.is_active() {
                     return Ok(user.clone());
@@ -186,10 +206,10 @@ impl UserRepository for InMemoryUserRepository {
                 if user.role == Role::Admin && other_active_admins == 0 {
                     return Err(AccessChangeError::LastAdmin);
                 }
+                // The SSO flags are untouched, like in Postgres: deactivation
+                // neither grants nor removes the exemption.
                 User {
                     deactivated_at: Some(now),
-                    role_managed_by_sso: false,
-                    sso_role_exempt: false,
                     updated_at: now,
                     ..user.clone()
                 }
@@ -200,8 +220,6 @@ impl UserRepository for InMemoryUserRepository {
                 }
                 User {
                     deactivated_at: None,
-                    role_managed_by_sso: false,
-                    sso_role_exempt: false,
                     updated_at: now,
                     ..user.clone()
                 }

@@ -344,9 +344,13 @@ mod tests {
     use application::oidc_login::LoginPolicy;
     use application::ports::{
         AccountTokenRepository, OidcAuthRequest, OidcClaims, OidcError, OidcProvider,
-        PendingOidcLogin, SessionRepository, SessionTokens, UserIdentityRepository, UserRepository,
+        PendingOidcLogin, RepositoryError, SessionRepository, SessionTokens,
+        SsoGroupRuleRepository, UserIdentityRepository, UserRepository,
     };
-    use domain::{AccountToken, AccountTokenId, AccountTokenKind, Role, User};
+    use application::sso_roles::SsoRoleService;
+    use domain::{
+        AccountToken, AccountTokenId, AccountTokenKind, Role, SsoGroupRule, SsoGroupRuleId, User,
+    };
     use infrastructure::db::PgPool;
     use infrastructure::repositories::{
         PostgresAccountTokenRepository, PostgresSessionRepository, PostgresUserIdentityRepository,
@@ -571,6 +575,42 @@ mod tests {
         })
     }
 
+    /// An empty group-rules table for the handler tests. They verify HTTP
+    /// wiring, not the D15 mapping (the application-layer tests cover it),
+    /// and an in-memory table keeps them independent of the rows the
+    /// sso_rules tests create in the shared database while they run.
+    struct NoGroupRules;
+
+    #[async_trait::async_trait]
+    impl SsoGroupRuleRepository for NoGroupRules {
+        async fn list(&self) -> Result<Vec<SsoGroupRule>, RepositoryError> {
+            Ok(Vec::new())
+        }
+
+        async fn find_by_id(
+            &self,
+            _id: SsoGroupRuleId,
+        ) -> Result<Option<SsoGroupRule>, RepositoryError> {
+            Ok(None)
+        }
+
+        async fn create(&self, _rule: SsoGroupRule) -> Result<SsoGroupRule, RepositoryError> {
+            unimplemented!("the redirect tests never manage rules")
+        }
+
+        async fn update(&self, _rule: SsoGroupRule) -> Result<SsoGroupRule, RepositoryError> {
+            unimplemented!("the redirect tests never manage rules")
+        }
+
+        async fn delete(&self, _id: SsoGroupRuleId) -> Result<(), RepositoryError> {
+            unimplemented!("the redirect tests never manage rules")
+        }
+
+        async fn any_exist(&self) -> Result<bool, RepositoryError> {
+            Ok(false)
+        }
+    }
+
     /// A Postgres-backed OIDC redirect provider over the given claims.
     fn oidc_redirect(
         url: &str,
@@ -587,9 +627,10 @@ mod tests {
             Arc::new(PostgresAccountTokenRepository::new(pool));
         Arc::new(OidcAuthProvider::new(
             Arc::new(FakeProvider { claims }),
-            users,
+            users.clone(),
             identities,
             invites,
+            SsoRoleService::new(Arc::new(NoGroupRules), users),
             LoginPolicy { auto_create_users },
         ))
     }

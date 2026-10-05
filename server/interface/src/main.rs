@@ -33,6 +33,7 @@ use application::ports::{
     AccountEmailSender, AccountTokenRepository, OidcProvider, PasswordHasher, SessionRepository,
     SessionTokens, UserIdentityRepository, UserRepository,
 };
+use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
 use application::user_admin::UserAdminService;
 use chrono::Utc;
@@ -126,6 +127,11 @@ async fn main() -> std::io::Result<()> {
         Arc::new(PostgresUserIdentityRepository::new(pool.clone()));
     let user_identities_data: web::Data<dyn UserIdentityRepository> =
         user_identities.clone().into();
+    // SSO group-to-role mapping (roadmap 2.7, D15): while any rule exists,
+    // the OIDC provider below recomputes roles from the IdP groups at every
+    // login. It shares the rules repository with the user-admin service's
+    // hand-edit lock, so both read the same committed rules.
+    let sso_roles = SsoRoleService::new(sso_group_rules_repo.clone(), users.clone());
     // Sessions are the swappable storage: Redis when redis.url is configured,
     // Postgres otherwise. A missing URL is not an error — it just means "use
     // Postgres for sessions" (see docs/architecture.md). A present but
@@ -242,6 +248,7 @@ async fn main() -> std::io::Result<()> {
             users.clone(),
             user_identities.clone(),
             account_tokens,
+            sso_roles,
             LoginPolicy {
                 auto_create_users: config.oidc.auto_create_users,
             },

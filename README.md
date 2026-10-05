@@ -240,6 +240,23 @@ your provider's documentation, as Minerva has not verified this against a
 live IdP yet. While the claim is missing or malformed the server logs a
 warning per login and proceeds with no groups.
 
+### SSO group-to-role mapping
+
+With OIDC enabled, administrators map IdP groups to Minerva roles through
+the API: `POST /api/sso/group-rules` with `{"group_name": "teachers",
+"role": "staff"}` (the same base lists rules and updates or deletes one by
+id; all of it is admin-only). While at least one rule exists, every SSO
+sign-in re-resolves the user's role from their groups: exact group-name
+match, the least permissive matched role wins, and no match — or a missing
+groups claim — gives Read-only. New SSO accounts are created with that role;
+a pending invite for the same email is still consumed, but its role is
+ignored while rules exist (it is honoured when none do). The bootstrap admin
+is exempt from recomputation, and recomputation never demotes the last
+active administrator — it logs a warning instead. Roles set this way are
+marked "managed by SSO" and cannot be changed through `/api/users` while any
+rule exists; delete every rule to hand-edit them again. Without any rule,
+SSO sign-ins never touch roles.
+
 ## License
 
 TBD — Minerva will be released under the Elastic License 2.0 (see

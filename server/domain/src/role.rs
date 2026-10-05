@@ -22,6 +22,18 @@ pub enum Role {
     ReadOnly,
 }
 
+impl std::fmt::Display for Role {
+    /// The role's canonical string, the same one JSON and the database use.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Role::Admin => "admin",
+            Role::Staff => "staff",
+            Role::ReadOnly => "read_only",
+        };
+        f.write_str(name)
+    }
+}
+
 /// An action a user may be allowed to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
@@ -124,5 +136,12 @@ mod tests {
     #[test]
     fn sso_fallback_is_read_only() {
         assert_eq!(SSO_FALLBACK_ROLE, Role::ReadOnly);
+    }
+
+    #[test]
+    fn display_matches_the_json_and_database_strings() {
+        assert_eq!(Role::Admin.to_string(), "admin");
+        assert_eq!(Role::Staff.to_string(), "staff");
+        assert_eq!(Role::ReadOnly.to_string(), "read_only");
     }
 }
