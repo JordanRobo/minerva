@@ -20,17 +20,19 @@ use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::AuthProviders;
 use application::ports::{
     GoalRepository, MilestoneRepository, PasswordHasher, SessionRepository, SessionTokens,
-    TaskRepository, UserRepository,
+    SsoGroupRuleRepository, TaskRepository, UserRepository,
 };
+use application::sso_rules::SsoGroupRuleService;
 use application::user_admin::UserAdminService;
 use chrono::Utc;
 use diesel::prelude::*;
-use domain::{GoalId, MilestoneId, Permission, Role, TaskId, User, UserId};
+use domain::{GoalId, MilestoneId, Permission, Role, SsoGroupRuleId, TaskId, User, UserId};
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{
     PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
     PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
-    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserRepository,
+    PostgresSsoGroupRuleRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
+    PostgresUserRepository,
 };
 use infrastructure::{Argon2PasswordHasher, NoEmailSender, Sha256SessionTokens};
 use std::sync::Arc;
@@ -127,8 +129,12 @@ macro_rules! test_app {
                 .app_data(users_data)
                 .app_data(web::Data::new(session_service.clone()))
                 .app_data(web::Data::new(account_link_service))
+                .app_data(web::Data::new(SsoGroupRuleService::new(Arc::new(
+                    PostgresSsoGroupRuleRepository::new(pool.clone()),
+                ))))
                 .app_data(web::Data::new(UserAdminService::new(
                     users,
+                    Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone())),
                     session_service,
                 )))
                 .app_data(providers)
@@ -173,6 +179,8 @@ async fn create_user(pool: &PgPool, email: String, role: Role) -> User {
         display_name: "Access test user".into(),
         role,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -195,6 +203,8 @@ async fn create_password_user(pool: &PgPool, email: String) -> User {
         display_name: "Access test user".into(),
         role: Role::Admin,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -406,6 +416,31 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Permission::ManageUsers,
             None,
         ),
+        // The admin-only SSO group-rule routes.
+        (
+            Method::GET,
+            "/api/sso/group-rules".into(),
+            Permission::ManageUsers,
+            None,
+        ),
+        (
+            Method::POST,
+            "/api/sso/group-rules".into(),
+            Permission::ManageUsers,
+            Some(serde_json::json!({ "group_name": "sso-access-test", "role": "staff" })),
+        ),
+        (
+            Method::PUT,
+            format!("/api/sso/group-rules/{debug_id}"),
+            Permission::ManageUsers,
+            Some(serde_json::json!({ "group_name": "sso-access-test", "role": "staff" })),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/sso/group-rules/{debug_id}"),
+            Permission::ManageUsers,
+            None,
+        ),
         // The temporary debug routes are locked down to Admin.
         (
             Method::GET,
@@ -458,6 +493,7 @@ async fn each_role_gets_exactly_what_its_permissions_allow() {
     let mut created_milestones = Vec::new();
     let mut created_tasks = Vec::new();
     let mut created_invites = Vec::new();
+    let mut created_group_rules = Vec::new();
 
     for role in [Role::Admin, Role::Staff, Role::ReadOnly] {
         let user = create_user(&pool, unique_email("access"), role).await;
@@ -476,10 +512,13 @@ async fn each_role_gets_exactly_what_its_permissions_allow() {
                         serde_json::from_slice(&read_body(res).await).unwrap();
                     // Invites nest their id under `invite`; the other
                     // creations carry a top-level one.
+                    // Invites nest their id under `invite`; the other
+                    // creations carry a top-level one.
                     match uri.as_str() {
                         "/api/goals" => created_goals.push(parse_id(&json["id"])),
                         "/api/milestones" => created_milestones.push(parse_id(&json["id"])),
                         "/api/invites" => created_invites.push(parse_id(&json["invite"]["id"])),
+                        "/api/sso/group-rules" => created_group_rules.push(parse_id(&json["id"])),
                         _ => created_tasks.push(parse_id(&json["id"])),
                     }
                 } else {
@@ -520,6 +559,13 @@ async fn each_role_gets_exactly_what_its_permissions_allow() {
     }
     for id in created_invites {
         delete_token(&pool, id);
+    }
+    let group_rules = PostgresSsoGroupRuleRepository::new(pool.clone());
+    for id in created_group_rules {
+        group_rules
+            .delete(SsoGroupRuleId(id))
+            .await
+            .expect("cleanup group rule");
     }
 }
 

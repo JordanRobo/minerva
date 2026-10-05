@@ -4,9 +4,9 @@
 //! each test cleans up after itself, so it is safe to run repeatedly.
 
 use application::ports::{
-    GoalMilestoneRepository, GoalRepository, MilestoneRepository, ProgressSnapshotRepository,
-    RepositoryError, TaskRelationRepository, TaskRepository, UserIdentityRepository,
-    UserRepository,
+    AccessChange, GoalMilestoneRepository, GoalRepository, MilestoneRepository,
+    ProgressSnapshotRepository, RepositoryError, TaskRelationRepository, TaskRepository,
+    UserIdentityRepository, UserRepository,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use diesel::prelude::*;
@@ -384,6 +384,8 @@ async fn user_identity_repository_round_trip() {
         display_name: "Identity test user".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -445,6 +447,8 @@ async fn user_repository_round_trip() {
         display_name: "Round trip user".into(),
         role: Role::Staff,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -475,6 +479,8 @@ async fn user_repository_round_trip() {
         display_name: "Duplicate".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -504,6 +510,8 @@ async fn user_repository_round_trip() {
         display_name: "Passwordless".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -532,6 +540,8 @@ async fn user_repository_round_trip() {
         display_name: "Mixed case".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -573,6 +583,8 @@ async fn create_if_no_users_refuses_when_any_user_exists() {
         display_name: "Bootstrap blocker".into(),
         role: Role::ReadOnly,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -585,6 +597,8 @@ async fn create_if_no_users_refuses_when_any_user_exists() {
         display_name: "Second admin".into(),
         role: Role::Admin,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     };
@@ -600,4 +614,62 @@ async fn create_if_no_users_refuses_when_any_user_exists() {
     diesel::delete(infrastructure::schema::users::table.find(first.id.0))
         .execute(&mut conn)
         .unwrap();
+}
+
+#[tokio::test]
+async fn role_managed_by_sso_change_writes_role_and_flag_under_the_lock() {
+    let Some(pool) = pool() else { return };
+    let users = PostgresUserRepository::new(pool.clone());
+    let now = now();
+    let make_user = |name: &str| User {
+        id: UserId::new(),
+        email: format!("{name}-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: name.into(),
+        role: Role::Admin,
+        deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Two active admins so the last-admin guard stays out of the way.
+    let a = users.create(make_user("first")).await.expect("create A");
+    let b = users.create(make_user("second")).await.expect("create B");
+
+    // The role and the flag land in one write...
+    let changed = users
+        .apply_access_change(a.id, AccessChange::RoleManagedBySso(Role::Staff))
+        .await
+        .expect("demote A while B is still an admin");
+    assert_eq!(changed.role, Role::Staff);
+    assert!(changed.role_managed_by_sso);
+
+    // ...and re-applying the same role with the flag set is a no-op.
+    let again = users
+        .apply_access_change(a.id, AccessChange::RoleManagedBySso(Role::Staff))
+        .await
+        .expect("re-apply");
+    assert_eq!(again.role, Role::Staff);
+    assert!(again.role_managed_by_sso);
+
+    // The same role without the flag still writes: the flag is part of the
+    // state being applied. (The last-admin guard this variant also enforces
+    // counts every active admin in the shared test database, so it cannot be
+    // asserted here; the fake-based service tests cover it.)
+    let flagged = users
+        .apply_access_change(b.id, AccessChange::RoleManagedBySso(Role::Admin))
+        .await
+        .expect("flag B without a role change");
+    assert_eq!(flagged.role, Role::Admin);
+    assert!(flagged.role_managed_by_sso);
+
+    // UserRepository has no delete yet; drop the rows directly.
+    let mut conn = pool.get().unwrap();
+    for id in [a.id, b.id] {
+        diesel::delete(infrastructure::schema::users::table.find(id.0))
+            .execute(&mut conn)
+            .unwrap();
+    }
 }

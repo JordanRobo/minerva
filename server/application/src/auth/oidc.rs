@@ -4,7 +4,9 @@
 //!
 //! The one-time state/nonce/PKCE verification stays in the infrastructure's
 //! `OidcProvider` implementation; this provider decides *who* is logging in
-//! (the same rules as before the abstraction, see [`decide_login`]).
+//! (the same rules as before the abstraction, see [`decide_login`]) and then
+//! applies the D15 group-to-role mapping ([`SsoRoleService`]) to the resolved
+//! or created user.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -23,6 +25,7 @@ use crate::ports::{
     AccountTokenRepository, OidcClaims, OidcError, OidcProvider, PendingOidcLogin, RepositoryError,
     UserIdentityRepository, UserRepository,
 };
+use crate::sso_roles::SsoRoleService;
 
 /// Keys under which the one-time OIDC values ride in [`PendingLogin`].
 const CSRF_STATE_KEY: &str = "csrf_state";
@@ -34,6 +37,7 @@ pub struct OidcAuthProvider {
     users: Arc<dyn UserRepository>,
     identities: Arc<dyn UserIdentityRepository>,
     invites: Arc<dyn AccountTokenRepository>,
+    sso_roles: SsoRoleService,
     policy: LoginPolicy,
 }
 
@@ -43,6 +47,7 @@ impl OidcAuthProvider {
         users: Arc<dyn UserRepository>,
         identities: Arc<dyn UserIdentityRepository>,
         invites: Arc<dyn AccountTokenRepository>,
+        sso_roles: SsoRoleService,
         policy: LoginPolicy,
     ) -> Self {
         Self {
@@ -50,6 +55,7 @@ impl OidcAuthProvider {
             users,
             identities,
             invites,
+            sso_roles,
             policy,
         }
     }
@@ -235,6 +241,9 @@ impl RedirectProvider for OidcAuthProvider {
                 {
                     user.role = *role;
                 }
+                // D15: while group rules exist, the computed role overrides
+                // the invite's (the invite is still consumed below).
+                user = self.sso_roles.for_new_user(user, &claims.groups).await?;
                 let user = self.users.create(user).await?;
                 // ponytail: creating the user and its identity is two repository
                 // calls with no cross-repo transaction; if the second fails, a
@@ -268,6 +277,11 @@ impl RedirectProvider for OidcAuthProvider {
                 code: "deactivated",
             });
         }
+        // D15: while group rules exist, the role is re-resolved from the
+        // IdP's groups (exempt users and rule-less deployments come back
+        // unchanged). Roles are re-read per request, so no session handling
+        // is needed here.
+        let user = self.sso_roles.recompute(user, &claims.groups).await?;
         Ok(user)
     }
 }
@@ -290,14 +304,18 @@ fn map_oidc_error(error: OidcError) -> AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::SessionService;
     use crate::auth::fakes::{
-        InMemoryAccountTokenRepository, InMemoryUserIdentityRepository, InMemoryUserRepository,
+        DeterministicTokens, InMemoryAccountTokenRepository, InMemorySessionRepository,
+        InMemorySsoGroupRuleRepository, InMemoryUserIdentityRepository, InMemoryUserRepository,
     };
-    use crate::ports::OidcAuthRequest;
+    use crate::ports::{OidcAuthRequest, SsoGroupRuleRepository};
+    use crate::sso_roles::SsoRoleService;
+    use crate::user_admin::{UserAdminError, UserAdminService};
     use chrono::Duration;
     use domain::{
         AccountToken, AccountTokenId, AccountTokenKind, AccountTokenStatus, DEFAULT_NEW_USER_ROLE,
-        Role, UserIdentity,
+        Role, SsoGroupRule, SsoGroupRuleId, UserIdentity,
     };
     use std::sync::Mutex;
 
@@ -414,13 +432,23 @@ mod tests {
     }
 
     fn claims(subject: &str, email: Option<&str>, verified: bool) -> OidcClaims {
+        claims_with_groups(subject, email, verified, &[])
+    }
+
+    /// The same claims with the IdP's groups, for the group-to-role tests.
+    fn claims_with_groups(
+        subject: &str,
+        email: Option<&str>,
+        verified: bool,
+        groups: &[&str],
+    ) -> OidcClaims {
         OidcClaims {
             issuer: "https://idp.example".to_owned(),
             subject: subject.to_owned(),
             email: email.map(str::to_owned),
             email_verified: verified,
             display_name: None,
-            groups: Vec::new(),
+            groups: groups.iter().copied().map(str::to_owned).collect(),
         }
     }
 
@@ -433,6 +461,8 @@ mod tests {
             display_name: "Existing user".to_owned(),
             role: Role::Admin,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         }
@@ -487,11 +517,31 @@ mod tests {
         invites: Arc<InMemoryAccountTokenRepository>,
         auto_create_users: bool,
     ) -> OidcAuthProvider {
-        OidcAuthProvider::new(
-            Arc::new(oidc),
+        // The pre-2.7 tests do not care about group rules: an empty store.
+        provider_with_rules(
+            oidc,
             users,
             identities,
             invites,
+            Arc::new(InMemorySsoGroupRuleRepository::new()),
+            auto_create_users,
+        )
+    }
+
+    fn provider_with_rules(
+        oidc: FakeOidcProvider,
+        users: Arc<InMemoryUserRepository>,
+        identities: Arc<InMemoryUserIdentityRepository>,
+        invites: Arc<InMemoryAccountTokenRepository>,
+        rules: Arc<InMemorySsoGroupRuleRepository>,
+        auto_create_users: bool,
+    ) -> OidcAuthProvider {
+        OidcAuthProvider::new(
+            Arc::new(oidc),
+            users.clone(),
+            identities,
+            invites,
+            SsoRoleService::new(rules, users),
             LoginPolicy { auto_create_users },
         )
     }
@@ -511,6 +561,18 @@ mod tests {
             expires_at: now + Duration::hours(48),
             consumed_at: None,
             revoked_at: None,
+        }
+    }
+
+    /// A group rule for the D15 tests, built like the admin API would.
+    fn group_rule(group_name: &str, role: Role) -> SsoGroupRule {
+        let now = Utc::now();
+        SsoGroupRule {
+            id: SsoGroupRuleId::new(),
+            group_name: group_name.to_owned(),
+            role,
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -771,6 +833,8 @@ mod tests {
             display_name: "Known user".to_owned(),
             role: Role::Admin,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1087,6 +1151,10 @@ mod tests {
             users.clone(),
             identities,
             Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
+            SsoRoleService::new(
+                Arc::new(InMemorySsoGroupRuleRepository::new()),
+                users.clone(),
+            ),
             LoginPolicy {
                 auto_create_users: true,
             },
@@ -1102,18 +1170,501 @@ mod tests {
 
     #[test]
     fn the_provider_id_and_display_name_come_from_the_protocol_provider() {
+        let users = Arc::new(InMemoryUserRepository::new());
         let provider = OidcAuthProvider::new(
             Arc::new(FakeOidcProvider::new(claims("sub-123", None, false))),
-            Arc::new(InMemoryUserRepository::new()),
+            users.clone(),
             Arc::new(InMemoryUserIdentityRepository::new()),
-            Arc::new(InMemoryAccountTokenRepository::new(Arc::new(
-                InMemoryUserRepository::new(),
-            ))),
+            Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
+            SsoRoleService::new(Arc::new(InMemorySsoGroupRuleRepository::new()), users),
             LoginPolicy {
                 auto_create_users: true,
             },
         );
         assert_eq!(provider.id(), "oidc");
         assert_eq!(provider.display_name(), "Fake IdP");
+    }
+
+    // --- 2.7 step 6: the D15 group-to-role behaviour ---
+
+    #[tokio::test]
+    async fn without_rules_sso_never_touches_roles_or_flags() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let identities = Arc::new(InMemoryUserIdentityRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+
+        // An existing admin linked to the IdP keeps its role and stays unflagged.
+        let admin = user("admin@example.com");
+        users.create(admin.clone()).await.unwrap();
+        identities
+            .create(identity_for(admin.id, "sub-admin"))
+            .await
+            .unwrap();
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims("sub-admin", Some("admin@example.com"), true)),
+            users.clone(),
+            identities.clone(),
+            invites.clone(),
+            rules.clone(),
+            true,
+        );
+        let logged_in = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(logged_in.role, Role::Admin);
+        assert!(!logged_in.role_managed_by_sso);
+
+        // A new invited user gets the invite's role, unflagged.
+        invites.insert(invite_token("new@example.com", Role::Staff));
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims("sub-new", Some("new@example.com"), true)),
+            users.clone(),
+            identities,
+            invites,
+            rules,
+            true,
+        );
+        let created = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(created.role, Role::Staff, "the invite's role stands");
+        assert!(!created.role_managed_by_sso);
+    }
+
+    #[tokio::test]
+    async fn matching_groups_set_the_computed_role_for_new_and_existing_users() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let identities = Arc::new(InMemoryUserIdentityRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        rules
+            .create(group_rule("teachers", Role::Admin))
+            .await
+            .unwrap();
+
+        // A new account is created with the computed role, flagged.
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-new",
+                Some("new@example.com"),
+                true,
+                &["teachers"],
+            )),
+            users.clone(),
+            identities.clone(),
+            invites.clone(),
+            rules.clone(),
+            true,
+        );
+        let created = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(created.role, Role::Admin);
+        assert!(created.role_managed_by_sso);
+        let stored = users.find_by_id(created.id).await.unwrap().unwrap();
+        assert!(
+            stored.role_managed_by_sso,
+            "the flag is stored, not just returned"
+        );
+
+        // An existing account's role moves to the computed one on login.
+        let mut staff = user("staff@example.com");
+        staff.role = Role::Staff;
+        users.create(staff.clone()).await.unwrap();
+        identities
+            .create(identity_for(staff.id, "sub-staff"))
+            .await
+            .unwrap();
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-staff",
+                Some("staff@example.com"),
+                true,
+                &["teachers"],
+            )),
+            users.clone(),
+            identities,
+            invites,
+            rules,
+            true,
+        );
+        let logged_in = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(logged_in.role, Role::Admin);
+        assert!(logged_in.role_managed_by_sso);
+    }
+
+    #[tokio::test]
+    async fn several_matching_groups_give_the_least_permissive_role() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        rules
+            .create(group_rule("admins", Role::Admin))
+            .await
+            .unwrap();
+        rules
+            .create(group_rule("teachers", Role::Staff))
+            .await
+            .unwrap();
+
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-new",
+                Some("new@example.com"),
+                true,
+                &["admins", "teachers"],
+            )),
+            users.clone(),
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
+            rules,
+            true,
+        );
+        let created = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(created.role, Role::Staff, "least permissive match wins");
+        assert!(created.role_managed_by_sso);
+    }
+
+    #[tokio::test]
+    async fn no_match_and_empty_groups_fall_back_to_read_only() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let identities = Arc::new(InMemoryUserIdentityRepository::new());
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        rules
+            .create(group_rule("teachers", Role::Admin))
+            .await
+            .unwrap();
+
+        // A new account whose groups match nothing gets the fallback role.
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-new",
+                Some("new@example.com"),
+                true,
+                &["strangers"],
+            )),
+            users.clone(),
+            identities.clone(),
+            Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
+            rules.clone(),
+            true,
+        );
+        let created = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(created.role, domain::SSO_FALLBACK_ROLE);
+        assert!(created.role_managed_by_sso);
+
+        // An existing account with an empty groups claim (the provider level
+        // of a missing one) is moved to the fallback too.
+        let mut staff = user("staff@example.com");
+        staff.role = Role::Staff;
+        users.create(staff.clone()).await.unwrap();
+        identities
+            .create(identity_for(staff.id, "sub-staff"))
+            .await
+            .unwrap();
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-staff",
+                Some("staff@example.com"),
+                true,
+                &[],
+            )),
+            users.clone(),
+            identities,
+            Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
+            rules,
+            true,
+        );
+        let logged_in = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(logged_in.role, domain::SSO_FALLBACK_ROLE);
+        assert!(logged_in.role_managed_by_sso);
+    }
+
+    #[tokio::test]
+    async fn an_existing_admin_is_demoted_when_its_groups_no_longer_match() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let identities = Arc::new(InMemoryUserIdentityRepository::new());
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        rules
+            .create(group_rule("teachers", Role::Admin))
+            .await
+            .unwrap();
+
+        // A second active admin, so the last-admin backstop stays out of it.
+        users.create(user("other-admin@example.com")).await.unwrap();
+        // The target: previously SSO-managed (flag set), now outside the group.
+        let mut managed = user("admin@example.com");
+        managed.role_managed_by_sso = true;
+        users.create(managed.clone()).await.unwrap();
+        identities
+            .create(identity_for(managed.id, "sub-admin"))
+            .await
+            .unwrap();
+
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-admin",
+                Some("admin@example.com"),
+                true,
+                &[],
+            )),
+            users.clone(),
+            identities,
+            Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
+            rules,
+            true,
+        );
+        let logged_in = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(logged_in.role, domain::SSO_FALLBACK_ROLE);
+        let stored = users.find_by_id(managed.id).await.unwrap().unwrap();
+        assert_eq!(stored.role, domain::SSO_FALLBACK_ROLE);
+        assert!(stored.role_managed_by_sso);
+    }
+
+    #[tokio::test]
+    async fn the_invite_role_is_overridden_while_rules_exist_and_honoured_without_them() {
+        // With a rule: the computed role beats the invite's; the invite is
+        // still consumed.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        rules
+            .create(group_rule("teachers", Role::Admin))
+            .await
+            .unwrap();
+        invites.insert(invite_token("new@example.com", Role::Staff));
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-new",
+                Some("new@example.com"),
+                true,
+                &["teachers"],
+            )),
+            users.clone(),
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            invites.clone(),
+            rules,
+            true,
+        );
+        let created = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(created.role, Role::Admin, "rules beat the invite's role");
+        assert!(created.role_managed_by_sso);
+        let stored_invite = invites
+            .list_invites()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("the invite exists");
+        assert_eq!(
+            stored_invite.status(Utc::now()),
+            AccountTokenStatus::Accepted,
+            "the invite is still consumed"
+        );
+
+        // Without rules: the same invite's role stands.
+        let users = Arc::new(InMemoryUserRepository::new());
+        let invites = Arc::new(InMemoryAccountTokenRepository::new(users.clone()));
+        invites.insert(invite_token("new@example.com", Role::Staff));
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-new",
+                Some("new@example.com"),
+                true,
+                &["teachers"],
+            )),
+            users,
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            invites,
+            Arc::new(InMemorySsoGroupRuleRepository::new()),
+            true,
+        );
+        let created = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(created.role, Role::Staff);
+        assert!(!created.role_managed_by_sso);
+    }
+
+    #[tokio::test]
+    async fn the_exempt_user_is_never_recomputed() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let identities = Arc::new(InMemoryUserIdentityRepository::new());
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        rules
+            .create(group_rule("teachers", Role::Admin))
+            .await
+            .unwrap();
+
+        // The bootstrap admin: exempt, unflagged, and outside every group.
+        let mut exempt = user("admin@example.com");
+        exempt.sso_role_exempt = true;
+        users.create(exempt.clone()).await.unwrap();
+        identities
+            .create(identity_for(exempt.id, "sub-admin"))
+            .await
+            .unwrap();
+
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-admin",
+                Some("admin@example.com"),
+                true,
+                &[],
+            )),
+            users.clone(),
+            identities,
+            Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
+            rules,
+            true,
+        );
+        let logged_in = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(logged_in.role, Role::Admin);
+        let stored = users.find_by_id(exempt.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.role,
+            Role::Admin,
+            "the exemption skips the recompute"
+        );
+        assert!(!stored.role_managed_by_sso, "and never sets the flag");
+    }
+
+    #[tokio::test]
+    async fn the_last_active_admin_is_not_demoted_but_a_second_admin_allows_it() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let identities = Arc::new(InMemoryUserIdentityRepository::new());
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        rules
+            .create(group_rule("teachers", Role::Admin))
+            .await
+            .unwrap();
+
+        // The only active admin, outside every group: the backstop skips the
+        // change entirely (role and flag both untouched).
+        let last_admin = user("admin@example.com");
+        users.create(last_admin.clone()).await.unwrap();
+        identities
+            .create(identity_for(last_admin.id, "sub-admin"))
+            .await
+            .unwrap();
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-admin",
+                Some("admin@example.com"),
+                true,
+                &[],
+            )),
+            users.clone(),
+            identities.clone(),
+            Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
+            rules.clone(),
+            true,
+        );
+        let logged_in = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(logged_in.role, Role::Admin);
+        let stored = users.find_by_id(last_admin.id).await.unwrap().unwrap();
+        assert_eq!(stored.role, Role::Admin, "the demotion is skipped");
+        assert!(!stored.role_managed_by_sso, "and nothing is written");
+
+        // A second active admin exists now: the same login demotes.
+        users.create(user("other-admin@example.com")).await.unwrap();
+        let logged_in = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(logged_in.role, domain::SSO_FALLBACK_ROLE);
+        let stored = users.find_by_id(last_admin.id).await.unwrap().unwrap();
+        assert_eq!(stored.role, domain::SSO_FALLBACK_ROLE);
+        assert!(stored.role_managed_by_sso);
+    }
+
+    #[tokio::test]
+    async fn an_sso_computed_role_is_locked_against_hand_edits_until_the_rules_are_gone() {
+        let users = Arc::new(InMemoryUserRepository::new());
+        let rules = Arc::new(InMemorySsoGroupRuleRepository::new());
+        rules
+            .create(group_rule("teachers", Role::Staff))
+            .await
+            .unwrap();
+
+        // An actor admin for the hand-edit attempts.
+        let actor = user("actor@example.com");
+        users.create(actor.clone()).await.unwrap();
+
+        let provider = provider_with_rules(
+            FakeOidcProvider::new(claims_with_groups(
+                "sub-new",
+                Some("new@example.com"),
+                true,
+                &["teachers"],
+            )),
+            users.clone(),
+            Arc::new(InMemoryUserIdentityRepository::new()),
+            Arc::new(InMemoryAccountTokenRepository::new(users.clone())),
+            rules.clone(),
+            true,
+        );
+        let created = provider
+            .complete(callback("abc", "csrf-1"), pending())
+            .await
+            .unwrap();
+        assert_eq!(created.role, Role::Staff);
+        assert!(created.role_managed_by_sso);
+
+        let admin_service = UserAdminService::new(
+            users.clone(),
+            rules.clone(),
+            SessionService::new(
+                Arc::new(InMemorySessionRepository::new()),
+                Arc::new(DeterministicTokens::default()),
+                SessionService::DEFAULT_SESSION_TTL,
+            ),
+        );
+        // While the rule exists, the hand edit is refused...
+        assert!(matches!(
+            admin_service
+                .change_role(&actor, created.id, Role::Admin)
+                .await,
+            Err(UserAdminError::RoleManagedBySso)
+        ));
+        // ...and deleting the last rule frees the role for hand edits.
+        let listed = rules.list().await.unwrap();
+        let [rule] = listed.as_slice() else {
+            panic!("expected exactly one rule");
+        };
+        rules.delete(rule.id).await.unwrap();
+        let changed = admin_service
+            .change_role(&actor, created.id, Role::Admin)
+            .await
+            .unwrap();
+        assert_eq!(changed.role, Role::Admin);
     }
 }

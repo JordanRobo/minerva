@@ -192,6 +192,12 @@ nothing. Set in `minerva.toml` (or via
 The bootstrap only takes effect while no users exist: it never resets an
 existing password or modifies an existing account.
 
+The bootstrap admin is created with `sso_role_exempt = true`, so SSO
+group-to-role rules (roadmap 2.7) can never recompute or lock its role;
+every other account starts with both flags false. If your database was
+bootstrapped before that column existed, set the flag once by hand:
+`UPDATE users SET sso_role_exempt = true WHERE email = '<admin email>';`
+
 ### Inviting people
 
 There is no public signup: an administrator creates an invite through the API
@@ -216,6 +222,9 @@ while `oidc.issuer_url` is blank; to enable it, set in `minerva.toml` (or via
   and registered at the provider; for the dev compose stack that is
   `http://localhost:3010/api/auth/oidc/callback`
 - `oidc.state_secret` — at least 32 bytes; generate with `openssl rand -hex 32`
+- `oidc.groups_claim` — name of the ID-token claim holding the user's
+  groups (default "groups"); read at SSO login for the group-to-role rules
+  (roadmap 2.7)
 - `server.web_base_url` — absolute public URL of the API origin, e.g.
   `http://localhost:3010` for the dev stack
 
@@ -223,6 +232,30 @@ The server fails at startup, naming every problem it finds, if you set
 `oidc.issuer_url` but leave anything else required missing or invalid. It
 works with any standards-compliant OIDC provider; it has been tested with
 Authentik.
+
+For the group-to-role rules (roadmap 2.7) to work, your identity provider
+must release the groups claim in the ID token; depending on the provider
+this may also mean adjusting `oidc.scopes` so the claim is included — check
+your provider's documentation, as Minerva has not verified this against a
+live IdP yet. While the claim is missing or malformed the server logs a
+warning per login and proceeds with no groups.
+
+### SSO group-to-role mapping
+
+With OIDC enabled, administrators map IdP groups to Minerva roles through
+the API: `POST /api/sso/group-rules` with `{"group_name": "teachers",
+"role": "staff"}` (the same base lists rules and updates or deletes one by
+id; all of it is admin-only). While at least one rule exists, every SSO
+sign-in re-resolves the user's role from their groups: exact group-name
+match, the least permissive matched role wins, and no match — or a missing
+groups claim — gives Read-only. New SSO accounts are created with that role;
+a pending invite for the same email is still consumed, but its role is
+ignored while rules exist (it is honoured when none do). The bootstrap admin
+is exempt from recomputation, and recomputation never demotes the last
+active administrator — it logs a warning instead. Roles set this way are
+marked "managed by SSO" and cannot be changed through `/api/users` while any
+rule exists; delete every rule to hand-edit them again. Without any rule,
+SSO sign-ins never touch roles.
 
 ## License
 

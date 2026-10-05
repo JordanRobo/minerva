@@ -10,7 +10,9 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::error::ApiError;
 use crate::openapi::ApiDoc;
-use crate::{account_links, auth, debug, goals, invites, milestones, redirect, tasks, users};
+use crate::{
+    account_links, auth, debug, goals, invites, milestones, redirect, sso_rules, tasks, users,
+};
 
 async fn health() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "status": "ok" }))
@@ -71,6 +73,22 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/invites/{id}/reissue",
                     web::post().to(invites::reissue_invite),
+                )
+                .route(
+                    "/sso/group-rules",
+                    web::get().to(sso_rules::list_group_rules),
+                )
+                .route(
+                    "/sso/group-rules",
+                    web::post().to(sso_rules::create_group_rule),
+                )
+                .route(
+                    "/sso/group-rules/{id}",
+                    web::put().to(sso_rules::update_group_rule),
+                )
+                .route(
+                    "/sso/group-rules/{id}",
+                    web::delete().to(sso_rules::delete_group_rule),
                 )
                 .route("/auth/login", web::post().to(auth::login))
                 .route("/auth/logout", web::post().to(auth::logout))

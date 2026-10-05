@@ -91,7 +91,11 @@ pub async fn bootstrap_admin(
         password_hash: Some(password_hash),
         display_name: display_name.to_owned(),
         role: Role::Admin,
+        // D15: the bootstrap admin is exempt from SSO role recomputation; no
+        // other creation path sets either flag.
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: true,
         created_at: now,
         updated_at: now,
     };
@@ -129,6 +133,8 @@ mod tests {
             display_name: "Existing".to_owned(),
             role: Role::ReadOnly,
             deactivated_at: deactivated.then_some(now),
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         }
@@ -166,6 +172,26 @@ mod tests {
             stored.password_hash.as_deref(),
             Some("correct-horse-battery")
         );
+    }
+
+    #[tokio::test]
+    async fn only_the_bootstrap_admin_is_exempt_from_sso_recomputation() {
+        let users = InMemoryUserRepository::new();
+        let outcome = bootstrap_admin(
+            &users,
+            &FakePasswordHasher,
+            admin("root@example.com", "Root", "correct-horse"),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        let BootstrapOutcome::Created(user) = outcome else {
+            panic!("expected the first admin to be created");
+        };
+        // D15: the bootstrap admin is exempt from SSO role recomputation; its
+        // role was never computed from IdP groups, so it is not SSO-managed.
+        assert!(user.sso_role_exempt);
+        assert!(!user.role_managed_by_sso);
     }
 
     #[tokio::test]

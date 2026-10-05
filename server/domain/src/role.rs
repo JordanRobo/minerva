@@ -22,6 +22,18 @@ pub enum Role {
     ReadOnly,
 }
 
+impl std::fmt::Display for Role {
+    /// The role's canonical string, the same one JSON and the database use.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Role::Admin => "admin",
+            Role::Staff => "staff",
+            Role::ReadOnly => "read_only",
+        };
+        f.write_str(name)
+    }
+}
+
 /// An action a user may be allowed to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
@@ -52,11 +64,32 @@ impl Role {
             (Role::ReadOnly, Permission::ManageUsers) => false,
         }
     }
+
+    /// The role's position in the permissive ordering, least permissive
+    /// first: `ReadOnly` < `Staff` < `Admin`.
+    ///
+    /// Every variant is listed, like [`allows`]: a role added later must
+    /// place itself here explicitly. The SSO group-to-role mapping (roadmap
+    /// 2.7) uses it to keep the least permissive of several matched roles.
+    pub fn rank(self) -> u8 {
+        match self {
+            Role::ReadOnly => 0,
+            Role::Staff => 1,
+            Role::Admin => 2,
+        }
+    }
 }
 
-/// The role given to newly created accounts: SSO auto-creation today, and
-/// the fallback role in roadmap 2.7's group-to-role mapping reuses it.
+/// The role given to newly created accounts: SSO auto-creation today. The
+/// SSO group-to-role mapping (roadmap 2.7) has its own fallback,
+/// [`SSO_FALLBACK_ROLE`].
 pub const DEFAULT_NEW_USER_ROLE: Role = Role::ReadOnly;
+
+/// The role an SSO sign-in falls back to when no group rule matches — or
+/// the groups claim is missing or malformed (roadmap 2.7, D15). Deliberately
+/// a separate constant from [`DEFAULT_NEW_USER_ROLE`]: the two mean
+/// different things and may diverge.
+pub const SSO_FALLBACK_ROLE: Role = Role::ReadOnly;
 
 #[cfg(test)]
 mod tests {
@@ -92,5 +125,23 @@ mod tests {
     #[test]
     fn new_accounts_default_to_read_only() {
         assert_eq!(DEFAULT_NEW_USER_ROLE, Role::ReadOnly);
+    }
+
+    #[test]
+    fn rank_orders_roles_from_least_to_most_permissive() {
+        assert!(Role::ReadOnly.rank() < Role::Staff.rank());
+        assert!(Role::Staff.rank() < Role::Admin.rank());
+    }
+
+    #[test]
+    fn sso_fallback_is_read_only() {
+        assert_eq!(SSO_FALLBACK_ROLE, Role::ReadOnly);
+    }
+
+    #[test]
+    fn display_matches_the_json_and_database_strings() {
+        assert_eq!(Role::Admin.to_string(), "admin");
+        assert_eq!(Role::Staff.to_string(), "staff");
+        assert_eq!(Role::ReadOnly.to_string(), "read_only");
     }
 }

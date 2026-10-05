@@ -73,6 +73,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    sso_group_role_rules (id) {
+        id -> Uuid,
+        group_name -> Text,
+        role -> Text,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     task_relations (id) {
         id -> Uuid,
         source_task_id -> Uuid,
@@ -116,6 +126,8 @@ diesel::table! {
         updated_at -> Timestamptz,
         role -> Text,
         deactivated_at -> Nullable<Timestamptz>,
+        role_managed_by_sso -> Bool,
+        sso_role_exempt -> Bool,
     }
 }
 
@@ -138,6 +150,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     milestones,
     progress_snapshots,
     sessions,
+    sso_group_role_rules,
     task_relations,
     tasks,
     user_identities,

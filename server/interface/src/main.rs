@@ -10,6 +10,7 @@ mod milestones;
 mod openapi;
 mod redirect;
 mod routes;
+mod sso_rules;
 mod tasks;
 mod users;
 
@@ -32,6 +33,8 @@ use application::ports::{
     AccountEmailSender, AccountTokenRepository, OidcProvider, PasswordHasher, SessionRepository,
     SessionTokens, UserIdentityRepository, UserRepository,
 };
+use application::sso_roles::SsoRoleService;
+use application::sso_rules::SsoGroupRuleService;
 use application::user_admin::UserAdminService;
 use chrono::Utc;
 use infrastructure::Argon2PasswordHasher;
@@ -43,8 +46,8 @@ use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
 use infrastructure::repositories::{
     PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
     PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
-    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserIdentityRepository,
-    PostgresUserRepository, RedisSessionRepository,
+    PostgresSsoGroupRuleRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
+    PostgresUserIdentityRepository, PostgresUserRepository, RedisSessionRepository,
 };
 use std::sync::Arc;
 
@@ -90,7 +93,7 @@ async fn main() -> std::io::Result<()> {
         println!("run_migrations is false; skipping migrations");
     }
 
-    // One shared pool, nine repositories. Each is registered as its own
+    // One shared pool, ten repositories. Each is registered as its own
     // `web::Data` rather than wrapped in a single AppState struct: every
     // handler uses exactly one repository, so per-repo Data keeps each
     // handler's signature naming only the repo it actually calls. (The pool
@@ -101,6 +104,13 @@ async fn main() -> std::io::Result<()> {
     let tasks = web::Data::new(PostgresTaskRepository::new(pool.clone()));
     let task_relations = web::Data::new(PostgresTaskRelationRepository::new(pool.clone()));
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
+    // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
+    // service so name validation and the duplicate-name conflict live in one
+    // place (see application::sso_rules).
+    // The user-admin service below shares the same repository: it asks
+    // whether any rule exists to lock SSO-managed roles against hand edits.
+    let sso_group_rules_repo = Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone()));
+    let sso_group_rules = web::Data::new(SsoGroupRuleService::new(sso_group_rules_repo.clone()));
     // The auth handlers take ports, not concrete repositories, so these are
     // registered as trait objects (the same way sessions below are).
     let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
@@ -117,6 +127,11 @@ async fn main() -> std::io::Result<()> {
         Arc::new(PostgresUserIdentityRepository::new(pool.clone()));
     let user_identities_data: web::Data<dyn UserIdentityRepository> =
         user_identities.clone().into();
+    // SSO group-to-role mapping (roadmap 2.7, D15): while any rule exists,
+    // the OIDC provider below recomputes roles from the IdP groups at every
+    // login. It shares the rules repository with the user-admin service's
+    // hand-edit lock, so both read the same committed rules.
+    let sso_roles = SsoRoleService::new(sso_group_rules_repo.clone(), users.clone());
     // Sessions are the swappable storage: Redis when redis.url is configured,
     // Postgres otherwise. A missing URL is not an error — it just means "use
     // Postgres for sessions" (see docs/architecture.md). A present but
@@ -151,6 +166,7 @@ async fn main() -> std::io::Result<()> {
     // and last-admin rules live in one place (see application::user_admin).
     let user_admin = web::Data::new(UserAdminService::new(
         users.clone(),
+        sso_group_rules_repo,
         session_service.get_ref().clone(),
     ));
     // The password hasher holds no state; the password provider and the
@@ -232,6 +248,7 @@ async fn main() -> std::io::Result<()> {
             users.clone(),
             user_identities.clone(),
             account_tokens,
+            sso_roles,
             LoginPolicy {
                 auto_create_users: config.oidc.auto_create_users,
             },
@@ -280,6 +297,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(tasks.clone())
             .app_data(task_relations.clone())
             .app_data(progress_snapshots.clone())
+            .app_data(sso_group_rules.clone())
             .app_data(users_data.clone())
             .app_data(user_identities_data.clone())
             .app_data(sessions_data.clone())

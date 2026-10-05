@@ -138,6 +138,8 @@ pub fn new_user_from_claims(claims: &OidcClaims, now: DateTime<Utc>) -> User {
         display_name,
         role: DEFAULT_NEW_USER_ROLE,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     }
@@ -195,6 +197,8 @@ mod tests {
             display_name: "Existing user".into(),
             role: Role::Admin,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         }

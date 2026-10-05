@@ -89,6 +89,8 @@ impl UserRepository for PostgresUserRepository {
                     users::updated_at.eq(&user.updated_at),
                     users::role.eq(role_to_db(user.role)),
                     users::deactivated_at.eq(&user.deactivated_at),
+                    users::role_managed_by_sso.eq(user.role_managed_by_sso),
+                    users::sso_role_exempt.eq(user.sso_role_exempt),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
@@ -122,6 +124,10 @@ impl UserRepository for PostgresUserRepository {
                         users::updated_at.eq(&user.updated_at),
                         users::role.eq(role_to_db(user.role)),
                         users::deactivated_at.eq(&user.deactivated_at),
+                        // The bootstrap admin carries sso_role_exempt = true;
+                        // the column defaults would silently drop it.
+                        users::role_managed_by_sso.eq(user.role_managed_by_sso),
+                        users::sso_role_exempt.eq(user.sso_role_exempt),
                     ))
                     .execute(conn)?;
                 Ok(Some(user))
@@ -184,6 +190,8 @@ impl UserRepository for PostgresUserRepository {
                     users::updated_at.eq(&user.updated_at),
                     users::role.eq(role_to_db(user.role)),
                     users::deactivated_at.eq(&user.deactivated_at),
+                    users::role_managed_by_sso.eq(user.role_managed_by_sso),
+                    users::sso_role_exempt.eq(user.sso_role_exempt),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
@@ -237,6 +245,29 @@ impl UserRepository for PostgresUserRepository {
                         diesel::update(users::table.find(target.0))
                             .set((
                                 users::role.eq(role_to_db(new_role)),
+                                users::updated_at.eq(now),
+                            ))
+                            .execute(conn)?;
+                    }
+                    AccessChange::RoleManagedBySso(new_role) => {
+                        // The flag is part of the state: same role but an
+                        // unflagged row still needs the write.
+                        if new_role == role && row.8 {
+                            return Ok(user_from_row(row)?);
+                        }
+                        // Same last-admin guard as a plain role change.
+                        if role == Role::Admin
+                            && active
+                            && new_role != Role::Admin
+                            && count_other_active_admins(conn, target)? == 0
+                        {
+                            return Err(AccessTxError::LastAdmin);
+                        }
+                        let now = Utc::now();
+                        diesel::update(users::table.find(target.0))
+                            .set((
+                                users::role.eq(role_to_db(new_role)),
+                                users::role_managed_by_sso.eq(true),
                                 users::updated_at.eq(now),
                             ))
                             .execute(conn)?;

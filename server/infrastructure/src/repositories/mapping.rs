@@ -14,8 +14,8 @@ use application::ports::RepositoryError;
 use domain::{
     AccountToken, AccountTokenId, AccountTokenKind, Goal, GoalId, GoalStatus, Milestone,
     MilestoneId, ProgressSnapshot, ProgressSnapshotId, ProgressTarget, Role, Session, SessionId,
-    Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId, TaskRelationType, TaskStatus,
-    User, UserId, UserIdentity, UserIdentityId,
+    SsoGroupRule, SsoGroupRuleId, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId,
+    TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserIdentityId,
 };
 
 /// A row of the `goals` table: id, title, description, status,
@@ -261,7 +261,8 @@ pub fn progress_snapshot_from_row(
 }
 
 /// A row of the `users` table: id, email, password_hash, display_name,
-/// created_at, updated_at, role, deactivated_at — in that order.
+/// created_at, updated_at, role, deactivated_at, role_managed_by_sso,
+/// sso_role_exempt — in that order.
 /// `password_hash` is `None` for a user who can only sign in via an external
 /// identity provider; `deactivated_at` is `None` while the account is active.
 pub type UserRow = (
@@ -273,6 +274,8 @@ pub type UserRow = (
     DateTime<Utc>,
     String,
     Option<DateTime<Utc>>,
+    bool,
+    bool,
 );
 
 /// The value stored in a `role` column for [`Role`].
@@ -302,14 +305,26 @@ pub fn role_from_db(role: &str) -> Result<Role, RepositoryError> {
 
 /// Build a [`User`] from a `users` row.
 pub fn user_from_row(row: UserRow) -> Result<User, RepositoryError> {
-    let (id, email, password_hash, display_name, created_at, updated_at, role, deactivated_at) =
-        row;
+    let (
+        id,
+        email,
+        password_hash,
+        display_name,
+        created_at,
+        updated_at,
+        role,
+        deactivated_at,
+        role_managed_by_sso,
+        sso_role_exempt,
+    ) = row;
     Ok(User {
         id: UserId(id),
         email,
         password_hash,
         display_name,
         role: role_from_db(&role)?,
+        role_managed_by_sso,
+        sso_role_exempt,
         deactivated_at,
         created_at,
         updated_at,
@@ -447,5 +462,21 @@ pub fn account_token_from_row(row: AccountTokenRow) -> Result<AccountToken, Repo
         expires_at,
         consumed_at,
         revoked_at,
+    })
+}
+
+/// A row of the `sso_group_role_rules` table: id, group_name, role,
+/// created_at, updated_at — in that order.
+pub type SsoGroupRuleRow = (Uuid, String, String, DateTime<Utc>, DateTime<Utc>);
+
+/// Build an [`SsoGroupRule`] from an `sso_group_role_rules` row.
+pub fn sso_group_rule_from_row(row: SsoGroupRuleRow) -> Result<SsoGroupRule, RepositoryError> {
+    let (id, group_name, role, created_at, updated_at) = row;
+    Ok(SsoGroupRule {
+        id: SsoGroupRuleId(id),
+        group_name,
+        role: role_from_db(&role)?,
+        created_at,
+        updated_at,
     })
 }

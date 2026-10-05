@@ -35,6 +35,13 @@ pub struct User {
     pub display_name: String,
     /// What this user is allowed to do; see [`Role::allows`].
     pub role: Role,
+    /// Set by SSO sign-in while the user's role was recomputed from the IdP
+    /// groups claim (D15). While any group rule exists, hand edits to such a
+    /// role are rejected; with no rules the flag is inert.
+    pub role_managed_by_sso: bool,
+    /// Exempt from SSO role recomputation (D15); set on the 2.5 bootstrap
+    /// admin and never by any other creation path.
+    pub sso_role_exempt: bool,
     /// When an admin deactivated this account; `None` while it is active. A
     /// deactivated account cannot sign in and its sessions are revoked.
     pub deactivated_at: Option<DateTime<Utc>>,

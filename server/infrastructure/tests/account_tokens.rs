@@ -94,6 +94,8 @@ fn test_user(email: &str, role: Role) -> User {
         display_name: "Token test user".into(),
         role,
         deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
         created_at: now,
         updated_at: now,
     }

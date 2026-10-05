@@ -30,12 +30,17 @@ pub struct UserAdminResponse {
     pub active: bool,
     /// When an admin deactivated this account; `null` while it is active.
     pub deactivated_at: Option<DateTime<Utc>>,
+    /// Whether the role is currently locked against hand edits by SSO group
+    /// rules (the user's `role_managed_by_sso` flag while any rule exists).
+    pub role_managed_by_sso: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<&User> for UserAdminResponse {
-    fn from(user: &User) -> Self {
+impl From<(&User, bool)> for UserAdminResponse {
+    /// The second value is the effective D15 lock (flag AND any rule
+    /// exists), computed once per request by the handler.
+    fn from((user, role_managed_by_sso): (&User, bool)) -> Self {
         Self {
             id: user.id.0,
             email: user.email.clone(),
@@ -43,6 +48,7 @@ impl From<&User> for UserAdminResponse {
             role: user.role,
             active: user.is_active(),
             deactivated_at: user.deactivated_at,
+            role_managed_by_sso,
             created_at: user.created_at,
             updated_at: user.updated_at,
         }
@@ -64,6 +70,7 @@ pub struct ChangeRoleRequest {
 fn admin_error_response(error: UserAdminError) -> ApiError {
     match error {
         UserAdminError::NotFound => ApiError::not_found(),
+        UserAdminError::RoleManagedBySso => ApiError::role_managed_by_sso(error.to_string()),
         UserAdminError::Repository(err) => repo_error_response(err),
         other => ApiError::conflict(other.to_string()),
     }
@@ -87,20 +94,23 @@ pub async fn list_users(
     admin: web::Data<UserAdminService>,
     _access: AdminAccess,
 ) -> Result<HttpResponse, ApiError> {
-    match admin.list().await {
-        Ok(users) => Ok(HttpResponse::Ok().json(
-            users
-                .iter()
-                .map(UserAdminResponse::from)
-                .collect::<Vec<_>>(),
-        )),
-        Err(error) => Err(admin_error_response(error)),
-    }
+    let users = admin.list().await.map_err(admin_error_response)?;
+    // One query for the D15 condition shared by every row.
+    let rules_exist = admin
+        .sso_rules_exist()
+        .await
+        .map_err(admin_error_response)?;
+    Ok(HttpResponse::Ok().json(
+        users
+            .iter()
+            .map(|user| UserAdminResponse::from((user, user.role_managed_by_sso && rules_exist)))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// Change a User's Role
 ///
-/// Change another user's role. An admin cannot change their own role, and the last active admin can never be demoted. Requires the Admin role.
+/// Change another user's role. An admin cannot change their own role, the last active admin can never be demoted, and a role set by SSO groups is locked while any group rule exists. Requires the Admin role.
 #[utoipa::path(
     put,
     path = "/api/users/{id}/role",
@@ -114,7 +124,7 @@ pub async fn list_users(
         (status = 401, description = "Missing or invalid session", body = ApiError),
         (status = 403, description = "Requires the Admin role", body = ApiError),
         (status = 404, description = "No user with this id", body = ApiError),
-        (status = 409, description = "Changing your own role, or demoting the last active admin, is not allowed", body = ApiError)
+        (status = 409, description = "Changing your own role, demoting the last active admin, or changing a role managed by SSO groups, is not allowed", body = ApiError)
     )
 )]
 pub async fn change_user_role(
@@ -127,7 +137,14 @@ pub async fn change_user_role(
         .change_role(&access.user, UserId(*path), body.role)
         .await
     {
-        Ok(user) => Ok(HttpResponse::Ok().json(UserAdminResponse::from(&user))),
+        Ok(user) => {
+            let managed = user.role_managed_by_sso
+                && admin
+                    .sso_rules_exist()
+                    .await
+                    .map_err(admin_error_response)?;
+            Ok(HttpResponse::Ok().json(UserAdminResponse::from((&user, managed))))
+        }
         Err(error) => Err(admin_error_response(error)),
     }
 }
@@ -155,7 +172,14 @@ pub async fn deactivate_user(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match admin.deactivate(&access.user, UserId(*path)).await {
-        Ok(user) => Ok(HttpResponse::Ok().json(UserAdminResponse::from(&user))),
+        Ok(user) => {
+            let managed = user.role_managed_by_sso
+                && admin
+                    .sso_rules_exist()
+                    .await
+                    .map_err(admin_error_response)?;
+            Ok(HttpResponse::Ok().json(UserAdminResponse::from((&user, managed))))
+        }
         Err(error) => Err(admin_error_response(error)),
     }
 }
@@ -182,7 +206,14 @@ pub async fn reactivate_user(
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match admin.reactivate(UserId(*path)).await {
-        Ok(user) => Ok(HttpResponse::Ok().json(UserAdminResponse::from(&user))),
+        Ok(user) => {
+            let managed = user.role_managed_by_sso
+                && admin
+                    .sso_rules_exist()
+                    .await
+                    .map_err(admin_error_response)?;
+            Ok(HttpResponse::Ok().json(UserAdminResponse::from((&user, managed))))
+        }
         Err(error) => Err(admin_error_response(error)),
     }
 }
@@ -245,16 +276,18 @@ mod tests {
     use application::auth::password::PasswordAuthProvider;
     use application::auth::provider::AuthProviders;
     use application::ports::{
-        GoalRepository, PasswordHasher, SessionRepository, SessionTokens, UserRepository,
+        GoalRepository, PasswordHasher, SessionRepository, SessionTokens, SsoGroupRuleRepository,
+        UserRepository,
     };
     use chrono::Utc;
     use diesel::prelude::*;
-    use domain::GoalId;
+    use domain::{GoalId, SsoGroupRule, SsoGroupRuleId};
     use infrastructure::db::PgPool;
     use infrastructure::repositories::{
         PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
         PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
-        PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserRepository,
+        PostgresSsoGroupRuleRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
+        PostgresUserRepository,
     };
     use infrastructure::{Argon2PasswordHasher, NoEmailSender, Sha256SessionTokens};
     use std::sync::Arc;
@@ -352,6 +385,7 @@ mod tests {
                     .app_data(web::Data::new(account_link_service))
                     .app_data(web::Data::new(UserAdminService::new(
                         users,
+                        Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone())),
                         session_service,
                     )))
                     .app_data(providers)
@@ -396,6 +430,8 @@ mod tests {
             display_name: "Users API test user".into(),
             role,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         };
@@ -417,6 +453,8 @@ mod tests {
             display_name: "Users API test user".into(),
             role,
             deactivated_at: None,
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         };
@@ -436,6 +474,8 @@ mod tests {
             display_name: "Users API test user".into(),
             role: Role::Admin,
             deactivated_at: Some(now),
+            role_managed_by_sso: false,
+            sso_role_exempt: false,
             created_at: now,
             updated_at: now,
         };
@@ -459,6 +499,39 @@ mod tests {
             .set(infrastructure::schema::users::role.eq(role))
             .execute(&mut conn)
             .expect("set role");
+    }
+
+    /// Flip the D15 flag directly in the database: sign-in recomputation,
+    /// which sets it for real, lands in a later step.
+    fn set_sso_managed(pool: &PgPool, user_id: UserId) {
+        let mut conn = pool.get().expect("pool connection");
+        diesel::update(infrastructure::schema::users::table.find(user_id.0))
+            .set(infrastructure::schema::users::role_managed_by_sso.eq(true))
+            .execute(&mut conn)
+            .expect("set sso flag");
+    }
+
+    /// Insert one group rule (the D15 lock condition) under a unique name and
+    /// return its id for cleanup.
+    async fn create_rule(pool: &PgPool) -> SsoGroupRuleId {
+        let rules = PostgresSsoGroupRuleRepository::new(pool.clone());
+        let now = Utc::now();
+        let rule = SsoGroupRule {
+            id: SsoGroupRuleId::new(),
+            group_name: format!("users-api-{}", Uuid::new_v4()),
+            role: Role::Admin,
+            created_at: now,
+            updated_at: now,
+        };
+        rules.create(rule).await.expect("create rule").id
+    }
+
+    /// Delete a group rule row directly (the repository has no bulk delete).
+    fn delete_rule(pool: &PgPool, id: SsoGroupRuleId) {
+        let mut conn = pool.get().expect("pool connection");
+        diesel::delete(infrastructure::schema::sso_group_role_rules::table.find(id.0))
+            .execute(&mut conn)
+            .expect("delete rule");
     }
 
     /// A live session token for `user_id`, issued like any sign-in would be.
@@ -886,11 +959,16 @@ mod tests {
             let res_a = res_a.unwrap();
             let res_b = res_b.unwrap();
 
-            // One demotion wins; the loser hits the last-admin guard. (A 403
-            // is impossible: both tokens are still admin-role sessions.)
+            // One demotion wins; the loser hits the last-admin guard. A late
+            // loser can also get 403: if the winner commits before the
+            // loser's session check runs, that check sees the fresh role and
+            // refuses — which is correct for a just-demoted user.
             for res in [&res_a, &res_b] {
                 assert!(
-                    matches!(res.status(), StatusCode::OK | StatusCode::CONFLICT),
+                    matches!(
+                        res.status(),
+                        StatusCode::OK | StatusCode::CONFLICT | StatusCode::FORBIDDEN
+                    ),
                     "unexpected status {}",
                     res.status()
                 );
@@ -1003,5 +1081,207 @@ mod tests {
 
         delete_user(&pool, admin.id);
         delete_user(&pool, staff.id);
+    }
+
+    #[actix_web::test]
+    async fn an_sso_managed_role_is_locked_while_a_rule_exists() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let app = test_app!(&url);
+
+        let admin = create_user(&pool, unique_email("users-sso-lock"), Role::Admin).await;
+        let managed = create_user(&pool, unique_email("users-sso-lock"), Role::Staff).await;
+        set_sso_managed(&pool, managed.id);
+        let rule_id = create_rule(&pool).await;
+        let token = issue_token(&pool, admin.id).await;
+
+        // While any rule exists, the hand edit is refused with the D15 code.
+        let locked = request!(
+            &app,
+            Method::PUT,
+            format!("/api/users/{}/role", managed.id.0),
+            Some(&token),
+            Some(&serde_json::json!({ "role": "admin" }))
+        );
+        assert_eq!(locked.status(), StatusCode::CONFLICT);
+        let json: serde_json::Value = serde_json::from_slice(&read_body(locked).await).unwrap();
+        assert_eq!(json["error"]["code"], "role_managed_by_sso");
+
+        // Deleting our rule unlocks the role for hand edits. Other tests
+        // share this database and may hold their own rules briefly, so retry
+        // through any transient lock from a foreign rule.
+        delete_rule(&pool, rule_id);
+        let mut unlocked = request!(
+            &app,
+            Method::PUT,
+            format!("/api/users/{}/role", managed.id.0),
+            Some(&token),
+            Some(&serde_json::json!({ "role": "admin" }))
+        );
+        for _ in 0..100 {
+            if unlocked.status() == StatusCode::OK {
+                break;
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&read_body(unlocked).await).unwrap();
+            assert_eq!(body["error"]["code"], "role_managed_by_sso");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            unlocked = request!(
+                &app,
+                Method::PUT,
+                format!("/api/users/{}/role", managed.id.0),
+                Some(&token),
+                Some(&serde_json::json!({ "role": "admin" }))
+            );
+        }
+        assert_eq!(unlocked.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&read_body(unlocked).await).unwrap();
+        assert_eq!(json["role"], "admin");
+
+        delete_user(&pool, admin.id);
+        delete_user(&pool, managed.id);
+    }
+
+    #[actix_web::test]
+    async fn the_response_reports_the_effective_sso_lock() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let app = test_app!(&url);
+
+        let admin = create_user(&pool, unique_email("users-sso-field"), Role::Admin).await;
+        let managed = create_user(&pool, unique_email("users-sso-field"), Role::Staff).await;
+        let plain = create_user(&pool, unique_email("users-sso-field"), Role::Staff).await;
+        set_sso_managed(&pool, managed.id);
+        let token = issue_token(&pool, admin.id).await;
+
+        // The field is the effective value: flag AND any rule exists. Users
+        // SSO never recomputed report false with or without rules (other
+        // tests share this database, so a foreign rule may be present).
+        let list = request!(
+            &app,
+            Method::GET,
+            "/api/users",
+            Some(&token),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(list.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&read_body(list).await).unwrap();
+        for id in [admin.id, plain.id] {
+            let entry = json
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == id.0.to_string())
+                .unwrap();
+            assert_eq!(entry["role_managed_by_sso"], false);
+        }
+
+        // A rule flips the field for the flagged user only.
+        let rule_id = create_rule(&pool).await;
+        let list = request!(
+            &app,
+            Method::GET,
+            "/api/users",
+            Some(&token),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(list.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&read_body(list).await).unwrap();
+        let entry = |id: UserId| {
+            json.as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == id.0.to_string())
+                .unwrap()
+        };
+        assert_eq!(entry(managed.id)["role_managed_by_sso"], true);
+        assert_eq!(entry(admin.id)["role_managed_by_sso"], false);
+        assert_eq!(entry(plain.id)["role_managed_by_sso"], false);
+
+        delete_rule(&pool, rule_id);
+        delete_user(&pool, admin.id);
+        delete_user(&pool, managed.id);
+        delete_user(&pool, plain.id);
+    }
+
+    #[actix_web::test]
+    async fn an_unmanaged_role_changes_fine_while_a_rule_exists() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let app = test_app!(&url);
+
+        let admin = create_user(&pool, unique_email("users-sso-unmanaged"), Role::Admin).await;
+        let staff = create_user(&pool, unique_email("users-sso-unmanaged"), Role::Staff).await;
+        let rule_id = create_rule(&pool).await;
+        let token = issue_token(&pool, admin.id).await;
+
+        // The lock follows the flag: SSO never recomputed this user's role.
+        let changed = request!(
+            &app,
+            Method::PUT,
+            format!("/api/users/{}/role", staff.id.0),
+            Some(&token),
+            Some(&serde_json::json!({ "role": "admin" }))
+        );
+        assert_eq!(changed.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&read_body(changed).await).unwrap();
+        assert_eq!(json["role"], "admin");
+
+        delete_rule(&pool, rule_id);
+        delete_user(&pool, admin.id);
+        delete_user(&pool, staff.id);
+    }
+
+    #[actix_web::test]
+    async fn deactivating_an_sso_managed_user_is_unaffected_by_the_lock() {
+        let Some(url) = database_url() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = test_pool(&url);
+        let app = test_app!(&url);
+
+        let admin = create_user(&pool, unique_email("users-sso-deactivate"), Role::Admin).await;
+        let managed = create_user(&pool, unique_email("users-sso-deactivate"), Role::Staff).await;
+        set_sso_managed(&pool, managed.id);
+        let rule_id = create_rule(&pool).await;
+        let token = issue_token(&pool, admin.id).await;
+
+        // The lock covers role changes only: deactivation still goes through.
+        let deactivated = request!(
+            &app,
+            Method::POST,
+            format!("/api/users/{}/deactivate", managed.id.0),
+            Some(&token),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(deactivated.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_slice(&read_body(deactivated).await).unwrap();
+        assert_eq!(json["active"], false);
+        // Flag set and a rule present: the response reports the lock on.
+        assert_eq!(json["role_managed_by_sso"], true);
+
+        let reactivated = request!(
+            &app,
+            Method::POST,
+            format!("/api/users/{}/reactivate", managed.id.0),
+            Some(&token),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(reactivated.status(), StatusCode::OK);
+
+        delete_rule(&pool, rule_id);
+        delete_user(&pool, admin.id);
+        delete_user(&pool, managed.id);
     }
 }
