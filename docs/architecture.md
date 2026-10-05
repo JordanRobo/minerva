@@ -72,6 +72,21 @@ the SHA-256 hash of the token, never the raw value. Sessions sit behind the
 `SessionRepository` port: Redis when a Redis URL is configured (`redis.url`,
 via `REDIS_URL` or `minerva.toml`), Postgres otherwise.
 
+Sessions use **sliding expiry**: `SessionService::resolve` — which every
+authenticated request runs through — slides a session's `expires_at` forward
+by a full TTL (`DEFAULT_SESSION_TTL`, 30 days) whenever at least
+`SESSION_TOUCH_INTERVAL` (5 minutes) has passed since the stored
+`last_seen_at`. The stored timestamp is the only throttle state, so the rule
+needs no in-memory bookkeeping and behaves identically across any number of
+API nodes. The touch is conditional on the session still being live — a
+revoked or expired one is a `NotFound`, never resurrected — and a failed
+touch is logged at warn without failing the request: the session simply
+keeps its current expiry. The `minerva_session` cookie carries a fixed, long
+`Max-Age` (365 days) rather than the session's issue-time expiry: with
+sliding expiry the server-side `expires_at` is the authority on validity,
+and a cookie that outlives its session is harmless — the token simply stops
+resolving.
+
 The redirect flow (`interface/src/redirect.rs`) is generic over providers:
 
 - `GET /api/auth/{provider}/login?next=` asks the provider for its

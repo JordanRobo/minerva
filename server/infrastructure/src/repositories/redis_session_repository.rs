@@ -237,6 +237,7 @@ impl SessionRepository for RedisSessionRepository {
         &self,
         id: SessionId,
         last_seen_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError> {
         let client = self.client.clone();
         run_on_redis(move || {
@@ -248,14 +249,29 @@ impl SessionRepository for RedisSessionRepository {
             };
             let key = session_key(&token_hash);
             // HSET on a missing key would resurrect the session without its
-            // TTL, so check existence first.
+            // TTL, so check existence first. (A revoked or expired session is
+            // gone by then: revocation deletes the key and expiry evicts it.)
             let exists: bool = conn.exists(&key).map_err(map_redis_error)?;
             if !exists {
                 return Err(RepositoryError::NotFound);
             }
+            // Both stored timestamps move... (one HSET per field, like `create`).
             let _: usize = conn
                 .hset(&key, "last_seen_at", ts_to_str(last_seen_at))
                 .map_err(map_redis_error)?;
+            let _: usize = conn
+                .hset(&key, "expires_at", ts_to_str(expires_at))
+                .map_err(map_redis_error)?;
+            // ...and so do the native TTLs: Redis evicts on the key's TTL,
+            // which must follow expires_at or the session dies at its old
+            // expiry. The id-mapping key carries the same TTL as its session.
+            let ttl = (expires_at - Utc::now()).num_seconds().max(1);
+            let _: bool = conn.expire(&key, ttl).map_err(map_redis_error)?;
+            let _: bool = conn
+                .expire(session_id_key(&id), ttl)
+                .map_err(map_redis_error)?;
+            // The per-user index set has no TTL (see `create`), so there is
+            // nothing to refresh there.
             Ok(())
         })
         .await

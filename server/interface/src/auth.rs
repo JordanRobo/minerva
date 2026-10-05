@@ -6,7 +6,7 @@
 //! cookie; the server stores only its SHA-256 hash, so a leaked database
 //! cannot be turned into live sessions.
 
-use actix_web::cookie::{Cookie, SameSite, time::OffsetDateTime};
+use actix_web::cookie::{Cookie, SameSite, time::Duration as CookieDuration};
 use actix_web::dev::Payload;
 use actix_web::{FromRequest, HttpRequest, HttpResponse, web};
 use application::auth::SessionService;
@@ -37,6 +37,14 @@ pub struct CookieSettings {
 
 /// Name of the session cookie.
 pub(crate) const COOKIE_NAME: &str = "minerva_session";
+
+/// How long the browser keeps the session cookie. Deliberately much longer
+/// than any server-side session can live: with sliding expiry (2.8) the
+/// server's `expires_at` is the authority on validity, so the browser must
+/// not be the one to drop the cookie at the original issue-time expiry. A
+/// cookie that outlives its session is harmless — the token simply resolves
+/// to nothing and the next request 401s.
+pub(crate) const SESSION_COOKIE_MAX_AGE: CookieDuration = CookieDuration::days(365);
 
 /// JSON shape of a user in auth responses. Deliberately omits
 /// `password_hash` — it is server-side only and must never cross the wire.
@@ -148,31 +156,21 @@ pub(crate) async fn issue_session(
     cookies: &CookieSettings,
 ) -> Result<Cookie<'static>, ApiError> {
     let issued = service.issue(user_id).await.map_err(repo_error_response)?;
-    Ok(session_cookie(
-        &issued.token,
-        issued.session.expires_at,
-        cookies,
-    ))
+    Ok(session_cookie(&issued.token, cookies))
 }
 
 /// Build the session cookie: HttpOnly so JavaScript cannot read it,
-/// SameSite=Lax as a CSRF baseline, scoped to the whole site, and expiring
-/// with the session. `Secure` comes from the configuration (server.cookie_secure)
-/// because local dev talks plain HTTP (bun run dev -> localhost API), where
-/// browsers would drop a Secure cookie; production must set it.
-fn session_cookie(
-    token: &str,
-    expires_at: DateTime<Utc>,
-    cookies: &CookieSettings,
-) -> Cookie<'static> {
+/// SameSite=Lax as a CSRF baseline, scoped to the whole site, and carrying a
+/// fixed long Max-Age (`SESSION_COOKIE_MAX_AGE`) — with sliding expiry the
+/// server-side `expires_at` decides validity, not the browser. `Secure` comes
+/// from the configuration (server.cookie_secure) because local dev talks
+/// plain HTTP (bun run dev -> localhost API), where browsers would drop a
+/// Secure cookie; production must set it.
+fn session_cookie(token: &str, cookies: &CookieSettings) -> Cookie<'static> {
     let mut cookie = Cookie::new(COOKIE_NAME, "");
     cookie.set_value(token.to_owned());
     apply_session_attributes(&mut cookie, cookies);
-    // Second precision is all a cookie expiry needs; the unix-timestamp
-    // constructor avoids time's chrono feature (not enabled in our tree).
-    cookie.set_expires(
-        OffsetDateTime::from_unix_timestamp(expires_at.timestamp()).expect("valid session expiry"),
-    );
+    cookie.set_max_age(SESSION_COOKIE_MAX_AGE);
     cookie
 }
 

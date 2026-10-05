@@ -10,6 +10,12 @@ use crate::error::map_diesel_error;
 use crate::repositories::mapping::{SessionRow, session_from_row};
 use crate::schema::sessions;
 
+// The database's own clock, so liveness is judged at write time, not with a
+// timestamp computed in the application a few milliseconds earlier.
+diesel::define_sql_function! {
+    fn now() -> diesel::sql_types::Timestamptz;
+}
+
 /// [`SessionRepository`] backed by Postgres through Diesel.
 pub struct PostgresSessionRepository {
     pool: PgPool,
@@ -100,11 +106,19 @@ impl SessionRepository for PostgresSessionRepository {
         &self,
         id: SessionId,
         last_seen_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError> {
         let pool = self.pool.clone();
         run_on_postgres(pool, move |conn| {
+            // One statement, conditional on the row still being live: a
+            // session revoked or expired in between the caller's check and
+            // this write must not be resurrected by its last in-flight touch.
             let updated = diesel::update(sessions::table.find(id.0))
-                .set(sessions::last_seen_at.eq(last_seen_at))
+                .filter(sessions::expires_at.gt(now()))
+                .set((
+                    sessions::last_seen_at.eq(last_seen_at),
+                    sessions::expires_at.eq(expires_at),
+                ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
             if updated == 0 {

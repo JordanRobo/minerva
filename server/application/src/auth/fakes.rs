@@ -77,11 +77,65 @@ impl SessionRepository for InMemorySessionRepository {
         &self,
         id: SessionId,
         last_seen_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
     ) -> Result<(), RepositoryError> {
-        if let Some(session) = self.locked().get_mut(&id) {
-            session.last_seen_at = last_seen_at;
+        // Mirror the real repositories: a session that is gone or already
+        // expired at `last_seen_at` (the caller's "now") is not touched.
+        match self.locked().get_mut(&id) {
+            Some(session) if !session.is_expired(last_seen_at) => {
+                session.last_seen_at = last_seen_at;
+                session.expires_at = expires_at;
+                Ok(())
+            }
+            _ => Err(RepositoryError::NotFound),
         }
-        Ok(())
+    }
+}
+
+/// An [`InMemorySessionRepository`] whose `touch_last_seen` always fails, so
+/// tests can prove a failed touch never fails the request.
+pub struct FailingTouchSessionRepository(Arc<InMemorySessionRepository>);
+
+impl FailingTouchSessionRepository {
+    pub fn new(inner: Arc<InMemorySessionRepository>) -> Self {
+        Self(inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionRepository for FailingTouchSessionRepository {
+    async fn create(&self, session: Session) -> Result<Session, RepositoryError> {
+        self.0.create(session).await
+    }
+
+    async fn find_by_token_hash(
+        &self,
+        token_hash: String,
+    ) -> Result<Option<Session>, RepositoryError> {
+        self.0.find_by_token_hash(token_hash).await
+    }
+
+    async fn list_for_user(&self, user_id: UserId) -> Result<Vec<Session>, RepositoryError> {
+        self.0.list_for_user(user_id).await
+    }
+
+    async fn delete(&self, id: SessionId) -> Result<(), RepositoryError> {
+        self.0.delete(id).await
+    }
+
+    async fn delete_all_for_user(&self, user_id: UserId) -> Result<(), RepositoryError> {
+        self.0.delete_all_for_user(user_id).await
+    }
+
+    async fn touch_last_seen(
+        &self,
+        _id: SessionId,
+        _last_seen_at: DateTime<Utc>,
+        _expires_at: DateTime<Utc>,
+    ) -> Result<(), RepositoryError> {
+        Err(RepositoryError::Unexpected(
+            "faking a touch failure".to_owned(),
+        ))
     }
 }
 

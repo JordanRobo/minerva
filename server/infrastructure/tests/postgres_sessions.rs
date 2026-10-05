@@ -109,7 +109,8 @@ async fn session_round_trip() {
     assert_eq!(listed, vec![session.clone()]);
 
     let touched_at = now();
-    repo.touch_last_seen(session.id, touched_at)
+    let new_expiry = touched_at + Duration::hours(2);
+    repo.touch_last_seen(session.id, touched_at, new_expiry)
         .await
         .expect("touch");
     let touched = repo
@@ -118,6 +119,7 @@ async fn session_round_trip() {
         .expect("find after touch")
         .expect("session should still exist");
     assert_eq!(touched.last_seen_at, touched_at);
+    assert_eq!(touched.expires_at, new_expiry);
 
     // A second session of the same user: delete removes only the first.
     let other = test_session(user.id, 3600);
@@ -129,6 +131,12 @@ async fn session_round_trip() {
             .expect("find deleted")
             .is_none()
     );
+    // A touch racing the revocation must not resurrect the row.
+    assert!(matches!(
+        repo.touch_last_seen(session.id, now(), now() + Duration::days(30))
+            .await,
+        Err(RepositoryError::NotFound)
+    ));
     assert_eq!(
         repo.list_for_user(user.id)
             .await
@@ -158,9 +166,36 @@ async fn delete_and_touch_missing_session_are_not_found() {
         Err(RepositoryError::NotFound)
     ));
     assert!(matches!(
-        repo.touch_last_seen(missing, now()).await,
+        repo.touch_last_seen(missing, now(), now() + Duration::days(30))
+            .await,
         Err(RepositoryError::NotFound)
     ));
+}
+
+#[tokio::test]
+async fn touch_expired_session_is_a_noop() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresSessionRepository::new(pool.clone());
+    let user = create_user(&pool).await;
+    // The row exists but is already past its expiry: the conditional update
+    // must not match it, so a late touch cannot slide an expired session.
+    let session = test_session(user.id, -3600);
+    repo.create(session.clone()).await.expect("create");
+
+    assert!(matches!(
+        repo.touch_last_seen(session.id, now(), now() + Duration::days(30))
+            .await,
+        Err(RepositoryError::NotFound)
+    ));
+    let stored = repo
+        .find_by_token_hash(session.token_hash.clone())
+        .await
+        .expect("find")
+        .expect("expired session still stored");
+    assert_eq!(stored.expires_at, session.expires_at);
+    assert_eq!(stored.last_seen_at, session.last_seen_at);
+
+    delete_user(&pool, user.id);
 }
 
 #[tokio::test]
