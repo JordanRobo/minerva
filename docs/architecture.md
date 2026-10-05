@@ -72,6 +72,18 @@ the SHA-256 hash of the token, never the raw value. Sessions sit behind the
 `SessionRepository` port: Redis when a Redis URL is configured (`redis.url`,
 via `REDIS_URL` or `minerva.toml`), Postgres otherwise.
 
+The password provider **equalises login timing**: every attempt runs exactly
+one Argon2id verification before any rejection is evaluated — against the
+account's stored hash when one exists, otherwise against a process-wide dummy
+hash that the adapter generates once with the same parameters as real hashes
+(`PasswordHasher::verify_dummy`) — and only afterwards are the deactivated and
+passwordless conditions checked. Unknown email, deactivated account,
+passwordless account and wrong password therefore all cost one verification
+and return the identical 401 body, so response time does not reveal which
+accounts exist. This is a side-channel mitigation only: it throttles nothing
+(login rate limiting is a separate 2.8 item) and covers the credential path —
+the SSO redirect flow has no submitted secret to verify.
+
 Sessions use **sliding expiry**: `SessionService::resolve` — which every
 authenticated request runs through — slides a session's `expires_at` forward
 by a full TTL (`DEFAULT_SESSION_TTL`, 30 days) whenever at least

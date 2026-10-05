@@ -613,6 +613,12 @@ mod tests {
                 "faking a hash failure".to_owned(),
             ))
         }
+
+        async fn verify_dummy(&self, _password: &str) -> Result<bool, PasswordHashError> {
+            Err(PasswordHashError::OperationFailed(
+                "faking a hash failure".to_owned(),
+            ))
+        }
     }
 
     fn user(email: &str, role: Role, password_hash: Option<&str>, deactivated: bool) -> User {

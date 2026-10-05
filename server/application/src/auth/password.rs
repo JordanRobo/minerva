@@ -16,7 +16,9 @@ pub const PASSWORD_PROVIDER_ID: &str = "password";
 /// unknown email, deactivated account, passwordless account, wrong password —
 /// is [`AuthError::InvalidCredentials`], so the answer never reveals which
 /// check failed; only repository or hasher failures surface as
-/// [`AuthError::Internal`].
+/// [`AuthError::Internal`]. Every attempt runs exactly one Argon2
+/// verification (real when the account has a stored hash, dummy otherwise),
+/// so response time reveals nothing either.
 pub struct PasswordAuthProvider {
     users: Arc<dyn UserRepository>,
     hasher: Arc<dyn PasswordHasher>,
@@ -45,6 +47,18 @@ impl CredentialProvider for PasswordAuthProvider {
             .users
             .find_by_email(normalize_email(&credentials.identifier))
             .await?;
+        // Exactly one verification per login — real when the account has a
+        // stored hash, dummy otherwise — so response time does not reveal
+        // whether the email exists or has a password. The deactivated and
+        // passwordless conditions are only evaluated after it.
+        let valid = match &user {
+            Some(user) => match user.password_hash.as_deref() {
+                Some(hash) => self.hasher.verify(&credentials.secret, hash).await,
+                None => self.hasher.verify_dummy(&credentials.secret).await,
+            },
+            None => self.hasher.verify_dummy(&credentials.secret).await,
+        }
+        .map_err(|error| AuthError::Internal(error.to_string()))?;
         // "No such user", "account has no password" and "wrong password" all
         // fall through to the same error: the answer must not reveal that a
         // passwordless account (one that can only sign in via an external
@@ -56,14 +70,9 @@ impl CredentialProvider for PasswordAuthProvider {
         if !user.is_active() {
             return Err(AuthError::InvalidCredentials);
         }
-        let Some(password_hash) = user.password_hash.clone() else {
+        if user.password_hash.is_none() {
             return Err(AuthError::InvalidCredentials);
-        };
-        let valid = self
-            .hasher
-            .verify(&credentials.secret, &password_hash)
-            .await
-            .map_err(|error| AuthError::Internal(error.to_string()))?;
+        }
         if !valid {
             return Err(AuthError::InvalidCredentials);
         }
@@ -73,8 +82,11 @@ impl CredentialProvider for PasswordAuthProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::auth::fakes::{FailingUserRepository, FakePasswordHasher, InMemoryUserRepository};
+    use crate::ports::PasswordHashError;
     use chrono::Utc;
     use domain::{Role, UserId};
 
@@ -112,6 +124,44 @@ mod tests {
         let user = user("user@example.com", Some("hash-of-s3cret"));
         users.create(user.clone()).await.unwrap();
         (provider(Arc::new(users)), user)
+    }
+
+    /// A [`PasswordHasher`] that counts every call and accepts a password
+    /// exactly when the stored hash is `"hash-of-{password}"`, like
+    /// `FakePasswordHasher`.
+    struct CountingHasher {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl PasswordHasher for CountingHasher {
+        async fn hash(&self, password: &str) -> Result<String, PasswordHashError> {
+            Ok(format!("hash-of-{password}"))
+        }
+
+        async fn verify(&self, password: &str, hash: &str) -> Result<bool, PasswordHashError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(hash == format!("hash-of-{password}"))
+        }
+
+        async fn verify_dummy(&self, _password: &str) -> Result<bool, PasswordHashError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        }
+    }
+
+    /// A provider over an in-memory user store whose hasher counts calls.
+    fn counting_provider(
+        users: Arc<InMemoryUserRepository>,
+    ) -> (PasswordAuthProvider, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = PasswordAuthProvider::new(
+            users,
+            Arc::new(CountingHasher {
+                calls: calls.clone(),
+            }),
+        );
+        (provider, calls)
     }
 
     #[tokio::test]
@@ -171,6 +221,73 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AuthError::InvalidCredentials));
+    }
+
+    // Timing equalisation: every rejection must cost exactly one hasher call
+    // (real verify or dummy) and return the same error value — the unit
+    // variant `InvalidCredentials` a wrong password produces.
+
+    #[tokio::test]
+    async fn wrong_password_costs_exactly_one_verify() {
+        let users = InMemoryUserRepository::new();
+        users
+            .create(user("user@example.com", Some("hash-of-s3cret")))
+            .await
+            .unwrap();
+        let (provider, calls) = counting_provider(Arc::new(users));
+        let err = provider
+            .authenticate(credentials("user@example.com", "nope"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_email_costs_exactly_one_dummy_verify() {
+        let users = InMemoryUserRepository::new();
+        users
+            .create(user("user@example.com", Some("hash-of-s3cret")))
+            .await
+            .unwrap();
+        let (provider, calls) = counting_provider(Arc::new(users));
+        let err = provider
+            .authenticate(credentials("ghost@example.com", "s3cret"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn passwordless_account_costs_exactly_one_dummy_verify() {
+        let users = InMemoryUserRepository::new();
+        users
+            .create(user("sso-only@example.com", None))
+            .await
+            .unwrap();
+        let (provider, calls) = counting_provider(Arc::new(users));
+        let err = provider
+            .authenticate(credentials("sso-only@example.com", "s3cret"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn deactivated_account_costs_exactly_one_verify() {
+        let users = InMemoryUserRepository::new();
+        let mut deactivated = user("off@example.com", Some("hash-of-s3cret"));
+        deactivated.deactivated_at = Some(Utc::now());
+        users.create(deactivated).await.unwrap();
+        let (provider, calls) = counting_provider(Arc::new(users));
+        let err = provider
+            .authenticate(credentials("off@example.com", "s3cret"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

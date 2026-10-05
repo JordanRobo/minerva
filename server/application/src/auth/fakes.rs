@@ -386,6 +386,10 @@ impl PasswordHasher for FakePasswordHasher {
     async fn verify(&self, password: &str, hash: &str) -> Result<bool, PasswordHashError> {
         Ok(hash == format!("hash-of-{password}"))
     }
+
+    async fn verify_dummy(&self, _password: &str) -> Result<bool, PasswordHashError> {
+        Ok(false)
+    }
 }
 
 /// A [`UserRepository`] whose operations always fail, for testing the error

@@ -17,6 +17,12 @@ use uuid::Uuid;
 /// self-sufficient against a fresh database.
 static MIGRATIONS_APPLIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
+/// `purge_expired` deletes expired rows table-wide, so while it runs no other
+/// test may rely on its own expired row still being present. The tests that
+/// create expired rows and the purge test serialize on this lock (a tokio
+/// mutex: a std one would be held across await points).
+static EXPIRED_ROW_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn pool() -> Option<PgPool> {
     let Some(url) = std::env::var("DATABASE_URL").ok() else {
         // In CI these tests must run: a green build that skipped them proves nothing.
@@ -175,6 +181,7 @@ async fn delete_and_touch_missing_session_are_not_found() {
 #[tokio::test]
 async fn touch_expired_session_is_a_noop() {
     let Some(pool) = pool() else { return };
+    let _guard = EXPIRED_ROW_LOCK.lock().await;
     let repo = PostgresSessionRepository::new(pool.clone());
     let user = create_user(&pool).await;
     // The row exists but is already past its expiry: the conditional update
@@ -214,6 +221,7 @@ async fn find_by_token_hash_unknown_hash_is_none() {
 #[tokio::test]
 async fn expired_session_is_still_returned() {
     let Some(pool) = pool() else { return };
+    let _guard = EXPIRED_ROW_LOCK.lock().await;
     let repo = PostgresSessionRepository::new(pool.clone());
     let user = create_user(&pool).await;
     // Negative TTL: the session is already past its expiry.
@@ -236,6 +244,7 @@ async fn expired_session_is_still_returned() {
 #[tokio::test]
 async fn purge_expired_removes_only_past_expiry() {
     let Some(pool) = pool() else { return };
+    let _guard = EXPIRED_ROW_LOCK.lock().await;
     let repo = PostgresSessionRepository::new(pool.clone());
     let user = create_user(&pool).await;
     let expired = test_session(user.id, -3600);
