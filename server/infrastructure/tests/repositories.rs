@@ -11,9 +11,9 @@ use application::ports::{
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use diesel::prelude::*;
 use domain::{
-    Goal, GoalId, GoalMilestone, GoalStatus, Milestone, MilestoneId, ProgressSnapshot,
-    ProgressTarget, Role, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationType,
-    TaskStatus, User, UserId, UserIdentity,
+    Goal, GoalId, GoalMilestone, Milestone, MilestoneId, ProgressSnapshot, ProgressTarget, Role,
+    Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationType, TaskStatus, User, UserId,
+    UserIdentity,
 };
 
 /// `Utc::now()` has nanosecond precision but Postgres `timestamptz` only
@@ -57,20 +57,14 @@ fn pool() -> Option<PgPool> {
     Some(pool)
 }
 
-fn test_status() -> GoalStatus {
-    GoalStatus {
-        status: Status::OnTrack,
-        source: StatusSource::Computed,
-    }
-}
-
 fn test_goal() -> Goal {
     let now = now();
     Goal {
         id: GoalId(Uuid::new_v4()),
         title: "Test goal".into(),
         description: None,
-        status: test_status(),
+        status: Status::OnTrack,
+        status_override: None,
         target_date: None,
         created_at: now,
         updated_at: now,
@@ -83,7 +77,8 @@ fn test_milestone() -> Milestone {
         id: MilestoneId(Uuid::new_v4()),
         title: "Test milestone".into(),
         description: None,
-        status: test_status(),
+        status: Status::OnTrack,
+        status_override: None,
         target_date: None,
         created_at: now,
         updated_at: now,
@@ -113,7 +108,8 @@ async fn goal_repository_round_trip() {
         id: GoalId(Uuid::new_v4()),
         title: "Test goal".into(),
         description: Some("round trip".into()),
-        status: test_status(),
+        status: Status::OnTrack,
+        status_override: None,
         target_date: None,
         created_at: now,
         updated_at: now,
@@ -132,7 +128,7 @@ async fn goal_repository_round_trip() {
 
     let mut updated = found;
     updated.title = "Updated title".into();
-    updated.status.source = StatusSource::ManualOverride;
+    updated.apply_computed_status(Status::AtRisk);
     repo.update(updated.clone()).await.unwrap();
     assert_eq!(repo.find_by_id(goal.id).await.unwrap().unwrap(), updated);
 
@@ -149,7 +145,8 @@ async fn milestone_repository_round_trip() {
         id: MilestoneId(Uuid::new_v4()),
         title: "Test milestone".into(),
         description: None,
-        status: test_status(),
+        status: Status::OnTrack,
+        status_override: None,
         target_date: None,
         created_at: now,
         updated_at: now,
@@ -182,6 +179,175 @@ async fn milestone_repository_round_trip() {
 
     repo.delete(milestone.id).await.unwrap();
     assert!(repo.find_by_id(milestone.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn goal_status_override_round_trip() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresGoalRepository::new(pool);
+    let now = now();
+    let goal = Goal {
+        id: GoalId(Uuid::new_v4()),
+        title: "Override goal".into(),
+        description: None,
+        status: Status::OnTrack,
+        status_override: None,
+        target_date: None,
+        created_at: now,
+        updated_at: now,
+    };
+    repo.create(goal.clone()).await.unwrap();
+
+    // Setting an override persists and reloads; the automatic status is untouched.
+    repo.set_status_override(goal.id, Some(Status::AtRisk))
+        .await
+        .unwrap();
+    let found = repo
+        .find_by_id(goal.id)
+        .await
+        .unwrap()
+        .expect("goal to exist");
+    assert_eq!(found.status_override, Some(Status::AtRisk));
+    assert_eq!(found.status, Status::OnTrack);
+    assert_eq!(found.effective_status(), Status::AtRisk);
+    assert_eq!(found.status_source(), StatusSource::ManualOverride);
+
+    // A normal update of other fields (including the automatic status) leaves
+    // the override intact.
+    let mut updated = found;
+    updated.title = "Updated title".into();
+    updated.apply_computed_status(Status::OffTrack);
+    repo.update(updated).await.unwrap();
+    let after_update = repo
+        .find_by_id(goal.id)
+        .await
+        .unwrap()
+        .expect("goal to exist");
+    assert_eq!(after_update.status_override, Some(Status::AtRisk));
+    assert_eq!(after_update.status, Status::OffTrack);
+    assert_eq!(after_update.effective_status(), Status::AtRisk);
+
+    // Clearing persists NULL and returns the goal to its automatic status.
+    repo.set_status_override(goal.id, None).await.unwrap();
+    let cleared = repo
+        .find_by_id(goal.id)
+        .await
+        .unwrap()
+        .expect("goal to exist");
+    assert_eq!(cleared.status_override, None);
+    assert_eq!(cleared.status, Status::OffTrack);
+    assert_eq!(cleared.effective_status(), Status::OffTrack);
+    assert_eq!(cleared.status_source(), StatusSource::Computed);
+
+    repo.delete(goal.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn milestone_status_override_round_trip() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool);
+    let now = now();
+    let milestone = Milestone {
+        id: MilestoneId(Uuid::new_v4()),
+        title: "Override milestone".into(),
+        description: None,
+        status: Status::OnTrack,
+        status_override: None,
+        target_date: None,
+        created_at: now,
+        updated_at: now,
+    };
+    repo.create(milestone.clone()).await.unwrap();
+
+    // Setting an override persists and reloads; the automatic status is untouched.
+    repo.set_status_override(milestone.id, Some(Status::AtRisk))
+        .await
+        .unwrap();
+    let found = repo
+        .find_by_id(milestone.id)
+        .await
+        .unwrap()
+        .expect("milestone to exist");
+    assert_eq!(found.status_override, Some(Status::AtRisk));
+    assert_eq!(found.status, Status::OnTrack);
+    assert_eq!(found.effective_status(), Status::AtRisk);
+    assert_eq!(found.status_source(), StatusSource::ManualOverride);
+
+    // A normal update of other fields (including the automatic status) leaves
+    // the override intact.
+    let mut updated = found;
+    updated.title = "Updated title".into();
+    updated.apply_computed_status(Status::OffTrack);
+    repo.update(updated).await.unwrap();
+    let after_update = repo
+        .find_by_id(milestone.id)
+        .await
+        .unwrap()
+        .expect("milestone to exist");
+    assert_eq!(after_update.status_override, Some(Status::AtRisk));
+    assert_eq!(after_update.status, Status::OffTrack);
+    assert_eq!(after_update.effective_status(), Status::AtRisk);
+
+    // Clearing persists NULL and returns the milestone to its automatic status.
+    repo.set_status_override(milestone.id, None).await.unwrap();
+    let cleared = repo
+        .find_by_id(milestone.id)
+        .await
+        .unwrap()
+        .expect("milestone to exist");
+    assert_eq!(cleared.status_override, None);
+    assert_eq!(cleared.status, Status::OffTrack);
+    assert_eq!(cleared.effective_status(), Status::OffTrack);
+    assert_eq!(cleared.status_source(), StatusSource::Computed);
+
+    repo.delete(milestone.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn status_override_check_rejects_unknown_values() {
+    let Some(pool) = pool() else { return };
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool.clone());
+    let goal = test_goal();
+    let milestone = test_milestone();
+    goals.create(goal.clone()).await.unwrap();
+    milestones.create(milestone.clone()).await.unwrap();
+
+    for (table, id) in [("goals", goal.id.0), ("milestones", milestone.id.0)] {
+        let mut conn = pool.get().expect("pool connection");
+        let err = diesel::sql_query(format!(
+            "UPDATE {table} SET status_override = 'not_a_status' WHERE id = '{id}'"
+        ))
+        .execute(&mut conn)
+        .expect_err("the CHECK constraint must reject an unknown status string");
+        assert!(
+            err.to_string().contains("check"),
+            "expected a check-constraint violation, got: {err}"
+        );
+    }
+
+    // The rejected writes left both rows without an override.
+    assert_eq!(
+        goals
+            .find_by_id(goal.id)
+            .await
+            .unwrap()
+            .expect("goal to exist")
+            .status_override,
+        None
+    );
+    assert_eq!(
+        milestones
+            .find_by_id(milestone.id)
+            .await
+            .unwrap()
+            .expect("milestone to exist")
+            .status_override,
+        None
+    );
+
+    goals.delete(goal.id).await.unwrap();
+    milestones.delete(milestone.id).await.unwrap();
 }
 
 #[tokio::test]

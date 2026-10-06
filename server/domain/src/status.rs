@@ -1,9 +1,10 @@
 //! Status types shared by goals and milestones.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The state of a goal or milestone with respect to its target date.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     /// Progress is moving along as planned.
     OnTrack,
@@ -15,37 +16,13 @@ pub enum Status {
     Complete,
 }
 
-/// Where a [`GoalStatus`] value came from.
+/// Where an effective status came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum StatusSource {
     /// The status was worked out by the system from the underlying data.
+    #[serde(rename = "automatic")]
     Computed,
     /// A person set the status by hand, overriding the system's view.
+    #[serde(rename = "manual")]
     ManualOverride,
-}
-
-/// A status together with where it came from, so callers can always tell a
-/// system-computed value apart from one that was overridden by hand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct GoalStatus {
-    pub status: Status,
-    pub source: StatusSource,
-}
-
-impl GoalStatus {
-    /// A status produced by the system's own computation.
-    pub fn computed(status: Status) -> Self {
-        Self {
-            status,
-            source: StatusSource::Computed,
-        }
-    }
-
-    /// A status set manually, overriding whatever the system computes.
-    pub fn manual_override(status: Status) -> Self {
-        Self {
-            status,
-            source: StatusSource::ManualOverride,
-        }
-    }
 }

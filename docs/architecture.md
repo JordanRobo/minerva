@@ -238,7 +238,7 @@ extractor and asking `authz` for its permission:
 | Extractor | Permission | Used by |
 |---|---|---|
 | `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes |
-| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes |
+| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent |
 | `AdminAccess` | `ManageUsers` | the `/api/users` routes, the invite and password-reset routes (`/api/invites`, `/api/users/{id}/password-reset`) and the temporary `/debug/*` routes (until 3.4/3.6 replace them) |
 
 A missing or invalid session is a 401; a valid session whose role lacks the
@@ -329,6 +329,36 @@ is locked against hand edits: `UserAdminService::change_role` answers 409
 (`role_managed_by_sso`) and every user response reports the flag's effective
 value (the flag AND any rule exists). Deleting the last rule frees such roles
 for hand edits again; the stored flag then simply stops being enforced.
+
+### Status overrides
+
+Goals and milestones each carry a **manual status override** on top of their
+automatic status (roadmap 3.2). Storage is a nullable `status_override` column
+on both tables (migration 20261006000002, same four-value CHECK as the
+`status` columns); the domain types expose it through `effective_status()` —
+the override when set, otherwise the automatic status — and
+`status_source()`, which is `ManualOverride` only while an override is active.
+
+Overrides are **sticky**: a normal update never writes the column (the
+repository's `update` omits it), and `apply_computed_status` — what 3.13's
+recomputation will call — updates only the automatic status, so a
+recomputation can neither change nor clear an override. The only write path is
+`set_status_override(id, Option<Status>)`, where `None` clears it.
+
+The endpoints are `PUT`/`DELETE /api/goals/{id}/status-override` and the
+milestone equivalent — Staff or Admin (`EditAccess`); both verbs answer 200
+with the updated entity, whose response reports the effective `status` plus a
+`status_source` of `"automatic"` or `"manual"`. The rules (an unknown id is a
+404; setting the value already set, or clearing when none is set, is an
+idempotent no-op) live in
+`application::status_override::StatusOverrideService`, not in the handlers.
+
+After every successful set or clear the service calls the
+`StatusSnapshotTrigger` port with a `StatusChangeTarget::{Goal, Milestone}`,
+so 3.14 can attach real progress snapshots without touching the endpoints. The
+hook is best-effort like email delivery: a failure logs a warning and the
+override still succeeds. `NoopStatusSnapshotTrigger` is the current
+implementation.
 
 ## API documentation
 

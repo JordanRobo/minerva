@@ -30,7 +30,7 @@ pub use progress::{ProgressError, ProgressSnapshot, ProgressSnapshotId, Progress
 pub use role::{DEFAULT_NEW_USER_ROLE, Permission, Role, SSO_FALLBACK_ROLE};
 pub use session::{Session, SessionId};
 pub use sso_group_rule::{SsoGroupRule, SsoGroupRuleId, resolve_role};
-pub use status::{GoalStatus, Status, StatusSource};
+pub use status::{Status, StatusSource};
 pub use task::{Task, TaskId, TaskStatus};
 pub use task_relation::{TaskRelation, TaskRelationId, TaskRelationType};
 pub use user::{User, UserId};

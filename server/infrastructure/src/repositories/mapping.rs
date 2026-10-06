@@ -1,10 +1,12 @@
 //! Conversions between domain types and their Postgres column values.
 //!
-//! Goals and milestones store their status as two separate TEXT columns
-//! (`status` and `status_source`); the domain combines them into a single
-//! [`GoalStatus`]. Tasks, task relations, and progress snapshots store
-//! their enums as plain TEXT columns. These functions are the one place
-//! that translation happens, so repository code never matches on raw
+//! Goals and milestones store their automatic status in a `status` column
+//! and an optional manual override in `status_override`; the legacy
+//! `status_source` column is kept for readers that query the database
+//! directly, so writes fill it with the source derived from the override,
+//! but reads ignore it. Tasks, task relations, and progress snapshots
+//! store their enums as plain TEXT columns. These functions are the one
+//! place that translation happens, so repository code never matches on raw
 //! strings itself.
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -12,14 +14,15 @@ use uuid::Uuid;
 
 use application::ports::RepositoryError;
 use domain::{
-    AccountToken, AccountTokenId, AccountTokenKind, Goal, GoalId, GoalStatus, Milestone,
-    MilestoneId, ProgressSnapshot, ProgressSnapshotId, ProgressTarget, Role, Session, SessionId,
-    SsoGroupRule, SsoGroupRuleId, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId,
+    AccountToken, AccountTokenId, AccountTokenKind, Goal, GoalId, Milestone, MilestoneId,
+    ProgressSnapshot, ProgressSnapshotId, ProgressTarget, Role, Session, SessionId, SsoGroupRule,
+    SsoGroupRuleId, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId,
     TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserIdentityId,
 };
 
 /// A row of the `goals` table: id, title, description, status,
-/// status_source, target_date, created_at, updated_at — in that order.
+/// status_source, target_date, created_at, updated_at, status_override — in
+/// that order. `status_override` is `None` while no manual override is set.
 pub type GoalRow = (
     Uuid,
     String,
@@ -29,6 +32,7 @@ pub type GoalRow = (
     Option<NaiveDate>,
     DateTime<Utc>,
     DateTime<Utc>,
+    Option<String>,
 );
 
 /// A row of the `milestones` table, which has the same columns as `goals`.
@@ -69,45 +73,52 @@ pub fn status_from_db(status: &str) -> Result<Status, RepositoryError> {
     }
 }
 
-/// Rebuild a [`GoalStatus`] from the two TEXT columns.
-pub fn goal_status_from_db(status: &str, source: &str) -> Result<GoalStatus, RepositoryError> {
-    let source = match source {
-        "computed" => StatusSource::Computed,
-        "manual_override" => StatusSource::ManualOverride,
-        other => {
-            return Err(RepositoryError::Unexpected(format!(
-                "unknown status_source value {other:?} in database"
-            )));
-        }
-    };
-    Ok(GoalStatus {
-        status: status_from_db(status)?,
-        source,
-    })
-}
-
-/// Build a [`Goal`] from a `goals` row.
+/// Build a [`Goal`] from a `goals` row. The legacy `status_source` column is
+/// ignored on read: the source is derived from the override.
 pub fn goal_from_row(row: GoalRow) -> Result<Goal, RepositoryError> {
-    let (id, title, description, status, status_source, target_date, created_at, updated_at) = row;
+    let (
+        id,
+        title,
+        description,
+        status,
+        _status_source,
+        target_date,
+        created_at,
+        updated_at,
+        status_override,
+    ) = row;
     Ok(Goal {
         id: GoalId(id),
         title,
         description,
-        status: goal_status_from_db(&status, &status_source)?,
+        status: status_from_db(&status)?,
+        status_override: status_override.as_deref().map(status_from_db).transpose()?,
         target_date,
         created_at,
         updated_at,
     })
 }
 
-/// Build a [`Milestone`] from a `milestones` row.
+/// Build a [`Milestone`] from a `milestones` row. The legacy `status_source`
+/// column is ignored on read: the source is derived from the override.
 pub fn milestone_from_row(row: MilestoneRow) -> Result<Milestone, RepositoryError> {
-    let (id, title, description, status, status_source, target_date, created_at, updated_at) = row;
+    let (
+        id,
+        title,
+        description,
+        status,
+        _status_source,
+        target_date,
+        created_at,
+        updated_at,
+        status_override,
+    ) = row;
     Ok(Milestone {
         id: MilestoneId(id),
         title,
         description,
-        status: goal_status_from_db(&status, &status_source)?,
+        status: status_from_db(&status)?,
+        status_override: status_override.as_deref().map(status_from_db).transpose()?,
         target_date,
         created_at,
         updated_at,

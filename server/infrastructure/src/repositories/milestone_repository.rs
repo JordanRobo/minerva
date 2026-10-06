@@ -2,7 +2,7 @@
 
 use application::ports::{MilestoneRepository, RepositoryError};
 use diesel::prelude::*;
-use domain::{Milestone, MilestoneId};
+use domain::{Milestone, MilestoneId, Status, StatusSource};
 
 use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
@@ -33,11 +33,12 @@ impl MilestoneRepository for PostgresMilestoneRepository {
                     milestones::id.eq(milestone.id.0),
                     milestones::title.eq(&milestone.title),
                     milestones::description.eq(milestone.description.as_deref()),
-                    milestones::status.eq(status_to_db(milestone.status.status)),
-                    milestones::status_source.eq(status_source_to_db(milestone.status.source)),
+                    milestones::status.eq(status_to_db(milestone.status)),
+                    milestones::status_source.eq(status_source_to_db(milestone.status_source())),
                     milestones::target_date.eq(milestone.target_date),
                     milestones::created_at.eq(&milestone.created_at),
                     milestones::updated_at.eq(&milestone.updated_at),
+                    milestones::status_override.eq(milestone.status_override.map(status_to_db)),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
@@ -75,19 +76,49 @@ impl MilestoneRepository for PostgresMilestoneRepository {
                 .set((
                     milestones::title.eq(&milestone.title),
                     milestones::description.eq(milestone.description.as_deref()),
-                    milestones::status.eq(status_to_db(milestone.status.status)),
-                    milestones::status_source.eq(status_source_to_db(milestone.status.source)),
+                    milestones::status.eq(status_to_db(milestone.status)),
+                    milestones::status_source.eq(status_source_to_db(milestone.status_source())),
                     milestones::target_date.eq(milestone.target_date),
                     milestones::updated_at.eq(&milestone.updated_at),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
             // A milestone that vanished between read and write is a conflict
-            // the caller needs to see, not a silent no-op.
+            // the caller needs to see, not a silent no-op. The override
+            // column is deliberately absent: an ordinary update must never
+            // clear or change it (roadmap 3.2).
             if updated == 0 {
                 return Err(RepositoryError::NotFound);
             }
             Ok(milestone)
+        })
+        .await
+    }
+
+    async fn set_status_override(
+        &self,
+        id: MilestoneId,
+        status_override: Option<Status>,
+    ) -> Result<(), RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            // The legacy `status_source` column mirrors the override so
+            // direct database readers see the same source the domain derives.
+            let source = match status_override {
+                Some(_) => StatusSource::ManualOverride,
+                None => StatusSource::Computed,
+            };
+            let updated = diesel::update(milestones::table.find(id.0))
+                .set((
+                    milestones::status_override.eq(status_override.map(status_to_db)),
+                    milestones::status_source.eq(status_source_to_db(source)),
+                ))
+                .execute(conn)
+                .map_err(map_diesel_error)?;
+            if updated == 0 {
+                return Err(RepositoryError::NotFound);
+            }
+            Ok(())
         })
         .await
     }

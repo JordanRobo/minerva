@@ -25,6 +25,9 @@ mod public_routes;
 #[cfg(test)]
 mod rate_limit_tests;
 
+#[cfg(test)]
+mod status_override_tests;
+
 use actix_web::cookie::Key;
 use actix_web::{App, HttpServer, web};
 use application::account_links::AccountLinkService;
@@ -35,12 +38,14 @@ use application::auth::provider::{AuthProviders, RedirectProvider};
 use application::bootstrap::{BootstrapAdmin, BootstrapOutcome, bootstrap_admin};
 use application::oidc_login::LoginPolicy;
 use application::ports::{
-    AccountEmailSender, AccountTokenRepository, OidcProvider, PasswordHasher, SessionRepository,
-    SessionTokens, UserIdentityRepository, UserRepository,
+    AccountEmailSender, AccountTokenRepository, NoopStatusSnapshotTrigger, OidcProvider,
+    PasswordHasher, SessionRepository, SessionTokens, StatusSnapshotTrigger,
+    UserIdentityRepository, UserRepository,
 };
 use application::rate_limit::{RateLimitService, RateLimiter};
 use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
+use application::status_override::StatusOverrideService;
 use application::user_admin::UserAdminService;
 use chrono::Utc;
 use infrastructure::Argon2PasswordHasher;
@@ -111,6 +116,21 @@ async fn main() -> std::io::Result<()> {
     let tasks = web::Data::new(PostgresTaskRepository::new(pool.clone()));
     let task_relations = web::Data::new(PostgresTaskRelationRepository::new(pool.clone()));
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
+    // Manual status overrides (roadmap 3.2): set/clear go through the service
+    // so the no-op and snapshot rules live in one place. Snapshots are not
+    // built yet (roadmap 3.14), so the trigger is the no-op; a real one swaps
+    // in here without touching the handlers. The service takes ports, so it
+    // gets its own repository instances over the shared pool (r2d2 handles).
+    // Built before the session match below, which moves the pool into the
+    // maintenance runner.
+    let status_snapshots: Arc<dyn StatusSnapshotTrigger> = Arc::new(NoopStatusSnapshotTrigger);
+    let status_snapshots_data: web::Data<dyn StatusSnapshotTrigger> =
+        status_snapshots.clone().into();
+    let status_override_service = web::Data::new(StatusOverrideService::new(
+        Arc::new(PostgresGoalRepository::new(pool.clone())),
+        Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+        status_snapshots,
+    ));
     // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
     // service so name validation and the duplicate-name conflict live in one
     // place (see application::sso_rules).
@@ -349,6 +369,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(rate_limit_service.clone())
             .app_data(rate_limit_config.clone())
             .app_data(user_admin.clone())
+            .app_data(status_override_service.clone())
+            .app_data(status_snapshots_data.clone())
             .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())
             .app_data(cookies.clone());

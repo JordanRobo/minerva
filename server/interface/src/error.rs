@@ -9,6 +9,7 @@
 use actix_web::{HttpResponse, ResponseError, http};
 use application::account_links::AccountLinkError;
 use application::ports::RepositoryError;
+use application::status_override::StatusOverrideError;
 use serde::Serialize;
 use std::time::Duration;
 use utoipa::ToSchema;
@@ -219,5 +220,15 @@ pub fn account_link_error_response(error: AccountLinkError) -> ApiError {
             ApiError::internal_error()
         }
         other => ApiError::conflict(other.to_string()),
+    }
+}
+
+/// Translate a [`StatusOverrideError`] into the [`ApiError`] it renders as:
+/// a missing goal or milestone -> 404, repository failures map like any
+/// other.
+pub fn status_override_error_response(error: StatusOverrideError) -> ApiError {
+    match error {
+        StatusOverrideError::NotFound => ApiError::not_found(),
+        StatusOverrideError::Repository(err) => repo_error_response(err),
     }
 }
