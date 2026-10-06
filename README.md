@@ -260,10 +260,13 @@ SSO sign-ins never touch roles.
 ### Rate limiting
 
 Login and token-link requests are rate-limited per client IP (logins also per
-IP-and-email pair) with fixed-window counters (roadmap 2.8). Counters live in
-Redis when `redis.url` is configured, in Postgres otherwise; subjects are
-hashed before they reach the store, and a failing counter store allows the
-request rather than taking login down.
+IP-and-email pair), and invite/password-reset issuance per acting admin, with
+fixed-window counters (roadmap 2.8). A limited request gets a 429 with a
+`Retry-After` header; the limits themselves are not configurable — they live
+with the code in `application::rate_limit`. Counters live in Redis when
+`redis.url` is configured, in Postgres otherwise; subjects are hashed before
+they reach the store, and a failing counter store allows the request rather
+than taking login down.
 
 - `rate_limit.enabled` — default `true`; set `false` to disable all limits
 - `rate_limit.client_ip_header` — default: none (the TCP peer address is

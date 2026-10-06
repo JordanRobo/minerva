@@ -10,9 +10,11 @@ use actix_web::cookie::{Cookie, SameSite, time::Duration as CookieDuration};
 use actix_web::dev::Payload;
 use actix_web::{FromRequest, HttpRequest, HttpResponse, web};
 use application::auth::SessionService;
+use application::auth::normalize_email;
 use application::auth::password::PASSWORD_PROVIDER_ID;
 use application::auth::provider::{AuthError, AuthProviders, Credentials, ProviderKind};
 use application::ports::UserRepository;
+use application::rate_limit::{LOGIN_IP, LOGIN_IP_EMAIL, RateLimitDecision, RateLimitService};
 use chrono::{DateTime, Utc};
 use domain::{Role, User, UserId};
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,8 @@ use std::pin::Pin;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::client_ip::client_ip;
+use crate::config::RateLimitConfig;
 use crate::error::{ApiError, repo_error_response};
 use crate::openapi::RoleDoc;
 
@@ -195,7 +199,7 @@ fn apply_session_attributes(cookie: &mut Cookie<'_>, cookies: &CookieSettings) {
 /// Log In
 ///
 /// Exchange credentials for a session cookie. Failures return one generic
-/// 401 whether the email is unknown or the password is wrong.
+/// 401 whether the email is unknown or the password is wrong. Rate limited per client IP and per IP-plus-email pair; a limited attempt gets a 429 with a Retry-After header before any credential check runs.
 #[utoipa::path(
     post,
     path = "/api/auth/login",
@@ -203,18 +207,37 @@ fn apply_session_attributes(cookie: &mut Cookie<'_>, cookies: &CookieSettings) {
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Credentials valid; session cookie set", body = UserResponse),
-        (status = 401, description = "Invalid credentials", body = ApiError)
+        (status = 401, description = "Invalid credentials", body = ApiError),
+        (status = 429, description = "Too many attempts from this client; wait the time in the Retry-After header before trying again", body = ApiError)
     )
 )]
 pub async fn login(
+    req: HttpRequest,
     providers: web::Data<AuthProviders>,
     session_service: web::Data<SessionService>,
     cookies: web::Data<CookieSettings>,
+    rate_limits: web::Data<RateLimitService>,
+    rate_limit_config: web::Data<RateLimitConfig>,
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, ApiError> {
+    let LoginRequest { email, password } = body.into_inner();
+    // The limiter is consulted before the credential check (roadmap 2.8): a
+    // limited client must not spend an Argon2 verification.
+    let ip = client_ip(&req, &rate_limit_config);
+    let now = Utc::now();
+    if let RateLimitDecision::Limited { retry_after } = rate_limits.hit(&LOGIN_IP, &ip, now).await {
+        return Err(ApiError::rate_limited(retry_after));
+    }
+    // The per-email bucket uses the same normalisation the provider applies,
+    // so case-variant spellings of one address share a counter.
+    let email_bucket = format!("{ip}|{}", normalize_email(&email));
+    if let RateLimitDecision::Limited { retry_after } =
+        rate_limits.hit(&LOGIN_IP_EMAIL, &email_bucket, now).await
+    {
+        return Err(ApiError::rate_limited(retry_after));
+    }
     // The handler only translates the request into provider terms; every
     // check happens in the registered provider.
-    let LoginRequest { email, password } = body.into_inner();
     let credentials = Credentials {
         identifier: email,
         secret: password,
@@ -420,6 +443,18 @@ mod tests {
                     )))
                     .app_data(providers)
                     .app_data(web::Data::new(CookieSettings { secure: false }))
+                    // Rate limiting is disabled in these tests (they assert
+                    // authentication, not throttling — the rate-limit tests
+                    // run it enabled with a small limit), but the handlers
+                    // extract the service, so it must be registered.
+                    .app_data(web::Data::new(RateLimitService::new(
+                        crate::rate_limit_tests::TestRateLimiter::new(&[]),
+                        false,
+                    )))
+                    .app_data(web::Data::new(RateLimitConfig {
+                        enabled: false,
+                        client_ip_header: String::new(),
+                    }))
                     .route("/api/auth/login", web::post().to(login))
                     .route("/api/auth/logout", web::post().to(logout))
                     .route("/api/auth/me", web::get().to(me)),

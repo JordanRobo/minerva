@@ -347,6 +347,7 @@ mod tests {
         PendingOidcLogin, RepositoryError, SessionRepository, SessionTokens,
         SsoGroupRuleRepository, UserIdentityRepository, UserRepository,
     };
+    use application::rate_limit::RateLimitService;
     use application::sso_roles::SsoRoleService;
     use domain::{
         AccountToken, AccountTokenId, AccountTokenKind, Role, SsoGroupRule, SsoGroupRuleId, User,
@@ -359,6 +360,8 @@ mod tests {
     use infrastructure::{Argon2PasswordHasher, NoEmailSender, Sha256SessionTokens};
     use std::sync::Arc;
     use uuid::Uuid;
+
+    use crate::config::RateLimitConfig;
 
     // ---- pure unit tests (no DB) ----
 
@@ -713,6 +716,16 @@ mod tests {
                 .app_data(web::Data::new(session_service))
                 .app_data(web::Data::new(account_link_service))
                 .app_data(providers)
+                // The accept-invite route needs the limiter; these tests run
+                // it disabled, like the other handler-test apps.
+                .app_data(web::Data::new(RateLimitService::new(
+                    crate::rate_limit_tests::TestRateLimiter::new(&[]),
+                    false,
+                )))
+                .app_data(web::Data::new(RateLimitConfig {
+                    enabled: false,
+                    client_ip_header: String::new(),
+                }))
                 .app_data(web::Data::new(auth::CookieSettings { secure: false }));
             let app = match flow {
                 Some(flow) => app.app_data(flow),

@@ -22,6 +22,7 @@ use application::ports::{
     GoalRepository, MilestoneRepository, PasswordHasher, SessionRepository, SessionTokens,
     SsoGroupRuleRepository, TaskRepository, UserRepository,
 };
+use application::rate_limit::RateLimitService;
 use application::sso_rules::SsoGroupRuleService;
 use application::user_admin::UserAdminService;
 use chrono::{Duration, Utc};
@@ -39,6 +40,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::{COOKIE_NAME, CookieSettings};
+use crate::config::RateLimitConfig;
 use crate::public_routes::PUBLIC_OPERATIONS;
 use crate::routes;
 
@@ -139,6 +141,18 @@ macro_rules! test_app {
                 )))
                 .app_data(providers)
                 .app_data(web::Data::new(CookieSettings { secure: false }))
+                // Rate limiting is disabled in these tests (they assert the
+                // access matrix, not throttling — the rate-limit tests run it
+                // enabled with a small limit), but the handlers extract the
+                // service, so it must be registered.
+                .app_data(web::Data::new(RateLimitService::new(
+                    crate::rate_limit_tests::TestRateLimiter::new(&[]),
+                    false,
+                )))
+                .app_data(web::Data::new(RateLimitConfig {
+                    enabled: false,
+                    client_ip_header: String::new(),
+                }))
                 .configure(routes::configure),
         )
         .await

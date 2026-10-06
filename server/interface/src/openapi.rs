@@ -197,6 +197,7 @@ mod tests {
     use utoipa::openapi::security::SecurityRequirement;
 
     use crate::public_routes::PUBLIC_OPERATIONS;
+    use crate::rate_limit_tests::RATE_LIMITED_OPERATIONS;
 
     /// The (method, operation) pairs a path item declares.
     fn operations(item: &PathItem) -> impl Iterator<Item = (Method, &Operation)> {
@@ -221,7 +222,12 @@ mod tests {
 
         // Every allowlisted operation exists in the document, so a renamed or
         // removed path cannot hide behind the allowlist.
-        for (method, path) in PUBLIC_OPERATIONS {
+        // Every allowlisted or rate-limited operation exists in the document,
+        // so a renamed or removed path cannot hide behind either list.
+        for (method, path) in PUBLIC_OPERATIONS
+            .iter()
+            .chain(RATE_LIMITED_OPERATIONS.iter())
+        {
             let item = doc
                 .paths
                 .paths
@@ -263,6 +269,16 @@ mod tests {
                         "{method} {path} must document a 403"
                     );
                 }
+                // Exactly the rate-limited operations document a 429: a new
+                // limiter check without a documented response (or a stale one)
+                // fails here.
+                let rate_limited = RATE_LIMITED_OPERATIONS
+                    .iter()
+                    .any(|(m, p)| *m == method && p == path);
+                assert!(
+                    operation.responses.responses.contains_key("429") == rate_limited,
+                    "{method} {path}: a 429 is documented exactly for the rate-limited operations"
+                );
             }
         }
     }

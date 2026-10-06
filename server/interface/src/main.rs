@@ -22,6 +22,9 @@ mod access_tests;
 #[cfg(test)]
 mod public_routes;
 
+#[cfg(test)]
+mod rate_limit_tests;
+
 use actix_web::cookie::Key;
 use actix_web::{App, HttpServer, web};
 use application::account_links::AccountLinkService;
@@ -195,12 +198,14 @@ async fn main() -> std::io::Result<()> {
         SessionService::DEFAULT_SESSION_TTL,
     ));
     // Rate limiting (roadmap 2.8): the service hashes subjects and fails open
-    // on store errors (see application::rate_limit). Step 5 of 2.8 attaches it
-    // to the login and token-link routes; until then it is only wired up.
+    // on store errors (see application::rate_limit). It guards the login,
+    // token-link and admin issue endpoints; the config registration carries
+    // the client-IP header setting the handlers resolve it with.
     let rate_limit_service = web::Data::new(RateLimitService::new(
         rate_limiter,
         config.rate_limit.enabled,
     ));
+    let rate_limit_config = web::Data::new(config.rate_limit.clone());
     // User administration goes through the service so the self-modification
     // and last-admin rules live in one place (see application::user_admin).
     let user_admin = web::Data::new(UserAdminService::new(
@@ -342,6 +347,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(sessions_data.clone())
             .app_data(session_service.clone())
             .app_data(rate_limit_service.clone())
+            .app_data(rate_limit_config.clone())
             .app_data(user_admin.clone())
             .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())

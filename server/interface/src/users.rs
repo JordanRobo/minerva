@@ -6,6 +6,7 @@
 
 use actix_web::{HttpResponse, web};
 use application::account_links::AccountLinkService;
+use application::rate_limit::{ADMIN_ISSUE_ACTOR, RateLimitDecision, RateLimitService};
 use application::user_admin::{UserAdminError, UserAdminService};
 use chrono::{DateTime, Utc};
 use domain::{Role, User, UserId};
@@ -231,7 +232,7 @@ pub struct PasswordResetCreatedResponse {
 
 /// Create a Password Reset Link
 ///
-/// Issue a one-time password-reset link for a user's account; any live link the user already has stops working. The link is returned only in this response (and emailed when delivery is configured). Refused for accounts that sign in through an external provider (no password to reset) and for deactivated accounts. Requires the Admin role.
+/// Issue a one-time password-reset link for a user's account; any live link the user already has stops working. The link is returned only in this response (and emailed when delivery is configured). Refused for accounts that sign in through an external provider (no password to reset) and for deactivated accounts. Requires the Admin role. Rate limited per acting admin.
 #[utoipa::path(
     post,
     path = "/api/users/{id}/password-reset",
@@ -243,14 +244,26 @@ pub struct PasswordResetCreatedResponse {
         (status = 401, description = "Missing or invalid session", body = ApiError),
         (status = 403, description = "Requires the Admin role", body = ApiError),
         (status = 404, description = "No user with this id", body = ApiError),
-        (status = 409, description = "The account has no password to reset (external provider only) or is deactivated", body = ApiError)
+        (status = 409, description = "The account has no password to reset (external provider only) or is deactivated", body = ApiError),
+        (status = 429, description = "Too many attempts from this admin; wait the time in the Retry-After header before trying again", body = ApiError)
     )
 )]
 pub async fn create_password_reset(
     links: web::Data<AccountLinkService>,
     access: AdminAccess,
+    rate_limits: web::Data<RateLimitService>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
+    if let RateLimitDecision::Limited { retry_after } = rate_limits
+        .hit(
+            &ADMIN_ISSUE_ACTOR,
+            &access.user.id.0.to_string(),
+            Utc::now(),
+        )
+        .await
+    {
+        return Err(ApiError::rate_limited(retry_after));
+    }
     match links
         .issue_password_reset(&access.user, UserId(*path))
         .await
@@ -293,6 +306,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::auth::{COOKIE_NAME, CookieSettings};
+    use crate::config::RateLimitConfig;
     use crate::routes;
 
     /// The `DATABASE_URL` the tests run against, or `None` to skip.
@@ -390,6 +404,18 @@ mod tests {
                     )))
                     .app_data(providers)
                     .app_data(web::Data::new(CookieSettings { secure: false }))
+                    // Rate limiting is disabled in these tests (they assert
+                    // user-admin behaviour, not throttling — the rate-limit
+                    // tests run it enabled with a small limit), but the
+                    // handlers extract the service, so it must be registered.
+                    .app_data(web::Data::new(RateLimitService::new(
+                        crate::rate_limit_tests::TestRateLimiter::new(&[]),
+                        false,
+                    )))
+                    .app_data(web::Data::new(RateLimitConfig {
+                        enabled: false,
+                        client_ip_header: String::new(),
+                    }))
                     .configure(routes::configure),
             )
             .await

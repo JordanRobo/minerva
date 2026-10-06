@@ -143,23 +143,42 @@ construction in `interface/src/main.rs`. Nothing else changes — routing,
 cookies, session issuance, and the `/api/auth/providers` listing all follow
 from the registry.
 
-**Rate limiting** (roadmap 2.8) caps login attempts per client IP and per
-IP-and-email pair, token-link uses per client IP, and invite/reset issuances
-per actor with fixed windows aligned to the epoch, so every node computes
-the same boundaries from its own clock. Counters sit behind the
-`RateLimiter` port (`application::rate_limit`) with the same storage
-selection as sessions: Redis when `redis.url` is configured (a hit is one
-atomic INCR+EXPIRE pipeline; native TTLs evict expired windows), Postgres
-otherwise (one row per key and window, incremented by a single atomic
-upsert). The service hashes subjects with SHA-256 before they reach the
-store — raw IPs and emails never touch it — and fails open: a store error
-is logged at warn and the request allowed, because rate limiting must never
-take login down. `rate_limit.client_ip_header` names the proxy header
-carrying the real client address (the first comma-separated value wins),
-falling back to the TCP peer address; with Postgres counters, the hourly
-maintenance runner purges windows older than the longest policy window. The
-limiter is wired at startup but not yet attached to routes — step 5 of 2.8
-does that.
+**Rate limiting** (roadmap 2.8) caps the endpoints that accept secrets or
+issue links, with fixed windows aligned to the epoch, so every node computes
+the same boundaries from its own clock:
+
+| Policy | Limit | Window | Bucket | Guards |
+|---|---|---|---|---|
+| `login_ip` | 30 | 15 min | client IP | `POST /api/auth/login` |
+| `login_ip_email` | 10 | 15 min | client IP + normalised email | `POST /api/auth/login` |
+| `token_link_ip` | 30 | 15 min | client IP | the three public token-link routes |
+| `admin_issue_actor` | 60 | 1 hour | acting user's id | the invite and password-reset issue endpoints |
+
+The handlers only build the subject string and call
+`RateLimitService::hit`; a limited request answers 429 with the standard
+error envelope plus a `Retry-After` header in whole seconds. The login checks
+run before any credential work, so a limited attempt never reaches Argon2;
+the admin checks run after the Admin extractor, so 401/403 still come first.
+Every other route — including the SSO redirect flow — is unlimited.
+
+Counters sit behind the `RateLimiter` port (`application::rate_limit`) with
+the same storage selection as sessions: Redis when `redis.url` is configured
+(a hit is one atomic INCR+EXPIRE pipeline; native TTLs evict expired
+windows), Postgres otherwise (one row per key and window, incremented by a
+single atomic upsert). The service hashes subjects with SHA-256 before they
+reach the store — raw IPs and emails never touch it — and fails open: a
+store error is logged at warn and the request allowed, because rate limiting
+must never take login down. `rate_limit.client_ip_header` names the proxy
+header carrying the real client address (the first comma-separated value
+wins), falling back to the TCP peer address; with Postgres counters, the
+hourly maintenance runner purges windows older than the longest policy
+window.
+
+What this does **not** cover: a distributed brute force against one account
+from many IPs stays under every per-IP bucket (the per-pair bucket slows it,
+but an attacker with enough IPs still gets 10 tries per 15 minutes per IP).
+Account lockout after repeated failures is deliberately out of scope — the
+per-IP caps plus Argon2's cost are the v1 answer.
 
 ### Invites and password reset
 
