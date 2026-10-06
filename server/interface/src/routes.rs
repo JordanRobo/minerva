@@ -11,7 +11,8 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::error::ApiError;
 use crate::openapi::ApiDoc;
 use crate::{
-    account_links, auth, debug, goals, invites, milestones, redirect, sso_rules, tasks, users,
+    account_links, auth, debug, goal_milestones, goals, invites, milestones, redirect, sso_rules,
+    tasks, users,
 };
 
 async fn health() -> HttpResponse {
@@ -60,6 +61,24 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/milestones/{id}/status-override",
                     web::delete().to(milestones::clear_milestone_status_override),
+                )
+                // Goal–milestone linkage (roadmap 3.4): one module owns both
+                // sides of the relation.
+                .route(
+                    "/goals/{goal_id}/milestones/{milestone_id}",
+                    web::put().to(goal_milestones::link_goal_milestone),
+                )
+                .route(
+                    "/goals/{goal_id}/milestones/{milestone_id}",
+                    web::delete().to(goal_milestones::unlink_goal_milestone),
+                )
+                .route(
+                    "/goals/{id}/milestones",
+                    web::get().to(goal_milestones::list_goal_milestones),
+                )
+                .route(
+                    "/milestones/{id}/goals",
+                    web::get().to(goal_milestones::list_milestone_goals),
                 )
                 .route("/tasks", web::post().to(tasks::create_task))
                 .route("/tasks", web::get().to(tasks::list_tasks))

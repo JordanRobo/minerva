@@ -18,6 +18,7 @@ use application::account_links::AccountLinkService;
 use application::auth::SessionService;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::AuthProviders;
+use application::goal_milestone_links::GoalMilestoneLinkService;
 use application::ports::{
     GoalRepository, MilestoneRepository, NoopStatusSnapshotTrigger, PasswordHasher,
     SessionRepository, SessionTokens, SsoGroupRuleRepository, TaskRepository, UserRepository,
@@ -144,6 +145,11 @@ macro_rules! test_app {
                     Arc::new(PostgresGoalRepository::new(pool.clone())),
                     Arc::new(PostgresMilestoneRepository::new(pool.clone())),
                     Arc::new(NoopStatusSnapshotTrigger),
+                )))
+                .app_data(web::Data::new(GoalMilestoneLinkService::new(
+                    Arc::new(PostgresGoalRepository::new(pool.clone())),
+                    Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+                    Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
                 )))
                 .app_data(providers)
                 .app_data(web::Data::new(CookieSettings { secure: false }))
@@ -328,6 +334,25 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Permission::EditContent,
             None,
         ),
+        // The goal–milestone linkage routes (roadmap 3.4).
+        (
+            Method::GET,
+            format!("/api/goals/{goal}/milestones"),
+            Permission::ViewContent,
+            None,
+        ),
+        (
+            Method::PUT,
+            format!("/api/goals/{goal}/milestones/{milestone}"),
+            Permission::EditContent,
+            None,
+        ),
+        (
+            Method::DELETE,
+            format!("/api/goals/{goal}/milestones/{milestone}"),
+            Permission::EditContent,
+            None,
+        ),
         (
             Method::GET,
             "/api/milestones".into(),
@@ -368,6 +393,12 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Method::DELETE,
             format!("/api/milestones/{milestone}/status-override"),
             Permission::EditContent,
+            None,
+        ),
+        (
+            Method::GET,
+            format!("/api/milestones/{milestone}/goals"),
+            Permission::ViewContent,
             None,
         ),
         // `GET /api/tasks` 400s without a filter, before any auth answer.

@@ -1,6 +1,6 @@
 //! OpenAPI document for the Minerva API, assembled from the
-//! `#[utoipa::path]` annotations on the handlers in `auth`, `goals`,
-//! `milestones`, `redirect`, `sso_rules`, `tasks`, and `users`. Served as JSON at `/api-docs/openapi.json` and
+//! `#[utoipa::path]` annotations on the handlers in `auth`, `goal_milestones`,
+//! `goals`, `milestones`, `redirect`, `sso_rules`, `tasks`, and `users`. Served as JSON at `/api-docs/openapi.json` and
 //! rendered by Swagger UI at `/api-docs/swagger-ui/` (wired up in `main.rs`).
 //!
 //! The `*Doc` schema types mirror the wire shape of domain status types:
@@ -101,6 +101,7 @@ pub enum StatusSourceDoc {
     modifiers(&SessionCookieSecurity),
     tags(
         (name = "auth", description = "Authentication: login, logout, the current user, and account links (invites, password resets)."),
+        (name = "goal-milestone-links", description = "Goal–milestone links: relate a milestone to a goal and list each side of the relation. Linking and unlinking are safe to repeat."),
         (name = "goals", description = "Goals: the top-level outcomes a school works toward."),
         (name = "invites", description = "Invites: one-time links that create new accounts. Admin only."),
         (name = "milestones", description = "Milestones: dated checkpoints within a goal."),
@@ -132,6 +133,10 @@ pub enum StatusSourceDoc {
         crate::milestones::delete_milestone,
         crate::milestones::set_milestone_status_override,
         crate::milestones::clear_milestone_status_override,
+        crate::goal_milestones::link_goal_milestone,
+        crate::goal_milestones::unlink_goal_milestone,
+        crate::goal_milestones::list_goal_milestones,
+        crate::goal_milestones::list_milestone_goals,
         crate::sso_rules::list_group_rules,
         crate::sso_rules::create_group_rule,
         crate::sso_rules::update_group_rule,

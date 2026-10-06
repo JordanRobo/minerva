@@ -5,6 +5,7 @@ mod client_ip;
 mod config;
 mod debug;
 mod error;
+mod goal_milestones;
 mod goals;
 mod invites;
 mod maintenance;
@@ -18,6 +19,9 @@ mod users;
 
 #[cfg(test)]
 mod access_tests;
+
+#[cfg(test)]
+mod goal_milestone_tests;
 
 #[cfg(test)]
 mod public_routes;
