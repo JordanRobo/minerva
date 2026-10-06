@@ -71,8 +71,9 @@ pub enum LinkPurposeDoc {
     PasswordReset,
 }
 
-/// Wire shape of [`domain::Status`].
+/// Wire shape of [`domain::Status`]: a snake_case string.
 #[derive(ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum StatusDoc {
     OnTrack,
     AtRisk,
@@ -80,18 +81,13 @@ pub enum StatusDoc {
     Complete,
 }
 
-/// Wire shape of [`domain::StatusSource`].
+/// Wire shape of [`domain::StatusSource`]: `"automatic"` or `"manual"`.
 #[derive(ToSchema)]
 pub enum StatusSourceDoc {
+    #[serde(rename = "automatic")]
     Computed,
+    #[serde(rename = "manual")]
     ManualOverride,
-}
-
-/// Wire shape of [`domain::GoalStatus`]: a status together with where it came from.
-#[derive(ToSchema)]
-pub struct GoalStatusDoc {
-    pub status: StatusDoc,
-    pub source: StatusSourceDoc,
 }
 
 /// The OpenAPI 3 document for the Minerva API.
@@ -127,11 +123,15 @@ pub struct GoalStatusDoc {
         crate::goals::get_goal,
         crate::goals::update_goal,
         crate::goals::delete_goal,
+        crate::goals::set_goal_status_override,
+        crate::goals::clear_goal_status_override,
         crate::milestones::create_milestone,
         crate::milestones::list_milestones,
         crate::milestones::get_milestone,
         crate::milestones::update_milestone,
         crate::milestones::delete_milestone,
+        crate::milestones::set_milestone_status_override,
+        crate::milestones::clear_milestone_status_override,
         crate::sso_rules::list_group_rules,
         crate::sso_rules::create_group_rule,
         crate::sso_rules::update_group_rule,
@@ -161,6 +161,7 @@ pub struct GoalStatusDoc {
         crate::redirect::RedirectLoginQuery,
         crate::goals::GoalRequest,
         crate::goals::GoalResponse,
+        crate::goals::StatusOverrideRequest,
         crate::milestones::MilestoneRequest,
         crate::milestones::MilestoneResponse,
         crate::tasks::TaskListQuery,
@@ -178,7 +179,6 @@ pub struct GoalStatusDoc {
         crate::account_links::LinkInfoResponse,
         crate::account_links::AcceptInviteRequest,
         crate::account_links::ResetPasswordRequest,
-        GoalStatusDoc,
         InviteStatusDoc,
         LinkPurposeDoc,
         RoleDoc,

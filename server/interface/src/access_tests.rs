@@ -19,11 +19,12 @@ use application::auth::SessionService;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::AuthProviders;
 use application::ports::{
-    GoalRepository, MilestoneRepository, PasswordHasher, SessionRepository, SessionTokens,
-    SsoGroupRuleRepository, TaskRepository, UserRepository,
+    GoalRepository, MilestoneRepository, NoopStatusSnapshotTrigger, PasswordHasher,
+    SessionRepository, SessionTokens, SsoGroupRuleRepository, TaskRepository, UserRepository,
 };
 use application::rate_limit::RateLimitService;
 use application::sso_rules::SsoGroupRuleService;
+use application::status_override::StatusOverrideService;
 use application::user_admin::UserAdminService;
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
@@ -138,6 +139,11 @@ macro_rules! test_app {
                     users,
                     Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone())),
                     session_service,
+                )))
+                .app_data(web::Data::new(StatusOverrideService::new(
+                    Arc::new(PostgresGoalRepository::new(pool.clone())),
+                    Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+                    Arc::new(NoopStatusSnapshotTrigger),
                 )))
                 .app_data(providers)
                 .app_data(web::Data::new(CookieSettings { secure: false }))
@@ -311,6 +317,18 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             None,
         ),
         (
+            Method::PUT,
+            format!("/api/goals/{goal}/status-override"),
+            Permission::EditContent,
+            Some(serde_json::json!({ "status": "on_track" })),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/goals/{goal}/status-override"),
+            Permission::EditContent,
+            None,
+        ),
+        (
             Method::GET,
             "/api/milestones".into(),
             Permission::ViewContent,
@@ -337,6 +355,18 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
         (
             Method::DELETE,
             format!("/api/milestones/{milestone}"),
+            Permission::EditContent,
+            None,
+        ),
+        (
+            Method::PUT,
+            format!("/api/milestones/{milestone}/status-override"),
+            Permission::EditContent,
+            Some(serde_json::json!({ "status": "on_track" })),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/milestones/{milestone}/status-override"),
             Permission::EditContent,
             None,
         ),

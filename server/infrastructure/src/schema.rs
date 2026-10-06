@@ -33,6 +33,7 @@ diesel::table! {
         target_date -> Nullable<Date>,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
+        status_override -> Nullable<Text>,
     }
 }
 
@@ -46,6 +47,7 @@ diesel::table! {
         target_date -> Nullable<Date>,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
+        status_override -> Nullable<Text>,
     }
 }
 

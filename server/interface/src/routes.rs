@@ -34,6 +34,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/goals/{id}", web::get().to(goals::get_goal))
                 .route("/goals/{id}", web::put().to(goals::update_goal))
                 .route("/goals/{id}", web::delete().to(goals::delete_goal))
+                .route(
+                    "/goals/{id}/status-override",
+                    web::put().to(goals::set_goal_status_override),
+                )
+                .route(
+                    "/goals/{id}/status-override",
+                    web::delete().to(goals::clear_goal_status_override),
+                )
                 .route("/milestones", web::post().to(milestones::create_milestone))
                 .route("/milestones", web::get().to(milestones::list_milestones))
                 .route("/milestones/{id}", web::get().to(milestones::get_milestone))
@@ -44,6 +52,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/milestones/{id}",
                     web::delete().to(milestones::delete_milestone),
+                )
+                .route(
+                    "/milestones/{id}/status-override",
+                    web::put().to(milestones::set_milestone_status_override),
+                )
+                .route(
+                    "/milestones/{id}/status-override",
+                    web::delete().to(milestones::clear_milestone_status_override),
                 )
                 .route("/tasks", web::post().to(tasks::create_task))
                 .route("/tasks", web::get().to(tasks::list_tasks))

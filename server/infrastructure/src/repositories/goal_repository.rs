@@ -2,7 +2,7 @@
 
 use application::ports::{GoalRepository, RepositoryError};
 use diesel::prelude::*;
-use domain::{Goal, GoalId};
+use domain::{Goal, GoalId, Status, StatusSource};
 
 use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
@@ -31,11 +31,12 @@ impl GoalRepository for PostgresGoalRepository {
                     goals::id.eq(goal.id.0),
                     goals::title.eq(&goal.title),
                     goals::description.eq(goal.description.as_deref()),
-                    goals::status.eq(status_to_db(goal.status.status)),
-                    goals::status_source.eq(status_source_to_db(goal.status.source)),
+                    goals::status.eq(status_to_db(goal.status)),
+                    goals::status_source.eq(status_source_to_db(goal.status_source())),
                     goals::target_date.eq(goal.target_date),
                     goals::created_at.eq(&goal.created_at),
                     goals::updated_at.eq(&goal.updated_at),
+                    goals::status_override.eq(goal.status_override.map(status_to_db)),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
@@ -73,19 +74,49 @@ impl GoalRepository for PostgresGoalRepository {
                 .set((
                     goals::title.eq(&goal.title),
                     goals::description.eq(goal.description.as_deref()),
-                    goals::status.eq(status_to_db(goal.status.status)),
-                    goals::status_source.eq(status_source_to_db(goal.status.source)),
+                    goals::status.eq(status_to_db(goal.status)),
+                    goals::status_source.eq(status_source_to_db(goal.status_source())),
                     goals::target_date.eq(goal.target_date),
                     goals::updated_at.eq(&goal.updated_at),
                 ))
                 .execute(conn)
                 .map_err(map_diesel_error)?;
             // A goal that vanished between read and write is a conflict the
-            // caller needs to see, not a silent no-op.
+            // caller needs to see, not a silent no-op. The override column is
+            // deliberately absent: an ordinary update must never clear or
+            // change it (roadmap 3.2).
             if updated == 0 {
                 return Err(RepositoryError::NotFound);
             }
             Ok(goal)
+        })
+        .await
+    }
+
+    async fn set_status_override(
+        &self,
+        id: GoalId,
+        status_override: Option<Status>,
+    ) -> Result<(), RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            // The legacy `status_source` column mirrors the override so
+            // direct database readers see the same source the domain derives.
+            let source = match status_override {
+                Some(_) => StatusSource::ManualOverride,
+                None => StatusSource::Computed,
+            };
+            let updated = diesel::update(goals::table.find(id.0))
+                .set((
+                    goals::status_override.eq(status_override.map(status_to_db)),
+                    goals::status_source.eq(status_source_to_db(source)),
+                ))
+                .execute(conn)
+                .map_err(map_diesel_error)?;
+            if updated == 0 {
+                return Err(RepositoryError::NotFound);
+            }
+            Ok(())
         })
         .await
     }

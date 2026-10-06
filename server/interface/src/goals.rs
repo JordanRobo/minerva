@@ -6,16 +6,17 @@
 
 use actix_web::{HttpResponse, web};
 use application::ports::GoalRepository;
+use application::status_override::StatusOverrideService;
 use chrono::{DateTime, NaiveDate, Utc};
-use domain::{Goal, GoalId, GoalStatus, Status};
+use domain::{Goal, GoalId, Status, StatusSource};
 use infrastructure::repositories::PostgresGoalRepository;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::access::{EditAccess, ViewAccess};
-use crate::error::{ApiError, repo_error_response};
-use crate::openapi::GoalStatusDoc;
+use crate::error::{ApiError, repo_error_response, status_override_error_response};
+use crate::openapi::{StatusDoc, StatusSourceDoc};
 
 /// JSON shape of a goal in responses.
 #[derive(Serialize, ToSchema)]
@@ -23,8 +24,14 @@ pub struct GoalResponse {
     pub id: Uuid,
     pub title: String,
     pub description: Option<String>,
-    #[schema(value_type = GoalStatusDoc)]
-    pub status: GoalStatus,
+    /// The status as it stands now: the manual setting if one is active,
+    /// otherwise the automatic value worked out from the milestones.
+    #[schema(value_type = StatusDoc)]
+    pub status: Status,
+    /// Whether [`GoalResponse::status`] was set by hand ("manual") or worked
+    /// out by the system ("automatic").
+    #[schema(value_type = StatusSourceDoc)]
+    pub status_source: StatusSource,
     pub target_date: Option<NaiveDate>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -32,11 +39,14 @@ pub struct GoalResponse {
 
 impl From<&Goal> for GoalResponse {
     fn from(goal: &Goal) -> Self {
+        // The wire shape reports the effective status and where it came
+        // from; the raw automatic value and override are domain-side.
         Self {
             id: goal.id.0,
             title: goal.title.clone(),
             description: goal.description.clone(),
-            status: goal.status,
+            status: goal.effective_status(),
+            status_source: goal.status_source(),
             target_date: goal.target_date,
             created_at: goal.created_at,
             updated_at: goal.updated_at,
@@ -53,6 +63,16 @@ pub struct GoalRequest {
     pub description: Option<String>,
     #[serde(default)]
     pub target_date: Option<NaiveDate>,
+}
+
+/// Body for `PUT /api/goals/{id}/status-override` and
+/// `PUT /api/milestones/{id}/status-override`: the status to set by hand. An
+/// unknown status string is a 400, rejected by JSON parsing before the
+/// handler runs.
+#[derive(Deserialize, ToSchema)]
+pub struct StatusOverrideRequest {
+    #[schema(value_type = StatusDoc)]
+    pub status: Status,
 }
 
 /// Create Goal
@@ -86,7 +106,8 @@ pub async fn create_goal(
         title: body.title.clone(),
         description: body.description.clone(),
         // A new goal has no milestones yet, so the rollup rule reports OnTrack.
-        status: GoalStatus::computed(Status::OnTrack),
+        status: Status::OnTrack,
+        status_override: None,
         target_date: body.target_date,
         created_at: now,
         updated_at: now,
@@ -224,5 +245,69 @@ pub async fn delete_goal(
     match goals.delete(GoalId(*path)).await {
         Ok(()) => Ok(HttpResponse::NoContent().finish()),
         Err(err) => Err(repo_error_response(err)),
+    }
+}
+
+/// Set Goal Status Override
+///
+/// Manually set a goal's status. The manual setting is sticky: it holds until
+/// cleared, even if the goal's milestones change in the meantime.
+/// Requires the Staff or Admin role.
+#[utoipa::path(
+    put,
+    path = "/api/goals/{id}/status-override",
+    tags = ["goals"],
+    security(("session_cookie" = [])),
+    params(("id" = Uuid, Path, description = "Goal identifier")),
+    request_body = StatusOverrideRequest,
+    responses(
+        (status = 200, description = "The goal with its new status", body = GoalResponse),
+        (status = 400, description = "Unknown status value", body = ApiError),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
+        (status = 404, description = "No goal with this id", body = ApiError)
+    )
+)]
+pub async fn set_goal_status_override(
+    overrides: web::Data<StatusOverrideService>,
+    _access: EditAccess,
+    path: web::Path<Uuid>,
+    body: web::Json<StatusOverrideRequest>,
+) -> Result<HttpResponse, ApiError> {
+    match overrides
+        .set_goal_override(GoalId(*path), body.status)
+        .await
+    {
+        Ok(goal) => Ok(HttpResponse::Ok().json(GoalResponse::from(&goal))),
+        Err(err) => Err(status_override_error_response(err)),
+    }
+}
+
+/// Clear Goal Status Override
+///
+/// Remove a goal's manual status setting so it returns to automatic — the
+/// status worked out from its milestones.
+/// Requires the Staff or Admin role.
+#[utoipa::path(
+    delete,
+    path = "/api/goals/{id}/status-override",
+    tags = ["goals"],
+    security(("session_cookie" = [])),
+    params(("id" = Uuid, Path, description = "Goal identifier")),
+    responses(
+        (status = 200, description = "The goal with its automatic status", body = GoalResponse),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
+        (status = 404, description = "No goal with this id", body = ApiError)
+    )
+)]
+pub async fn clear_goal_status_override(
+    overrides: web::Data<StatusOverrideService>,
+    _access: EditAccess,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    match overrides.clear_goal_override(GoalId(*path)).await {
+        Ok(goal) => Ok(HttpResponse::Ok().json(GoalResponse::from(&goal))),
+        Err(err) => Err(status_override_error_response(err)),
     }
 }
