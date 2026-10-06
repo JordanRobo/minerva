@@ -4,8 +4,8 @@
 //! yields an empty array, which is itself a useful "it works" signal.
 //!
 //! These are not meant to ship: they stay locked down to Admin (roadmap
-//! 2.4) until roadmap 3.4/3.6 provide real endpoints for the same data, and
-//! their removal is roadmap 8.5.
+//! 2.4) until their roadmap items provide real endpoints for the same data,
+//! and their removal is roadmap 8.5.
 
 use actix_web::{HttpResponse, web};
 use application::ports::{

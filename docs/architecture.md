@@ -237,9 +237,9 @@ extractor and asking `authz` for its permission:
 
 | Extractor | Permission | Used by |
 |---|---|---|
-| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes |
-| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent |
-| `AdminAccess` | `ManageUsers` | the `/api/users` routes, the invite and password-reset routes (`/api/invites`, `/api/users/{id}/password-reset`) and the temporary `/debug/*` routes (until 3.4/3.6 replace them) |
+| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones` and `GET /api/milestones/{id}/goals` |
+| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}` |
+| `AdminAccess` | `ManageUsers` | the `/api/users` routes, the invite and password-reset routes (`/api/invites`, `/api/users/{id}/password-reset`) and the temporary `/debug/*` routes (until their roadmap items replace them) |
 
 A missing or invalid session is a 401; a valid session whose role lacks the
 permission is a 403 with the standard error envelope (`forbidden`). Handlers
@@ -360,6 +360,35 @@ hook is best-effort like email delivery: a failure logs a warning and the
 override still succeeds. `NoopStatusSnapshotTrigger` is the current
 implementation.
 
+### Goal↔milestone links
+
+Goals and milestones are related through the `goal_milestones` table (roadmap
+3.4) — a plain many-to-many: a goal may link to many milestones and a
+milestone to many goals, and deleting either end removes its links (the
+foreign keys cascade). The endpoints needed no new migration; the table has
+existed since M1 with its pair primary key.
+
+The rules live in `application::goal_milestone_links::GoalMilestoneLinkService`,
+not in the handlers:
+
+- Linking and unlinking are **idempotent** — linking an already-linked pair or
+  unlinking an unlinked one is a no-op (the insert is `ON CONFLICT DO NOTHING`,
+  so racing duplicates cannot error) — and both still answer 204.
+- Both ids must exist before either verb acts: the goal is checked first, then
+  the milestone; an unknown id is a typed `GoalNotFound`/`MilestoneNotFound`.
+- The listings return full goals/milestones in a deterministic order: target
+  date (nulls last), then creation time, then id.
+
+The routes are `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}` —
+Staff or Admin (`EditAccess`), both answering 204 with no body — and
+`GET /api/goals/{id}/milestones` plus `GET /api/milestones/{id}/goals`, open to
+any signed-in role (`ViewAccess`), answering 200 with plain arrays of the
+standard goal/milestone responses (effective `status` plus `status_source`
+included). Unknown ids are 404s with distinct `goal_not_found`/
+`milestone_not_found` codes, so a client can tell which of the two ids it sent
+was missing. Linking does not fire the snapshot hook: status computation is
+3.13's and snapshots 3.14's (D5).
+
 ## API documentation
 
 The `interface` crate generates an OpenAPI 3 document from code annotations
@@ -370,7 +399,8 @@ The `interface` crate generates an OpenAPI 3 document from code annotations
 
 Under Docker compose the API is mapped to host port 3010, so use
 http://localhost:3010/api-docs/swagger-ui/ there. All `/api/*` endpoints
-(auth, goals, milestones, tasks, users) are documented; the temporary
+(auth, goals, goal–milestone links, milestones, tasks, users, invites and SSO
+group rules) are documented; the temporary
 `/debug/*` routes are not. Protected endpoints declare the `session_cookie` security
 scheme (the session cookie as an API key, registered by a `utoipa::Modify`
 addon in `interface/src/openapi.rs`) so Swagger UI's Authorize button can
