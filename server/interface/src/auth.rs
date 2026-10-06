@@ -6,13 +6,15 @@
 //! cookie; the server stores only its SHA-256 hash, so a leaked database
 //! cannot be turned into live sessions.
 
-use actix_web::cookie::{Cookie, SameSite, time::OffsetDateTime};
+use actix_web::cookie::{Cookie, SameSite, time::Duration as CookieDuration};
 use actix_web::dev::Payload;
 use actix_web::{FromRequest, HttpRequest, HttpResponse, web};
 use application::auth::SessionService;
+use application::auth::normalize_email;
 use application::auth::password::PASSWORD_PROVIDER_ID;
 use application::auth::provider::{AuthError, AuthProviders, Credentials, ProviderKind};
 use application::ports::UserRepository;
+use application::rate_limit::{LOGIN_IP, LOGIN_IP_EMAIL, RateLimitDecision, RateLimitService};
 use chrono::{DateTime, Utc};
 use domain::{Role, User, UserId};
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,8 @@ use std::pin::Pin;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::client_ip::client_ip;
+use crate::config::RateLimitConfig;
 use crate::error::{ApiError, repo_error_response};
 use crate::openapi::RoleDoc;
 
@@ -37,6 +41,14 @@ pub struct CookieSettings {
 
 /// Name of the session cookie.
 pub(crate) const COOKIE_NAME: &str = "minerva_session";
+
+/// How long the browser keeps the session cookie. Deliberately much longer
+/// than any server-side session can live: with sliding expiry (2.8) the
+/// server's `expires_at` is the authority on validity, so the browser must
+/// not be the one to drop the cookie at the original issue-time expiry. A
+/// cookie that outlives its session is harmless — the token simply resolves
+/// to nothing and the next request 401s.
+pub(crate) const SESSION_COOKIE_MAX_AGE: CookieDuration = CookieDuration::days(365);
 
 /// JSON shape of a user in auth responses. Deliberately omits
 /// `password_hash` — it is server-side only and must never cross the wire.
@@ -148,31 +160,21 @@ pub(crate) async fn issue_session(
     cookies: &CookieSettings,
 ) -> Result<Cookie<'static>, ApiError> {
     let issued = service.issue(user_id).await.map_err(repo_error_response)?;
-    Ok(session_cookie(
-        &issued.token,
-        issued.session.expires_at,
-        cookies,
-    ))
+    Ok(session_cookie(&issued.token, cookies))
 }
 
 /// Build the session cookie: HttpOnly so JavaScript cannot read it,
-/// SameSite=Lax as a CSRF baseline, scoped to the whole site, and expiring
-/// with the session. `Secure` comes from the configuration (server.cookie_secure)
-/// because local dev talks plain HTTP (bun run dev -> localhost API), where
-/// browsers would drop a Secure cookie; production must set it.
-fn session_cookie(
-    token: &str,
-    expires_at: DateTime<Utc>,
-    cookies: &CookieSettings,
-) -> Cookie<'static> {
+/// SameSite=Lax as a CSRF baseline, scoped to the whole site, and carrying a
+/// fixed long Max-Age (`SESSION_COOKIE_MAX_AGE`) — with sliding expiry the
+/// server-side `expires_at` decides validity, not the browser. `Secure` comes
+/// from the configuration (server.cookie_secure) because local dev talks
+/// plain HTTP (bun run dev -> localhost API), where browsers would drop a
+/// Secure cookie; production must set it.
+fn session_cookie(token: &str, cookies: &CookieSettings) -> Cookie<'static> {
     let mut cookie = Cookie::new(COOKIE_NAME, "");
     cookie.set_value(token.to_owned());
     apply_session_attributes(&mut cookie, cookies);
-    // Second precision is all a cookie expiry needs; the unix-timestamp
-    // constructor avoids time's chrono feature (not enabled in our tree).
-    cookie.set_expires(
-        OffsetDateTime::from_unix_timestamp(expires_at.timestamp()).expect("valid session expiry"),
-    );
+    cookie.set_max_age(SESSION_COOKIE_MAX_AGE);
     cookie
 }
 
@@ -197,7 +199,7 @@ fn apply_session_attributes(cookie: &mut Cookie<'_>, cookies: &CookieSettings) {
 /// Log In
 ///
 /// Exchange credentials for a session cookie. Failures return one generic
-/// 401 whether the email is unknown or the password is wrong.
+/// 401 whether the email is unknown or the password is wrong. Rate limited per client IP and per IP-plus-email pair; a limited attempt gets a 429 with a Retry-After header before any credential check runs.
 #[utoipa::path(
     post,
     path = "/api/auth/login",
@@ -205,18 +207,37 @@ fn apply_session_attributes(cookie: &mut Cookie<'_>, cookies: &CookieSettings) {
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Credentials valid; session cookie set", body = UserResponse),
-        (status = 401, description = "Invalid credentials", body = ApiError)
+        (status = 401, description = "Invalid credentials", body = ApiError),
+        (status = 429, description = "Too many attempts from this client; wait the time in the Retry-After header before trying again", body = ApiError)
     )
 )]
 pub async fn login(
+    req: HttpRequest,
     providers: web::Data<AuthProviders>,
     session_service: web::Data<SessionService>,
     cookies: web::Data<CookieSettings>,
+    rate_limits: web::Data<RateLimitService>,
+    rate_limit_config: web::Data<RateLimitConfig>,
     body: web::Json<LoginRequest>,
 ) -> Result<HttpResponse, ApiError> {
+    let LoginRequest { email, password } = body.into_inner();
+    // The limiter is consulted before the credential check (roadmap 2.8): a
+    // limited client must not spend an Argon2 verification.
+    let ip = client_ip(&req, &rate_limit_config);
+    let now = Utc::now();
+    if let RateLimitDecision::Limited { retry_after } = rate_limits.hit(&LOGIN_IP, &ip, now).await {
+        return Err(ApiError::rate_limited(retry_after));
+    }
+    // The per-email bucket uses the same normalisation the provider applies,
+    // so case-variant spellings of one address share a counter.
+    let email_bucket = format!("{ip}|{}", normalize_email(&email));
+    if let RateLimitDecision::Limited { retry_after } =
+        rate_limits.hit(&LOGIN_IP_EMAIL, &email_bucket, now).await
+    {
+        return Err(ApiError::rate_limited(retry_after));
+    }
     // The handler only translates the request into provider terms; every
     // check happens in the registered provider.
-    let LoginRequest { email, password } = body.into_inner();
     let credentials = Credentials {
         identifier: email,
         secret: password,
@@ -422,6 +443,18 @@ mod tests {
                     )))
                     .app_data(providers)
                     .app_data(web::Data::new(CookieSettings { secure: false }))
+                    // Rate limiting is disabled in these tests (they assert
+                    // authentication, not throttling — the rate-limit tests
+                    // run it enabled with a small limit), but the handlers
+                    // extract the service, so it must be registered.
+                    .app_data(web::Data::new(RateLimitService::new(
+                        crate::rate_limit_tests::TestRateLimiter::new(&[]),
+                        false,
+                    )))
+                    .app_data(web::Data::new(RateLimitConfig {
+                        enabled: false,
+                        client_ip_header: String::new(),
+                    }))
                     .route("/api/auth/login", web::post().to(login))
                     .route("/api/auth/logout", web::post().to(logout))
                     .route("/api/auth/me", web::get().to(me)),

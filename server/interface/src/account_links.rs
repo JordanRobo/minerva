@@ -6,15 +6,18 @@
 //! The link rules live in [`AccountLinkService`]; these handlers only
 //! translate requests and errors to and from HTTP.
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
 use application::account_links::{AccountLinkService, LinkInfo, LinkPurpose};
 use application::auth::SessionService;
+use application::rate_limit::{RateLimitDecision, RateLimitService, TOKEN_LINK_IP};
 use chrono::{DateTime, Utc};
 use domain::Role;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::auth::{CookieSettings, UserResponse, issue_session};
+use crate::client_ip::client_ip;
+use crate::config::RateLimitConfig;
 use crate::error::{ApiError, account_link_error_response};
 use crate::openapi::{LinkPurposeDoc, RoleDoc};
 
@@ -79,7 +82,7 @@ pub struct ResetPasswordRequest {
 
 /// Inspect an Account Link
 ///
-/// What a link is for (an invite, with its role, or a password reset) and when it stops working, shown to the holder before they act on it. Unknown, expired, already used and revoked links all get the same 400 — the answer never hints which.
+/// What a link is for (an invite, with its role, or a password reset) and when it stops working, shown to the holder before they act on it. Unknown, expired, already used and revoked links all get the same 400 — the answer never hints which. Rate limited per client IP, shared with the other link routes.
 #[utoipa::path(
     post,
     path = "/api/auth/tokens/inspect",
@@ -87,13 +90,23 @@ pub struct ResetPasswordRequest {
     request_body = InspectTokenRequest,
     responses(
         (status = 200, description = "What the link is for", body = LinkInfoResponse),
-        (status = 400, description = "The link is unknown, expired, already used or revoked", body = ApiError)
+        (status = 400, description = "The link is unknown, expired, already used or revoked", body = ApiError),
+        (status = 429, description = "Too many attempts from this client; wait the time in the Retry-After header before trying again", body = ApiError)
     )
 )]
 pub async fn inspect_token(
+    req: HttpRequest,
     links: web::Data<AccountLinkService>,
+    rate_limits: web::Data<RateLimitService>,
+    rate_limit_config: web::Data<RateLimitConfig>,
     body: web::Json<InspectTokenRequest>,
 ) -> Result<HttpResponse, ApiError> {
+    let ip = client_ip(&req, &rate_limit_config);
+    if let RateLimitDecision::Limited { retry_after } =
+        rate_limits.hit(&TOKEN_LINK_IP, &ip, Utc::now()).await
+    {
+        return Err(ApiError::rate_limited(retry_after));
+    }
     match links.inspect(&body.token).await {
         Ok(info) => Ok(HttpResponse::Ok().json(LinkInfoResponse::from(&info))),
         Err(error) => Err(account_link_error_response(error)),
@@ -102,7 +115,7 @@ pub async fn inspect_token(
 
 /// Accept an Invite
 ///
-/// Create the account an invite grants and sign it in: the response carries a session cookie. The link is single-use — accepting burns the token, while a too-short password leaves it usable for another attempt.
+/// Create the account an invite grants and sign it in: the response carries a session cookie. The link is single-use — accepting burns the token, while a too-short password leaves it usable for another attempt. Rate limited per client IP, shared with the other link routes.
 #[utoipa::path(
     post,
     path = "/api/auth/accept-invite",
@@ -111,15 +124,25 @@ pub async fn inspect_token(
     responses(
         (status = 201, description = "The created user; session cookie set", body = UserResponse),
         (status = 400, description = "The link is not valid, or the password is too short", body = ApiError),
-        (status = 409, description = "An account with that email already exists", body = ApiError)
+        (status = 409, description = "An account with that email already exists", body = ApiError),
+        (status = 429, description = "Too many attempts from this client; wait the time in the Retry-After header before trying again", body = ApiError)
     )
 )]
 pub async fn accept_invite(
+    req: HttpRequest,
     links: web::Data<AccountLinkService>,
     session_service: web::Data<SessionService>,
     cookies: web::Data<CookieSettings>,
+    rate_limits: web::Data<RateLimitService>,
+    rate_limit_config: web::Data<RateLimitConfig>,
     body: web::Json<AcceptInviteRequest>,
 ) -> Result<HttpResponse, ApiError> {
+    let ip = client_ip(&req, &rate_limit_config);
+    if let RateLimitDecision::Limited { retry_after } =
+        rate_limits.hit(&TOKEN_LINK_IP, &ip, Utc::now()).await
+    {
+        return Err(ApiError::rate_limited(retry_after));
+    }
     let AcceptInviteRequest {
         token,
         password,
@@ -137,7 +160,7 @@ pub async fn accept_invite(
 
 /// Reset a Password
 ///
-/// Set a new password with a reset link. The link is single-use, and every session of the account stops working — sign in again with the new password. No session cookie is set here.
+/// Set a new password with a reset link. The link is single-use, and every session of the account stops working — sign in again with the new password. No session cookie is set here. Rate limited per client IP, shared with the other link routes.
 #[utoipa::path(
     post,
     path = "/api/auth/reset-password",
@@ -145,13 +168,23 @@ pub async fn accept_invite(
     request_body = ResetPasswordRequest,
     responses(
         (status = 204, description = "Password changed; all previous sessions revoked"),
-        (status = 400, description = "The link is not valid, or the password is too short", body = ApiError)
+        (status = 400, description = "The link is not valid, or the password is too short", body = ApiError),
+        (status = 429, description = "Too many attempts from this client; wait the time in the Retry-After header before trying again", body = ApiError)
     )
 )]
 pub async fn reset_password(
+    req: HttpRequest,
     links: web::Data<AccountLinkService>,
+    rate_limits: web::Data<RateLimitService>,
+    rate_limit_config: web::Data<RateLimitConfig>,
     body: web::Json<ResetPasswordRequest>,
 ) -> Result<HttpResponse, ApiError> {
+    let ip = client_ip(&req, &rate_limit_config);
+    if let RateLimitDecision::Limited { retry_after } =
+        rate_limits.hit(&TOKEN_LINK_IP, &ip, Utc::now()).await
+    {
+        return Err(ApiError::rate_limited(retry_after));
+    }
     links
         .reset_password(&body.token, &body.password)
         .await
@@ -281,6 +314,18 @@ mod tests {
                     )))
                     .app_data(providers)
                     .app_data(web::Data::new(CookieSettings { secure: false }))
+                    // Rate limiting is disabled in these tests (they assert
+                    // link behaviour, not throttling — the rate-limit tests
+                    // run it enabled with a small limit), but the handlers
+                    // extract the service, so it must be registered.
+                    .app_data(web::Data::new(RateLimitService::new(
+                        crate::rate_limit_tests::TestRateLimiter::new(&[]),
+                        false,
+                    )))
+                    .app_data(web::Data::new(RateLimitConfig {
+                        enabled: false,
+                        client_ip_header: String::new(),
+                    }))
                     .configure(routes::configure),
             )
             .await

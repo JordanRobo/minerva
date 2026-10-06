@@ -22,9 +22,10 @@ use application::ports::{
     GoalRepository, MilestoneRepository, PasswordHasher, SessionRepository, SessionTokens,
     SsoGroupRuleRepository, TaskRepository, UserRepository,
 };
+use application::rate_limit::RateLimitService;
 use application::sso_rules::SsoGroupRuleService;
 use application::user_admin::UserAdminService;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use diesel::prelude::*;
 use domain::{GoalId, MilestoneId, Permission, Role, SsoGroupRuleId, TaskId, User, UserId};
 use infrastructure::db::PgPool;
@@ -39,6 +40,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::{COOKIE_NAME, CookieSettings};
+use crate::config::RateLimitConfig;
 use crate::public_routes::PUBLIC_OPERATIONS;
 use crate::routes;
 
@@ -139,6 +141,18 @@ macro_rules! test_app {
                 )))
                 .app_data(providers)
                 .app_data(web::Data::new(CookieSettings { secure: false }))
+                // Rate limiting is disabled in these tests (they assert the
+                // access matrix, not throttling — the rate-limit tests run it
+                // enabled with a small limit), but the handlers extract the
+                // service, so it must be registered.
+                .app_data(web::Data::new(RateLimitService::new(
+                    crate::rate_limit_tests::TestRateLimiter::new(&[]),
+                    false,
+                )))
+                .app_data(web::Data::new(RateLimitConfig {
+                    enabled: false,
+                    client_ip_header: String::new(),
+                }))
                 .configure(routes::configure),
         )
         .await
@@ -729,5 +743,68 @@ async fn a_role_change_takes_effect_on_the_next_request() {
         .delete(GoalId(goal_id))
         .await
         .expect("cleanup goal");
+    delete_user(&pool, user.id);
+}
+
+/// Sliding expiry end to end: a session that is near its expiry and was last
+/// seen past the touch interval stays valid once an authenticated request
+/// resolves it — the resolve slides `expires_at` forward by a full TTL.
+#[actix_web::test]
+async fn an_active_session_near_expiry_stays_valid_past_the_interval() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let app = test_app!(&url);
+
+    let user = create_user(&pool, unique_email("sliding"), Role::ReadOnly).await;
+    let sessions: Arc<dyn SessionRepository> =
+        Arc::new(PostgresSessionRepository::new(pool.clone()));
+    let service = SessionService::new(
+        sessions.clone(),
+        Arc::new(Sha256SessionTokens),
+        SessionService::DEFAULT_SESSION_TTL,
+    );
+    let issued = service.issue(user.id).await.expect("issue session");
+
+    // Age the session directly: near expiry, last seen past the touch interval.
+    // The block drops the connection before the request runs: this test's pool
+    // holds one connection at a time, and it must be free for the assertions.
+    let now = Utc::now();
+    {
+        let mut conn = pool.get().expect("pool connection");
+        diesel::update(infrastructure::schema::sessions::table.find(issued.session.id.0))
+            .set((
+                infrastructure::schema::sessions::expires_at.eq(now + Duration::seconds(60)),
+                infrastructure::schema::sessions::last_seen_at
+                    .eq(now - SessionService::SESSION_TOUCH_INTERVAL - Duration::seconds(1)),
+            ))
+            .execute(&mut conn)
+            .expect("age the session");
+    }
+
+    // An authenticated request resolves the session and slides its expiry...
+    let res = request!(
+        &app,
+        Method::GET,
+        "/api/goals",
+        Some(&issued.token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // ...so the row now outlives the near expiry it had a moment ago.
+    let stored = sessions
+        .find_by_token_hash(Sha256SessionTokens.hash(&issued.token))
+        .await
+        .expect("find session")
+        .expect("session still stored");
+    assert!(
+        stored.expires_at > now + Duration::days(29),
+        "expiry should have slid to ~now + 30 days, got {}",
+        stored.expires_at
+    );
+
     delete_user(&pool, user.id);
 }

@@ -9,7 +9,7 @@ communicates with the backend over HTTP only.
 | Crate | Kind | Responsibility | May depend on |
 |---|---|---|---|
 | `domain` | lib | Core business concepts and invariants (goals, milestones, ...). Pure logic, no I/O. | nothing but the `uuid`, `chrono`, `serde` value-type exceptions |
-| `application` | lib | Use cases: orchestrate domain objects to fulfill a request. Transaction boundaries live here. | `domain` |
+| `application` | lib | Use cases: orchestrate domain objects to fulfill a request. Transaction boundaries live here. | `domain`, plus `sha2` for one-way subject hashing in rate limiting |
 | `infrastructure` | lib | Adapters for external systems: Postgres (Diesel), Redis; S3 (`object_store`) declared but not yet implemented (roadmap 7.1). Receives ready-made configuration values; reads no files or environment itself. | `domain`, `application` (ports) |
 | `interface` | bin | HTTP API server (Actix-web). Routing and request/response mapping; the composition root that wires the other crates together at startup. Owns all configuration: typed, validated settings from an optional `minerva.toml` layered with environment variables (`src/config.rs`). | all of the above |
 
@@ -72,6 +72,54 @@ the SHA-256 hash of the token, never the raw value. Sessions sit behind the
 `SessionRepository` port: Redis when a Redis URL is configured (`redis.url`,
 via `REDIS_URL` or `minerva.toml`), Postgres otherwise.
 
+The password provider **equalises login timing**: every attempt runs exactly
+one Argon2id verification before any rejection is evaluated — against the
+account's stored hash when one exists, otherwise against a process-wide dummy
+hash that the adapter generates once with the same parameters as real hashes
+(`PasswordHasher::verify_dummy`) — and only afterwards are the deactivated and
+passwordless conditions checked. Unknown email, deactivated account,
+passwordless account and wrong password therefore all cost one verification
+and return the identical 401 body, so response time does not reveal which
+accounts exist. This is a side-channel mitigation only: it throttles nothing
+(login rate limiting is a separate 2.8 item) and covers the credential path —
+the SSO redirect flow has no submitted secret to verify.
+
+Sessions use **sliding expiry**: `SessionService::resolve` — which every
+authenticated request runs through — slides a session's `expires_at` forward
+by a full TTL (`DEFAULT_SESSION_TTL`, 30 days) whenever at least
+`SESSION_TOUCH_INTERVAL` (5 minutes) has passed since the stored
+`last_seen_at`. The stored timestamp is the only throttle state, so the rule
+needs no in-memory bookkeeping and behaves identically across any number of
+API nodes. The touch is conditional on the session still being live — a
+revoked or expired one is a `NotFound`, never resurrected — and a failed
+touch is logged at warn without failing the request: the session simply
+keeps its current expiry. The `minerva_session` cookie carries a fixed, long
+`Max-Age` (365 days) rather than the session's issue-time expiry: with
+sliding expiry the server-side `expires_at` is the authority on validity,
+and a cookie that outlives its session is harmless — the token simply stops
+resolving.
+
+Every Redis operation that writes more than one key issues its writes as a
+single MULTI/EXEC pipeline: `create` writes the session hash, its id mapping
+and the per-user index entry (with both TTLs) in one shot, and `delete`,
+`delete_all_for_user` and the write phase of `touch_last_seen` do the same
+for their removals and TTL refreshes — a crash mid-write cannot leave a
+session without its id mapping or index entry. In Redis, expiry itself needs
+no maintenance: the keys' native TTLs evict expired sessions, so
+`purge_expired` there is a no-op.
+
+When Postgres holds the sessions, expired rows are removed by an hourly
+maintenance job in `interface` (`src/maintenance.rs`), started only on that
+branch of startup. Each tick first takes a session-level Postgres advisory
+lock with a try-lock — when another node holds it the tick skips silently, so
+however many API nodes run, exactly one purges per tick; the first tick lands
+about 30 seconds after startup. While holding the lock it calls
+`SessionRepository::purge_expired` and logs the removed count only when it is
+non-zero; a failing tick warns and retries on the next hour. The rate-limit
+counter purge is registered as a second `MaintenanceJob` (name + advisory
+lock key + async fn) on the same Postgres branch, with its own lock key so
+the two jobs tick independently.
+
 The redirect flow (`interface/src/redirect.rs`) is generic over providers:
 
 - `GET /api/auth/{provider}/login?next=` asks the provider for its
@@ -94,6 +142,43 @@ and identity creation.
 construction in `interface/src/main.rs`. Nothing else changes — routing,
 cookies, session issuance, and the `/api/auth/providers` listing all follow
 from the registry.
+
+**Rate limiting** (roadmap 2.8) caps the endpoints that accept secrets or
+issue links, with fixed windows aligned to the epoch, so every node computes
+the same boundaries from its own clock:
+
+| Policy | Limit | Window | Bucket | Guards |
+|---|---|---|---|---|
+| `login_ip` | 30 | 15 min | client IP | `POST /api/auth/login` |
+| `login_ip_email` | 10 | 15 min | client IP + normalised email | `POST /api/auth/login` |
+| `token_link_ip` | 30 | 15 min | client IP | the three public token-link routes |
+| `admin_issue_actor` | 60 | 1 hour | acting user's id | the invite and password-reset issue endpoints |
+
+The handlers only build the subject string and call
+`RateLimitService::hit`; a limited request answers 429 with the standard
+error envelope plus a `Retry-After` header in whole seconds. The login checks
+run before any credential work, so a limited attempt never reaches Argon2;
+the admin checks run after the Admin extractor, so 401/403 still come first.
+Every other route — including the SSO redirect flow — is unlimited.
+
+Counters sit behind the `RateLimiter` port (`application::rate_limit`) with
+the same storage selection as sessions: Redis when `redis.url` is configured
+(a hit is one atomic INCR+EXPIRE pipeline; native TTLs evict expired
+windows), Postgres otherwise (one row per key and window, incremented by a
+single atomic upsert). The service hashes subjects with SHA-256 before they
+reach the store — raw IPs and emails never touch it — and fails open: a
+store error is logged at warn and the request allowed, because rate limiting
+must never take login down. `rate_limit.client_ip_header` names the proxy
+header carrying the real client address (the first comma-separated value
+wins), falling back to the TCP peer address; with Postgres counters, the
+hourly maintenance runner purges windows older than the longest policy
+window.
+
+What this does **not** cover: a distributed brute force against one account
+from many IPs stays under every per-IP bucket (the per-pair bucket slows it,
+but an attacker with enough IPs still gets 10 tries per 15 minutes per IP).
+Account lockout after repeated failures is deliberately out of scope — the
+per-IP caps plus Argon2's cost are the v1 answer.
 
 ### Invites and password reset
 

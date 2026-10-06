@@ -6,10 +6,11 @@
 //! snake_case identifier clients can branch on and `message` is
 //! human-readable.
 
-use actix_web::{HttpResponse, ResponseError, http::StatusCode};
+use actix_web::{HttpResponse, ResponseError, http};
 use application::account_links::AccountLinkError;
 use application::ports::RepositoryError;
 use serde::Serialize;
+use std::time::Duration;
 use utoipa::ToSchema;
 
 /// The standard API error envelope. Handlers return it as the `Err` of a
@@ -21,6 +22,11 @@ pub struct ApiError {
     pub code: String,
     /// Human-readable explanation of what went wrong.
     pub message: String,
+    /// How long the client should wait before retrying; set only on 429
+    /// responses and rendered as the `Retry-After` header, never in the body.
+    #[serde(skip)]
+    #[schema(ignore)]
+    retry_after: Option<Duration>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -35,6 +41,7 @@ impl ApiError {
         Self {
             code: "bad_request".to_owned(),
             message: message.into(),
+            retry_after: None,
         }
     }
 
@@ -45,6 +52,7 @@ impl ApiError {
         Self {
             code: "unauthorized".to_owned(),
             message: "invalid credentials".to_owned(),
+            retry_after: None,
         }
     }
 
@@ -54,6 +62,7 @@ impl ApiError {
         Self {
             code: "forbidden".to_owned(),
             message: "you do not have permission to do this".to_owned(),
+            retry_after: None,
         }
     }
 
@@ -62,6 +71,7 @@ impl ApiError {
         Self {
             code: "not_found".to_owned(),
             message: "not found".to_owned(),
+            retry_after: None,
         }
     }
 
@@ -70,6 +80,7 @@ impl ApiError {
         Self {
             code: "conflict".to_owned(),
             message: message.into(),
+            retry_after: None,
         }
     }
 
@@ -78,6 +89,7 @@ impl ApiError {
         Self {
             code: "account_exists".to_owned(),
             message: message.into(),
+            retry_after: None,
         }
     }
 
@@ -86,6 +98,7 @@ impl ApiError {
         Self {
             code: "group_rule_exists".to_owned(),
             message: message.into(),
+            retry_after: None,
         }
     }
 
@@ -95,6 +108,7 @@ impl ApiError {
         Self {
             code: "role_managed_by_sso".to_owned(),
             message: message.into(),
+            retry_after: None,
         }
     }
 
@@ -105,6 +119,7 @@ impl ApiError {
         Self {
             code: "invalid_token".to_owned(),
             message: message.into(),
+            retry_after: None,
         }
     }
 
@@ -113,6 +128,7 @@ impl ApiError {
         Self {
             code: "invalid_reference".to_owned(),
             message: message.into(),
+            retry_after: None,
         }
     }
 
@@ -122,27 +138,49 @@ impl ApiError {
         Self {
             code: "internal_error".to_owned(),
             message: "internal server error".to_owned(),
+            retry_after: None,
+        }
+    }
+
+    /// 429 — the client has made too many attempts in a short period. The
+    /// message is deliberately generic: it says neither which limit was hit
+    /// nor how many attempts remain, and `retry_after` (rendered as the
+    /// `Retry-After` header) reaches the end of the current window.
+    pub fn rate_limited(retry_after: Duration) -> Self {
+        Self {
+            code: "rate_limited".to_owned(),
+            message: "Too many attempts. Try again later.".to_owned(),
+            retry_after: Some(retry_after),
         }
     }
 }
 
 impl ResponseError for ApiError {
-    fn status_code(&self) -> StatusCode {
+    fn status_code(&self) -> http::StatusCode {
         match self.code.as_str() {
-            "unauthorized" => StatusCode::UNAUTHORIZED,
-            "forbidden" => StatusCode::FORBIDDEN,
-            "not_found" => StatusCode::NOT_FOUND,
+            "unauthorized" => http::StatusCode::UNAUTHORIZED,
+            "forbidden" => http::StatusCode::FORBIDDEN,
+            "not_found" => http::StatusCode::NOT_FOUND,
+            "rate_limited" => http::StatusCode::TOO_MANY_REQUESTS,
             "conflict" | "account_exists" | "group_rule_exists" | "role_managed_by_sso" => {
-                StatusCode::CONFLICT
+                http::StatusCode::CONFLICT
             }
-            "internal_error" => StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error" => http::StatusCode::INTERNAL_SERVER_ERROR,
             // bad_request, invalid_reference, invalid_token, and any unknown code
-            _ => StatusCode::BAD_REQUEST,
+            _ => http::StatusCode::BAD_REQUEST,
         }
     }
 
     fn error_response(&self) -> HttpResponse {
         let mut res = HttpResponse::build(self.status_code());
+        if let Some(retry_after) = self.retry_after {
+            // Whole seconds, rounded up: a client that waits this long is
+            // never still inside the window.
+            res.insert_header((
+                http::header::RETRY_AFTER,
+                retry_after.as_millis().div_ceil(1000).max(1) as u32,
+            ));
+        }
         res.json(serde_json::json!({ "error": self }))
     }
 }

@@ -17,6 +17,12 @@ use uuid::Uuid;
 /// self-sufficient against a fresh database.
 static MIGRATIONS_APPLIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
+/// `purge_expired` deletes expired rows table-wide, so while it runs no other
+/// test may rely on its own expired row still being present. The tests that
+/// create expired rows and the purge test serialize on this lock (a tokio
+/// mutex: a std one would be held across await points).
+static EXPIRED_ROW_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn pool() -> Option<PgPool> {
     let Some(url) = std::env::var("DATABASE_URL").ok() else {
         // In CI these tests must run: a green build that skipped them proves nothing.
@@ -109,7 +115,8 @@ async fn session_round_trip() {
     assert_eq!(listed, vec![session.clone()]);
 
     let touched_at = now();
-    repo.touch_last_seen(session.id, touched_at)
+    let new_expiry = touched_at + Duration::hours(2);
+    repo.touch_last_seen(session.id, touched_at, new_expiry)
         .await
         .expect("touch");
     let touched = repo
@@ -118,6 +125,7 @@ async fn session_round_trip() {
         .expect("find after touch")
         .expect("session should still exist");
     assert_eq!(touched.last_seen_at, touched_at);
+    assert_eq!(touched.expires_at, new_expiry);
 
     // A second session of the same user: delete removes only the first.
     let other = test_session(user.id, 3600);
@@ -129,6 +137,12 @@ async fn session_round_trip() {
             .expect("find deleted")
             .is_none()
     );
+    // A touch racing the revocation must not resurrect the row.
+    assert!(matches!(
+        repo.touch_last_seen(session.id, now(), now() + Duration::days(30))
+            .await,
+        Err(RepositoryError::NotFound)
+    ));
     assert_eq!(
         repo.list_for_user(user.id)
             .await
@@ -158,9 +172,37 @@ async fn delete_and_touch_missing_session_are_not_found() {
         Err(RepositoryError::NotFound)
     ));
     assert!(matches!(
-        repo.touch_last_seen(missing, now()).await,
+        repo.touch_last_seen(missing, now(), now() + Duration::days(30))
+            .await,
         Err(RepositoryError::NotFound)
     ));
+}
+
+#[tokio::test]
+async fn touch_expired_session_is_a_noop() {
+    let Some(pool) = pool() else { return };
+    let _guard = EXPIRED_ROW_LOCK.lock().await;
+    let repo = PostgresSessionRepository::new(pool.clone());
+    let user = create_user(&pool).await;
+    // The row exists but is already past its expiry: the conditional update
+    // must not match it, so a late touch cannot slide an expired session.
+    let session = test_session(user.id, -3600);
+    repo.create(session.clone()).await.expect("create");
+
+    assert!(matches!(
+        repo.touch_last_seen(session.id, now(), now() + Duration::days(30))
+            .await,
+        Err(RepositoryError::NotFound)
+    ));
+    let stored = repo
+        .find_by_token_hash(session.token_hash.clone())
+        .await
+        .expect("find")
+        .expect("expired session still stored");
+    assert_eq!(stored.expires_at, session.expires_at);
+    assert_eq!(stored.last_seen_at, session.last_seen_at);
+
+    delete_user(&pool, user.id);
 }
 
 #[tokio::test]
@@ -179,6 +221,7 @@ async fn find_by_token_hash_unknown_hash_is_none() {
 #[tokio::test]
 async fn expired_session_is_still_returned() {
     let Some(pool) = pool() else { return };
+    let _guard = EXPIRED_ROW_LOCK.lock().await;
     let repo = PostgresSessionRepository::new(pool.clone());
     let user = create_user(&pool).await;
     // Negative TTL: the session is already past its expiry.
@@ -195,5 +238,46 @@ async fn expired_session_is_still_returned() {
     assert_eq!(found, session);
     assert!(found.is_expired(now()));
 
+    delete_user(&pool, user.id);
+}
+
+#[tokio::test]
+async fn purge_expired_removes_only_past_expiry() {
+    let Some(pool) = pool() else { return };
+    let _guard = EXPIRED_ROW_LOCK.lock().await;
+    let repo = PostgresSessionRepository::new(pool.clone());
+    let user = create_user(&pool).await;
+    let expired = test_session(user.id, -3600);
+    let live = test_session(user.id, 3600);
+    repo.create(expired.clone()).await.expect("create expired");
+    repo.create(live.clone()).await.expect("create live");
+
+    // The purge is table-wide and other tests running in parallel may hold
+    // their own expired rows at the same moment, so only a lower bound on the
+    // count — the per-session checks below carry the "only past expiry" rule.
+    let removed = repo.purge_expired(now()).await.expect("purge");
+    assert!(
+        removed >= 1,
+        "at least this user's expired session must be gone"
+    );
+    assert!(
+        repo.find_by_token_hash(expired.token_hash.clone())
+            .await
+            .expect("find expired")
+            .is_none(),
+        "the expired session must be gone"
+    );
+    assert!(
+        repo.find_by_token_hash(live.token_hash.clone())
+            .await
+            .expect("find live")
+            .is_some(),
+        "the live session must survive"
+    );
+
+    // A second purge still succeeds once there is nothing left of its own.
+    repo.purge_expired(now()).await.expect("purge again");
+
+    repo.delete_all_for_user(user.id).await.expect("cleanup");
     delete_user(&pool, user.id);
 }

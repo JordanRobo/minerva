@@ -1,11 +1,13 @@
 mod access;
 mod account_links;
 mod auth;
+mod client_ip;
 mod config;
 mod debug;
 mod error;
 mod goals;
 mod invites;
+mod maintenance;
 mod milestones;
 mod openapi;
 mod redirect;
@@ -20,6 +22,9 @@ mod access_tests;
 #[cfg(test)]
 mod public_routes;
 
+#[cfg(test)]
+mod rate_limit_tests;
+
 use actix_web::cookie::Key;
 use actix_web::{App, HttpServer, web};
 use application::account_links::AccountLinkService;
@@ -33,6 +38,7 @@ use application::ports::{
     AccountEmailSender, AccountTokenRepository, OidcProvider, PasswordHasher, SessionRepository,
     SessionTokens, UserIdentityRepository, UserRepository,
 };
+use application::rate_limit::{RateLimitService, RateLimiter};
 use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
 use application::user_admin::UserAdminService;
@@ -45,9 +51,10 @@ use infrastructure::migrations::run_migrations;
 use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
 use infrastructure::repositories::{
     PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
-    PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
-    PostgresSsoGroupRuleRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
-    PostgresUserIdentityRepository, PostgresUserRepository, RedisSessionRepository,
+    PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresRateLimiter,
+    PostgresSessionRepository, PostgresSsoGroupRuleRepository, PostgresTaskRelationRepository,
+    PostgresTaskRepository, PostgresUserIdentityRepository, PostgresUserRepository,
+    RedisRateLimiter, RedisSessionRepository,
 };
 use std::sync::Arc;
 
@@ -132,6 +139,21 @@ async fn main() -> std::io::Result<()> {
     // login. It shares the rules repository with the user-admin service's
     // hand-edit lock, so both read the same committed rules.
     let sso_roles = SsoRoleService::new(sso_group_rules_repo.clone(), users.clone());
+    // Rate limiting (roadmap 2.8): fixed-window counters behind the same
+    // storage selection as sessions — Redis when redis.url is configured,
+    // Postgres otherwise. In-process counters are deliberately not an option:
+    // they break horizontal scaling. Built before the session match below
+    // because that one moves the pool into the maintenance runner.
+    let rate_limiter: Arc<dyn RateLimiter> = if config.redis.url.expose().trim().is_empty() {
+        println!("redis not configured; using Postgres for rate-limit counters");
+        Arc::new(PostgresRateLimiter::new(pool.clone()))
+    } else {
+        println!("using Redis for rate-limit counters");
+        Arc::new(
+            RedisRateLimiter::connect(config.redis.url.expose())
+                .expect("redis.url is set but could not connect to Redis"),
+        )
+    };
     // Sessions are the swappable storage: Redis when redis.url is configured,
     // Postgres otherwise. A missing URL is not an error — it just means "use
     // Postgres for sessions" (see docs/architecture.md). A present but
@@ -140,7 +162,20 @@ async fn main() -> std::io::Result<()> {
     let sessions: Arc<dyn SessionRepository> = match config.redis.url.expose().trim() {
         "" => {
             println!("redis not configured; using Postgres for session storage");
-            Arc::new(PostgresSessionRepository::new(pool))
+            let sessions = Arc::new(PostgresSessionRepository::new(pool.clone()));
+            // With Postgres as the session store, expired rows and stale
+            // rate-limit counters are only removed by these hourly
+            // maintenance jobs (with Redis, native TTLs evict keys instead).
+            // Every node runs them; their advisory locks mean exactly one of
+            // the nodes does the work per tick (roadmap 2.8).
+            maintenance::start(
+                pool,
+                vec![
+                    maintenance::purge_expired_sessions(sessions.clone()),
+                    maintenance::purge_rate_limit_counters(rate_limiter.clone()),
+                ],
+            );
+            sessions
         }
         redis_url => {
             println!("using Redis for session storage");
@@ -162,6 +197,15 @@ async fn main() -> std::io::Result<()> {
         session_tokens.clone(),
         SessionService::DEFAULT_SESSION_TTL,
     ));
+    // Rate limiting (roadmap 2.8): the service hashes subjects and fails open
+    // on store errors (see application::rate_limit). It guards the login,
+    // token-link and admin issue endpoints; the config registration carries
+    // the client-IP header setting the handlers resolve it with.
+    let rate_limit_service = web::Data::new(RateLimitService::new(
+        rate_limiter,
+        config.rate_limit.enabled,
+    ));
+    let rate_limit_config = web::Data::new(config.rate_limit.clone());
     // User administration goes through the service so the self-modification
     // and last-admin rules live in one place (see application::user_admin).
     let user_admin = web::Data::new(UserAdminService::new(
@@ -302,6 +346,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(user_identities_data.clone())
             .app_data(sessions_data.clone())
             .app_data(session_service.clone())
+            .app_data(rate_limit_service.clone())
+            .app_data(rate_limit_config.clone())
             .app_data(user_admin.clone())
             .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())

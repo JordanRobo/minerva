@@ -7,6 +7,7 @@
 
 use actix_web::{HttpResponse, web};
 use application::account_links::{AccountLinkService, IssuedLink};
+use application::rate_limit::{ADMIN_ISSUE_ACTOR, RateLimitDecision, RateLimitService};
 use chrono::{DateTime, Utc};
 use domain::{AccountToken, AccountTokenId, AccountTokenKind, AccountTokenStatus, Role};
 use serde::{Deserialize, Serialize};
@@ -100,7 +101,7 @@ fn created_response(issued: IssuedLink<AccountToken>) -> InviteCreatedResponse {
 
 /// Create an Invite
 ///
-/// Invite an email address to create an account with the given role. The one-time accept link is returned only in this response (and emailed when delivery is configured); the raw token cannot be recovered afterwards — re-issue the invite for a new link. Requires the Admin role.
+/// Invite an email address to create an account with the given role. The one-time accept link is returned only in this response (and emailed when delivery is configured); the raw token cannot be recovered afterwards — re-issue the invite for a new link. Requires the Admin role. Rate limited per acting admin.
 #[utoipa::path(
     post,
     path = "/api/invites",
@@ -112,14 +113,28 @@ fn created_response(issued: IssuedLink<AccountToken>) -> InviteCreatedResponse {
         (status = 400, description = "Not a valid email address", body = ApiError),
         (status = 401, description = "Missing or invalid session", body = ApiError),
         (status = 403, description = "Requires the Admin role", body = ApiError),
-        (status = 409, description = "An account with that email already exists, or an unexpired invite for it is already pending", body = ApiError)
+        (status = 409, description = "An account with that email already exists, or an unexpired invite for it is already pending", body = ApiError),
+        (status = 429, description = "Too many attempts from this admin; wait the time in the Retry-After header before trying again", body = ApiError)
     )
 )]
 pub async fn create_invite(
     links: web::Data<AccountLinkService>,
     access: AdminAccess,
+    rate_limits: web::Data<RateLimitService>,
     body: web::Json<CreateInviteRequest>,
 ) -> Result<HttpResponse, ApiError> {
+    // The AdminAccess extractor has already answered 401/403; the limiter
+    // counts only authenticated admins, per acting user (roadmap 2.8).
+    if let RateLimitDecision::Limited { retry_after } = rate_limits
+        .hit(
+            &ADMIN_ISSUE_ACTOR,
+            &access.user.id.0.to_string(),
+            Utc::now(),
+        )
+        .await
+    {
+        return Err(ApiError::rate_limited(retry_after));
+    }
     match links
         .create_invite(&access.user, &body.email, body.role)
         .await
@@ -186,7 +201,7 @@ pub async fn revoke_invite(
 
 /// Re-issue an Invite
 ///
-/// Replace an unused invite with a fresh token and expiry: the old link stops working. The new one-time accept link is returned only in this response; its raw token cannot be recovered afterwards. Refused once the invite has been accepted, or if a user with the invited email has registered in the meantime. Requires the Admin role.
+/// Replace an unused invite with a fresh token and expiry: the old link stops working. The new one-time accept link is returned only in this response; its raw token cannot be recovered afterwards. Refused once the invite has been accepted, or if a user with the invited email has registered in the meantime. Requires the Admin role. Rate limited per acting admin.
 #[utoipa::path(
     post,
     path = "/api/invites/{id}/reissue",
@@ -198,14 +213,26 @@ pub async fn revoke_invite(
         (status = 401, description = "Missing or invalid session", body = ApiError),
         (status = 403, description = "Requires the Admin role", body = ApiError),
         (status = 404, description = "No invite with this id", body = ApiError),
-        (status = 409, description = "The invite has already been accepted, or an account with that email now exists", body = ApiError)
+        (status = 409, description = "The invite has already been accepted, or an account with that email now exists", body = ApiError),
+        (status = 429, description = "Too many attempts from this admin; wait the time in the Retry-After header before trying again", body = ApiError)
     )
 )]
 pub async fn reissue_invite(
     links: web::Data<AccountLinkService>,
     access: AdminAccess,
+    rate_limits: web::Data<RateLimitService>,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
+    if let RateLimitDecision::Limited { retry_after } = rate_limits
+        .hit(
+            &ADMIN_ISSUE_ACTOR,
+            &access.user.id.0.to_string(),
+            Utc::now(),
+        )
+        .await
+    {
+        return Err(ApiError::rate_limited(retry_after));
+    }
     match links
         .reissue_invite(&access.user, AccountTokenId(*path))
         .await
@@ -241,6 +268,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::auth::{COOKIE_NAME, CookieSettings};
+    use crate::config::RateLimitConfig;
     use crate::routes;
 
     /// The `DATABASE_URL` the tests run against, or `None` to skip.
@@ -338,6 +366,18 @@ mod tests {
                     )))
                     .app_data(providers)
                     .app_data(web::Data::new(CookieSettings { secure: false }))
+                    // Rate limiting is disabled in these tests (they assert
+                    // invite behaviour, not throttling — the rate-limit tests
+                    // run it enabled with a small limit), but the handlers
+                    // extract the service, so it must be registered.
+                    .app_data(web::Data::new(RateLimitService::new(
+                        crate::rate_limit_tests::TestRateLimiter::new(&[]),
+                        false,
+                    )))
+                    .app_data(web::Data::new(RateLimitConfig {
+                        enabled: false,
+                        client_ip_header: String::new(),
+                    }))
                     .configure(routes::configure),
             )
             .await

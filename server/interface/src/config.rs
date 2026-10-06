@@ -74,6 +74,7 @@ pub struct Config {
     pub redis: RedisConfig,
     pub oidc: OidcConfig,
     pub bootstrap: BootstrapConfig,
+    pub rate_limit: RateLimitConfig,
 }
 
 impl Config {
@@ -248,6 +249,28 @@ impl Default for BootstrapConfig {
 /// Default for `bootstrap.admin_display_name`.
 const DEFAULT_BOOTSTRAP_DISPLAY_NAME: &str = "Administrator";
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RateLimitConfig {
+    /// Enable rate limiting (default true).
+    pub enabled: bool,
+    /// Name of the header carrying the client's real IP address when the
+    /// server sits behind a reverse proxy (e.g. "X-Forwarded-For"); blank
+    /// means use the TCP peer address. Validated as a legal HTTP header name.
+    pub client_ip_header: String,
+}
+
+// Manual `Default` for the same reason as the other sections: a derived one
+// would leave rate limiting disabled instead of on.
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            client_ip_header: String::new(),
+        }
+    }
+}
+
 impl Config {
     /// Replace each `*_file` secret with the trimmed contents of its file.
     /// Setting both a value and its file, or an unreadable file, is recorded
@@ -304,6 +327,9 @@ impl Config {
         if self.bootstrap.admin_display_name.trim().is_empty() {
             self.bootstrap.admin_display_name = DEFAULT_BOOTSTRAP_DISPLAY_NAME.to_owned();
         }
+        // A header name with stray surrounding whitespace is a typo, not a
+        // different header; trim it before validation.
+        self.rate_limit.client_ip_header = self.rate_limit.client_ip_header.trim().to_owned();
     }
 
     /// Every rule, checked together: all problems come back in one list so a
@@ -338,6 +364,17 @@ impl Config {
             problems.push(
                 "bootstrap.admin_email is required when bootstrap.admin_password is set".to_owned(),
             );
+        }
+        // Rate limiting is independent of OIDC, so it is checked before the
+        // early return below too. A blank header means "use the peer address"
+        // and needs no validation; a non-blank one must be a legal name.
+        if !self.rate_limit.client_ip_header.is_empty()
+            && !valid_header_name(&self.rate_limit.client_ip_header)
+        {
+            problems.push(format!(
+                "rate_limit.client_ip_header is not a valid HTTP header name: {:?}",
+                self.rate_limit.client_ip_header
+            ));
         }
         if !self.oidc_enabled() {
             return problems;
@@ -413,6 +450,18 @@ pub(crate) fn valid_base_url(raw: &str) -> Option<String> {
         return None;
     }
     Some(raw.trim_end_matches('/').to_owned())
+}
+
+/// A legal HTTP header name: one or more RFC 7230 `tchar` characters
+/// (unquoted-string tokens). This is what a proxy such as nginx or HAProxy
+/// would accept in a `proxy_set_header` / `use` directive, so anything else
+/// could never actually be sent.
+pub(crate) fn valid_header_name(name: &str) -> bool {
+    const TCHARS: &[u8] = b"!#$%&'*+-.^_`|~";
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || TCHARS.contains(&b))
 }
 
 /// Load the configuration: discover the file, layer defaults/file/aliases/env,
@@ -712,6 +761,9 @@ mod tests {
         );
         assert_eq!(config.oidc.groups_claim, DEFAULT_GROUPS_CLAIM);
         assert!(config.oidc.auto_create_users);
+        // Rate limiting is on by default and uses the peer address (no header).
+        assert!(config.rate_limit.enabled);
+        assert_eq!(config.rate_limit.client_ip_header, "");
         // Only the one genuinely required setting is missing.
         assert_eq!(problems, vec!["database.url is required".to_owned()]);
     }
@@ -922,6 +974,81 @@ mod tests {
                 problems.iter().any(|problem| problem == expected),
                 "{expected} missing from {problems:?}"
             );
+        }
+    }
+
+    #[test]
+    fn rate_limit_overrides_come_from_file_and_env() {
+        let toml = format!(
+            "{DB_TOML}[rate_limit]\nenabled = false\nclient_ip_header = \"X-Forwarded-For\"\n"
+        );
+        let (config, problems) = sources(Some(&toml), &[], &[]).expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!config.rate_limit.enabled);
+        assert_eq!(config.rate_limit.client_ip_header, "X-Forwarded-For");
+
+        // The env layer wins over the file.
+        let (config, problems) = sources(
+            Some(&toml),
+            &[],
+            &[
+                ("MINERVA_RATE_LIMIT__ENABLED", "true"),
+                ("MINERVA_RATE_LIMIT__CLIENT_IP_HEADER", "CF-Connecting-IP"),
+            ],
+        )
+        .expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(config.rate_limit.enabled);
+        assert_eq!(config.rate_limit.client_ip_header, "CF-Connecting-IP");
+    }
+
+    #[test]
+    fn an_invalid_client_ip_header_is_reported_with_the_other_problems() {
+        // No database URL and a header name with a space: both problems come
+        // back in one run, not one fix per restart.
+        let (_, problems) = sources(
+            None,
+            &[],
+            &[("MINERVA_RATE_LIMIT__CLIENT_IP_HEADER", "Bad Header")],
+        )
+        .expect("extract");
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem == "database.url is required"),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|problem| problem
+                .contains("rate_limit.client_ip_header is not a valid HTTP header name")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_blank_client_ip_header_counts_as_unset() {
+        let (config, problems) = sources(
+            None,
+            &[("DATABASE_URL", "postgresql://a/db")],
+            &[("MINERVA_RATE_LIMIT__CLIENT_IP_HEADER", "   ")],
+        )
+        .expect("extract");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(config.rate_limit.client_ip_header, "");
+    }
+
+    #[test]
+    fn valid_header_name_accepts_tokens_and_rejects_the_rest() {
+        for name in [
+            "X-Forwarded-For",
+            "CF-Connecting-IP",
+            "Forwarded",
+            "a1-b2_c3.d4",
+        ] {
+            assert!(valid_header_name(name), "{name:?} should be accepted");
+        }
+        for name in ["", "Bad Header", "with/slash", "semi;colon", "back\\slash"] {
+            assert!(!valid_header_name(name), "{name:?} should be rejected");
         }
     }
 

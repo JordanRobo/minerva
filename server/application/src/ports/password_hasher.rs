@@ -28,4 +28,10 @@ pub trait PasswordHasher: Send + Sync {
 
     /// Check a plaintext password against a stored hash.
     async fn verify(&self, password: &str, hash: &str) -> Result<bool, PasswordHashError>;
+
+    /// Check a plaintext password against an internal dummy hash with the
+    /// same parameters as real hashes. Always returns `false`; it exists so
+    /// login paths with no stored hash to check (unknown email, passwordless
+    /// account) spend the same verification time as a wrong password.
+    async fn verify_dummy(&self, password: &str) -> Result<bool, PasswordHashError>;
 }
