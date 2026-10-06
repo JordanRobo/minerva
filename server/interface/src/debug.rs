@@ -76,8 +76,15 @@ pub async fn list_goal_milestones(
     query: web::Query<GoalIdQuery>,
     links: web::Data<PostgresGoalMilestoneRepository>,
 ) -> HttpResponse {
+    // The repository returns full milestones; the debug endpoint has always
+    // answered with bare ids, so project back to keep that shape.
     match links.milestones_for_goal(GoalId(query.goal_id)).await {
-        Ok(ids) => HttpResponse::Ok().json(ids),
+        Ok(milestones) => HttpResponse::Ok().json(
+            milestones
+                .into_iter()
+                .map(|milestone| milestone.id)
+                .collect::<Vec<_>>(),
+        ),
         Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
     }
 }

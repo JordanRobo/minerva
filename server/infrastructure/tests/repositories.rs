@@ -8,7 +8,7 @@ use application::ports::{
     ProgressSnapshotRepository, RepositoryError, TaskRelationRepository, TaskRepository,
     UserIdentityRepository, UserRepository,
 };
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use diesel::prelude::*;
 use domain::{
     Goal, GoalId, GoalMilestone, Milestone, MilestoneId, ProgressSnapshot, ProgressTarget, Role,
@@ -83,6 +83,35 @@ fn test_milestone() -> Milestone {
         created_at: now,
         updated_at: now,
     }
+}
+
+/// A fixed timestamp in 2026, exact to the second so Postgres round-trips it.
+fn at(month: u32, day: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, month, day, 9, 0, 0).unwrap()
+}
+
+fn date(month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, month, day).unwrap()
+}
+
+/// A milestone with a fixed id, target date and created_at for ordering tests.
+fn milestone_on(id: u128, target_date: Option<NaiveDate>, created_at: DateTime<Utc>) -> Milestone {
+    let mut milestone = test_milestone();
+    milestone.id = MilestoneId(Uuid::from_u128(id));
+    milestone.target_date = target_date;
+    milestone.created_at = created_at;
+    milestone.updated_at = created_at;
+    milestone
+}
+
+/// A goal with a fixed id, target date and created_at for ordering tests.
+fn goal_on(id: u128, target_date: Option<NaiveDate>, created_at: DateTime<Utc>) -> Goal {
+    let mut goal = test_goal();
+    goal.id = GoalId(Uuid::from_u128(id));
+    goal.target_date = target_date;
+    goal.created_at = created_at;
+    goal.updated_at = created_at;
+    goal
 }
 
 fn test_task(milestone_id: Option<MilestoneId>) -> Task {
@@ -361,21 +390,116 @@ async fn goal_milestone_repository_round_trip() {
     let milestone = test_milestone();
     goals.create(goal.clone()).await.unwrap();
     milestones.create(milestone.clone()).await.unwrap();
+    let goal_id = goal.id;
+    let milestone_id = milestone.id;
 
+    assert!(
+        links
+            .link(GoalMilestone::new(goal_id, milestone_id))
+            .await
+            .unwrap()
+    );
+    // The listing returns the full entity, not just the id.
+    let listed = links.milestones_for_goal(goal_id).await.unwrap();
+    assert_eq!(listed, vec![milestone]);
+    let back = links.goals_for_milestone(milestone_id).await.unwrap();
+    assert_eq!(back, vec![goal]);
+
+    assert!(links.unlink(goal_id, milestone_id).await.unwrap());
+    assert!(links.milestones_for_goal(goal_id).await.unwrap().is_empty());
+    assert!(
+        links
+            .goals_for_milestone(milestone_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    goals.delete(goal_id).await.unwrap();
+    milestones.delete(milestone_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_goal_milestone_link_is_a_no_op_leaving_one_row() {
+    let Some(pool) = pool() else { return };
+    let links = PostgresGoalMilestoneRepository::new(pool.clone());
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+
+    let goal = test_goal();
+    let milestone = test_milestone();
+    goals.create(goal.clone()).await.unwrap();
+    milestones.create(milestone.clone()).await.unwrap();
+
+    // A repeated link is not an error; the second reports nothing created.
+    assert!(
+        links
+            .link(GoalMilestone::new(goal.id, milestone.id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !links
+            .link(GoalMilestone::new(goal.id, milestone.id))
+            .await
+            .unwrap()
+    );
+    assert_eq!(links.milestones_for_goal(goal.id).await.unwrap().len(), 1);
+
+    goals.delete(goal.id).await.unwrap();
+    milestones.delete(milestone.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_goal_milestone_links_yield_exactly_one_row() {
+    let Some(pool) = pool() else { return };
+    // A second single-connection pool so both inserts are genuinely in flight
+    // at once; the shared `pool()` allows only one connection.
+    let url = std::env::var("DATABASE_URL").expect("checked by pool()");
+    let other = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create second test pool");
+
+    let links_a = PostgresGoalMilestoneRepository::new(pool.clone());
+    let links_b = PostgresGoalMilestoneRepository::new(other);
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+
+    let goal = test_goal();
+    let milestone = test_milestone();
+    goals.create(goal.clone()).await.unwrap();
+    milestones.create(milestone.clone()).await.unwrap();
+
+    let pair = GoalMilestone::new(goal.id, milestone.id);
+    let (created_a, created_b) = tokio::join!(links_a.link(pair.clone()), links_b.link(pair));
+    // Exactly one of the racers created the row; neither errored.
+    assert_eq!(created_a.unwrap() as u8 + created_b.unwrap() as u8, 1);
+    assert_eq!(links_a.milestones_for_goal(goal.id).await.unwrap().len(), 1);
+
+    goals.delete(goal.id).await.unwrap();
+    milestones.delete(milestone.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_a_goal_or_milestone_cascades_its_links() {
+    let Some(pool) = pool() else { return };
+    let links = PostgresGoalMilestoneRepository::new(pool.clone());
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+
+    // Without ON DELETE CASCADE the delete itself would fail; a surviving
+    // link row would still join to the milestone in the listing below.
+    let goal = test_goal();
+    let milestone = test_milestone();
+    goals.create(goal.clone()).await.unwrap();
+    milestones.create(milestone.clone()).await.unwrap();
     links
         .link(GoalMilestone::new(goal.id, milestone.id))
         .await
         .unwrap();
-    assert_eq!(
-        links.milestones_for_goal(goal.id).await.unwrap(),
-        vec![milestone.id]
-    );
-    assert_eq!(
-        links.goals_for_milestone(milestone.id).await.unwrap(),
-        vec![goal.id]
-    );
 
-    links.unlink(goal.id, milestone.id).await.unwrap();
+    goals.delete(goal.id).await.unwrap();
     assert!(links.milestones_for_goal(goal.id).await.unwrap().is_empty());
     assert!(
         links
@@ -384,8 +508,98 @@ async fn goal_milestone_repository_round_trip() {
             .unwrap()
             .is_empty()
     );
+    milestones.delete(milestone.id).await.unwrap();
+
+    // And the other direction.
+    let goal = test_goal();
+    let milestone = test_milestone();
+    goals.create(goal.clone()).await.unwrap();
+    milestones.create(milestone.clone()).await.unwrap();
+    links
+        .link(GoalMilestone::new(goal.id, milestone.id))
+        .await
+        .unwrap();
+
+    milestones.delete(milestone.id).await.unwrap();
+    assert!(links.milestones_for_goal(goal.id).await.unwrap().is_empty());
+    assert!(
+        links
+            .goals_for_milestone(milestone.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    goals.delete(goal.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn milestones_for_goal_is_ordered_by_target_date_created_at_id() {
+    let Some(pool) = pool() else { return };
+    let links = PostgresGoalMilestoneRepository::new(pool.clone());
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+
+    let goal = test_goal();
+    goals.create(goal.clone()).await.unwrap();
+    // Same date and created_at: the id decides. A later date sorts before an
+    // earlier-created undated one. Null target dates sort last, by
+    // created_at.
+    let m_first = milestone_on(1, Some(date(1, 5)), at(1, 3));
+    let m_second = milestone_on(2, Some(date(1, 5)), at(1, 3));
+    let m_third = milestone_on(3, Some(date(1, 10)), at(1, 1));
+    let m_fourth = milestone_on(4, None, at(1, 1));
+    let m_fifth = milestone_on(5, None, at(1, 9));
+    for milestone in [&m_first, &m_second, &m_third, &m_fourth, &m_fifth] {
+        milestones.create(milestone.clone()).await.unwrap();
+        links
+            .link(GoalMilestone::new(goal.id, milestone.id))
+            .await
+            .unwrap();
+    }
+
+    let listed = links.milestones_for_goal(goal.id).await.unwrap();
+
+    assert_eq!(
+        listed.iter().map(|m| m.id).collect::<Vec<_>>(),
+        vec![m_first.id, m_second.id, m_third.id, m_fourth.id, m_fifth.id]
+    );
 
     goals.delete(goal.id).await.unwrap();
+    for milestone in [&m_first, &m_second, &m_third, &m_fourth, &m_fifth] {
+        milestones.delete(milestone.id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn goals_for_milestone_is_ordered_the_same_way() {
+    let Some(pool) = pool() else { return };
+    let links = PostgresGoalMilestoneRepository::new(pool.clone());
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+
+    let milestone = test_milestone();
+    milestones.create(milestone.clone()).await.unwrap();
+    let g_undated = goal_on(1, None, at(1, 2));
+    let g_late = goal_on(2, Some(date(1, 20)), at(1, 5));
+    let g_early = goal_on(3, Some(date(1, 1)), at(1, 9));
+    for goal in [&g_undated, &g_late, &g_early] {
+        goals.create(goal.clone()).await.unwrap();
+        links
+            .link(GoalMilestone::new(goal.id, milestone.id))
+            .await
+            .unwrap();
+    }
+
+    let listed = links.goals_for_milestone(milestone.id).await.unwrap();
+
+    assert_eq!(
+        listed.iter().map(|g| g.id).collect::<Vec<_>>(),
+        vec![g_early.id, g_late.id, g_undated.id]
+    );
+
+    goals.delete(g_undated.id).await.unwrap();
+    goals.delete(g_late.id).await.unwrap();
+    goals.delete(g_early.id).await.unwrap();
     milestones.delete(milestone.id).await.unwrap();
 }
 

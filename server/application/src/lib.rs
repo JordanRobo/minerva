@@ -8,6 +8,7 @@ pub mod account_links;
 pub mod auth;
 pub mod authz;
 pub mod bootstrap;
+pub mod goal_milestone_links;
 pub mod oidc_login;
 pub mod ports;
 pub mod rate_limit;
