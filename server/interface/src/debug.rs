@@ -4,8 +4,8 @@
 //! yields an empty array, which is itself a useful "it works" signal.
 //!
 //! These are not meant to ship: they stay locked down to Admin (roadmap
-//! 2.4) until roadmap 3.4/3.6 provide real endpoints for the same data, and
-//! their removal is roadmap 8.5.
+//! 2.4) until their roadmap items provide real endpoints for the same data,
+//! and their removal is roadmap 8.5.
 
 use actix_web::{HttpResponse, web};
 use application::ports::{
@@ -76,8 +76,15 @@ pub async fn list_goal_milestones(
     query: web::Query<GoalIdQuery>,
     links: web::Data<PostgresGoalMilestoneRepository>,
 ) -> HttpResponse {
+    // The repository returns full milestones; the debug endpoint has always
+    // answered with bare ids, so project back to keep that shape.
     match links.milestones_for_goal(GoalId(query.goal_id)).await {
-        Ok(ids) => HttpResponse::Ok().json(ids),
+        Ok(milestones) => HttpResponse::Ok().json(
+            milestones
+                .into_iter()
+                .map(|milestone| milestone.id)
+                .collect::<Vec<_>>(),
+        ),
         Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
     }
 }

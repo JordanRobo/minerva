@@ -8,6 +8,7 @@
 
 use actix_web::{HttpResponse, ResponseError, http};
 use application::account_links::AccountLinkError;
+use application::goal_milestone_links::GoalMilestoneLinkError;
 use application::ports::RepositoryError;
 use application::status_override::StatusOverrideError;
 use serde::Serialize;
@@ -72,6 +73,27 @@ impl ApiError {
         Self {
             code: "not_found".to_owned(),
             message: "not found".to_owned(),
+            retry_after: None,
+        }
+    }
+
+    /// 404 — no goal exists with the referenced id (the goal–milestone link
+    /// routes answer with this rather than the generic `not_found`, so a
+    /// client can tell which of the two ids it sent was the bad one).
+    pub fn goal_not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: "goal_not_found".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    /// 404 — no milestone exists with the referenced id (see
+    /// [`ApiError::goal_not_found`]).
+    pub fn milestone_not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: "milestone_not_found".to_owned(),
+            message: message.into(),
             retry_after: None,
         }
     }
@@ -161,7 +183,7 @@ impl ResponseError for ApiError {
         match self.code.as_str() {
             "unauthorized" => http::StatusCode::UNAUTHORIZED,
             "forbidden" => http::StatusCode::FORBIDDEN,
-            "not_found" => http::StatusCode::NOT_FOUND,
+            "not_found" | "goal_not_found" | "milestone_not_found" => http::StatusCode::NOT_FOUND,
             "rate_limited" => http::StatusCode::TOO_MANY_REQUESTS,
             "conflict" | "account_exists" | "group_rule_exists" | "role_managed_by_sso" => {
                 http::StatusCode::CONFLICT
@@ -230,5 +252,18 @@ pub fn status_override_error_response(error: StatusOverrideError) -> ApiError {
     match error {
         StatusOverrideError::NotFound => ApiError::not_found(),
         StatusOverrideError::Repository(err) => repo_error_response(err),
+    }
+}
+
+/// Translate a [`GoalMilestoneLinkError`] into the [`ApiError`] it renders as:
+/// a missing goal or milestone -> 404 with the distinct code that names which
+/// one, repository failures map like any other.
+pub fn goal_milestone_link_error_response(error: GoalMilestoneLinkError) -> ApiError {
+    match error {
+        GoalMilestoneLinkError::GoalNotFound => ApiError::goal_not_found(error.to_string()),
+        GoalMilestoneLinkError::MilestoneNotFound => {
+            ApiError::milestone_not_found(error.to_string())
+        }
+        GoalMilestoneLinkError::Repository(err) => repo_error_response(err),
     }
 }

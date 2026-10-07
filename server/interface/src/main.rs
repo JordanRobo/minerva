@@ -5,6 +5,7 @@ mod client_ip;
 mod config;
 mod debug;
 mod error;
+mod goal_milestones;
 mod goals;
 mod invites;
 mod maintenance;
@@ -18,6 +19,9 @@ mod users;
 
 #[cfg(test)]
 mod access_tests;
+
+#[cfg(test)]
+mod goal_milestone_tests;
 
 #[cfg(test)]
 mod public_routes;
@@ -36,6 +40,7 @@ use application::auth::oidc::OidcAuthProvider;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::{AuthProviders, RedirectProvider};
 use application::bootstrap::{BootstrapAdmin, BootstrapOutcome, bootstrap_admin};
+use application::goal_milestone_links::GoalMilestoneLinkService;
 use application::oidc_login::LoginPolicy;
 use application::ports::{
     AccountEmailSender, AccountTokenRepository, NoopStatusSnapshotTrigger, OidcProvider,
@@ -130,6 +135,15 @@ async fn main() -> std::io::Result<()> {
         Arc::new(PostgresGoalRepository::new(pool.clone())),
         Arc::new(PostgresMilestoneRepository::new(pool.clone())),
         status_snapshots,
+    ));
+    // Goal–milestone linkage (roadmap 3.4): link/unlink/list go through the
+    // service so the existence and idempotency rules live in one place. Like
+    // the status-override service it takes ports, so it gets its own
+    // repository instances over the shared pool.
+    let goal_milestone_link_service = web::Data::new(GoalMilestoneLinkService::new(
+        Arc::new(PostgresGoalRepository::new(pool.clone())),
+        Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+        Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
     ));
     // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
     // service so name validation and the duplicate-name conflict live in one
@@ -370,6 +384,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(rate_limit_config.clone())
             .app_data(user_admin.clone())
             .app_data(status_override_service.clone())
+            .app_data(goal_milestone_link_service.clone())
             .app_data(status_snapshots_data.clone())
             .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())
