@@ -11,6 +11,7 @@ use application::account_links::AccountLinkError;
 use application::goal_milestone_links::GoalMilestoneLinkError;
 use application::ports::RepositoryError;
 use application::status_override::StatusOverrideError;
+use application::task_relations::TaskRelationError;
 use serde::Serialize;
 use std::time::Duration;
 use utoipa::ToSchema;
@@ -98,6 +99,29 @@ impl ApiError {
         }
     }
 
+    /// 404 — no task exists with the referenced id. The code stays the
+    /// generic `not_found` the other task routes answer with; the message
+    /// says which of the two ids named in the request was missing (the path
+    /// task or the related one).
+    pub fn task_not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: "not_found".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    /// 404 — no relation with the referenced id exists, or it does not
+    /// involve the task named in the path (reported the same way so its
+    /// existence is not leaked).
+    pub fn relation_not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: "relation_not_found".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
     /// 409 — the operation conflicts with the current state (e.g. a duplicate).
     pub fn conflict(message: impl Into<String>) -> Self {
         Self {
@@ -135,6 +159,25 @@ impl ApiError {
         }
     }
 
+    /// 409 — a relation of the same type already exists between the two tasks.
+    pub fn relation_exists(message: impl Into<String>) -> Self {
+        Self {
+            code: "relation_exists".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    /// 409 — a blocking relation in the opposite direction already exists:
+    /// the two tasks would block each other.
+    pub fn reverse_relation_exists(message: impl Into<String>) -> Self {
+        Self {
+            code: "reverse_relation_exists".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
     /// 400 — the one-time link in the request is unknown or no longer usable.
     /// One code and one message for all of them, so the answer never hints
     /// which.
@@ -150,6 +193,15 @@ impl ApiError {
     pub fn invalid_reference(message: impl Into<String>) -> Self {
         Self {
             code: "invalid_reference".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    /// 400 — the relation links a task to itself.
+    pub fn self_relation(message: impl Into<String>) -> Self {
+        Self {
+            code: "self_relation".to_owned(),
             message: message.into(),
             retry_after: None,
         }
@@ -183,11 +235,16 @@ impl ResponseError for ApiError {
         match self.code.as_str() {
             "unauthorized" => http::StatusCode::UNAUTHORIZED,
             "forbidden" => http::StatusCode::FORBIDDEN,
-            "not_found" | "goal_not_found" | "milestone_not_found" => http::StatusCode::NOT_FOUND,
-            "rate_limited" => http::StatusCode::TOO_MANY_REQUESTS,
-            "conflict" | "account_exists" | "group_rule_exists" | "role_managed_by_sso" => {
-                http::StatusCode::CONFLICT
+            "not_found" | "goal_not_found" | "milestone_not_found" | "relation_not_found" => {
+                http::StatusCode::NOT_FOUND
             }
+            "rate_limited" => http::StatusCode::TOO_MANY_REQUESTS,
+            "conflict"
+            | "account_exists"
+            | "group_rule_exists"
+            | "role_managed_by_sso"
+            | "relation_exists"
+            | "reverse_relation_exists" => http::StatusCode::CONFLICT,
             "internal_error" => http::StatusCode::INTERNAL_SERVER_ERROR,
             // bad_request, invalid_reference, invalid_token, and any unknown code
             _ => http::StatusCode::BAD_REQUEST,
@@ -265,5 +322,23 @@ pub fn goal_milestone_link_error_response(error: GoalMilestoneLinkError) -> ApiE
             ApiError::milestone_not_found(error.to_string())
         }
         GoalMilestoneLinkError::Repository(err) => repo_error_response(err),
+    }
+}
+
+/// Translate a [`TaskRelationError`] into the [`ApiError`] it renders as:
+/// a missing task -> 404 (the message names which of the two ids was
+/// missing), a missing or unrelated relation -> 404 `relation_not_found`,
+/// a self-relation -> 400, a duplicate or reverse-blocking relation -> 409.
+/// Repository failures map like any other.
+pub fn task_relation_error_response(error: TaskRelationError) -> ApiError {
+    match error {
+        TaskRelationError::TaskNotFound(_) => ApiError::task_not_found(error.to_string()),
+        TaskRelationError::RelationNotFound => ApiError::relation_not_found(error.to_string()),
+        TaskRelationError::SelfRelation => ApiError::self_relation(error.to_string()),
+        TaskRelationError::RelationExists => ApiError::relation_exists(error.to_string()),
+        TaskRelationError::ReverseRelationExists => {
+            ApiError::reverse_relation_exists("the opposite blocking relationship already exists")
+        }
+        TaskRelationError::Repository(err) => repo_error_response(err),
     }
 }

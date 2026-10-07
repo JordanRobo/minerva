@@ -3,6 +3,7 @@
 use application::ports::{RepositoryError, TaskRepository};
 use diesel::prelude::*;
 use domain::{MilestoneId, Task, TaskId};
+use uuid::Uuid;
 
 use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
@@ -53,6 +54,20 @@ impl TaskRepository for PostgresTaskRepository {
                 .optional()
                 .map_err(map_diesel_error)?;
             row.map(task_from_row).transpose()
+        })
+        .await
+    }
+
+    async fn find_by_ids(&self, ids: &[TaskId]) -> Result<Vec<Task>, RepositoryError> {
+        let pool = self.pool.clone();
+        let id_values: Vec<Uuid> = ids.iter().map(|id| id.0).collect();
+        run_on_postgres(pool, move |conn| {
+            let rows: Vec<TaskRow> = tasks::table
+                .filter(tasks::id.eq_any(id_values))
+                .order_by(tasks::id.asc())
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            rows.into_iter().map(task_from_row).collect()
         })
         .await
     }

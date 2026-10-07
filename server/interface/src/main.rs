@@ -14,6 +14,7 @@ mod openapi;
 mod redirect;
 mod routes;
 mod sso_rules;
+mod task_relations;
 mod tasks;
 mod users;
 
@@ -31,6 +32,9 @@ mod rate_limit_tests;
 
 #[cfg(test)]
 mod status_override_tests;
+
+#[cfg(test)]
+mod task_relation_tests;
 
 use actix_web::cookie::Key;
 use actix_web::{App, HttpServer, web};
@@ -51,6 +55,7 @@ use application::rate_limit::{RateLimitService, RateLimiter};
 use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_override::StatusOverrideService;
+use application::task_relations::TaskRelationService;
 use application::user_admin::UserAdminService;
 use chrono::Utc;
 use infrastructure::Argon2PasswordHasher;
@@ -144,6 +149,14 @@ async fn main() -> std::io::Result<()> {
         Arc::new(PostgresGoalRepository::new(pool.clone())),
         Arc::new(PostgresMilestoneRepository::new(pool.clone())),
         Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+    ));
+    // Task relations (roadmap 3.6, D4): create/delete/list go through the
+    // service so the existence checks and canonicalisation live in one place.
+    // Like the linkage service it takes ports, so it gets its own repository
+    // instances over the shared pool.
+    let task_relation_service = web::Data::new(TaskRelationService::new(
+        Arc::new(PostgresTaskRepository::new(pool.clone())),
+        Arc::new(PostgresTaskRelationRepository::new(pool.clone())),
     ));
     // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
     // service so name validation and the duplicate-name conflict live in one
@@ -385,6 +398,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(user_admin.clone())
             .app_data(status_override_service.clone())
             .app_data(goal_milestone_link_service.clone())
+            .app_data(task_relation_service.clone())
             .app_data(status_snapshots_data.clone())
             .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())

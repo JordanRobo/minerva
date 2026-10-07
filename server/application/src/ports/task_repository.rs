@@ -11,6 +11,10 @@ pub trait TaskRepository: Send + Sync {
     /// Returns `None` if no task has this id.
     async fn find_by_id(&self, id: TaskId) -> Result<Option<Task>, RepositoryError>;
 
+    /// The tasks with the given ids, in id order; ids with no matching task
+    /// are skipped. An empty slice yields an empty list.
+    async fn find_by_ids(&self, ids: &[TaskId]) -> Result<Vec<Task>, RepositoryError>;
+
     async fn update(&self, task: Task) -> Result<Task, RepositoryError>;
 
     async fn delete(&self, id: TaskId) -> Result<(), RepositoryError>;

@@ -1,6 +1,6 @@
 //! OpenAPI document for the Minerva API, assembled from the
 //! `#[utoipa::path]` annotations on the handlers in `auth`, `goal_milestones`,
-//! `goals`, `milestones`, `redirect`, `sso_rules`, `tasks`, and `users`. Served as JSON at `/api-docs/openapi.json` and
+//! `goals`, `milestones`, `redirect`, `sso_rules`, `task_relations`, `tasks`, and `users`. Served as JSON at `/api-docs/openapi.json` and
 //! rendered by Swagger UI at `/api-docs/swagger-ui/` (wired up in `main.rs`).
 //!
 //! The `*Doc` schema types mirror the wire shape of domain status types:
@@ -106,6 +106,7 @@ pub enum StatusSourceDoc {
         (name = "invites", description = "Invites: one-time links that create new accounts. Admin only."),
         (name = "milestones", description = "Milestones: dated checkpoints within a goal."),
         (name = "sso", description = "SSO group-to-role rules: which IdP group maps to which role while any rule exists. Admin only."),
+        (name = "task-relations", description = "Task relations: how one task connects to another — blocks, blocked_by and relates_to."),
         (name = "tasks", description = "Tasks: day-to-day work, optionally attached to a milestone."),
         (name = "users", description = "User administration: roles and active state. Admin only."),
     ),
@@ -146,6 +147,9 @@ pub enum StatusSourceDoc {
         crate::tasks::get_task,
         crate::tasks::update_task,
         crate::tasks::delete_task,
+        crate::task_relations::create_task_relation,
+        crate::task_relations::list_task_relations,
+        crate::task_relations::delete_task_relation,
         crate::users::list_users,
         crate::users::change_user_role,
         crate::users::deactivate_user,
@@ -172,6 +176,10 @@ pub enum StatusSourceDoc {
         crate::tasks::TaskListQuery,
         crate::tasks::TaskRequest,
         crate::tasks::TaskResponse,
+        crate::task_relations::CreateRelationRequest,
+        crate::task_relations::RelationType,
+        crate::task_relations::RelatedTaskResponse,
+        crate::task_relations::TaskRelationResponse,
         crate::sso_rules::SsoGroupRuleResponse,
         crate::sso_rules::GroupRuleRequest,
         crate::users::UserAdminResponse,

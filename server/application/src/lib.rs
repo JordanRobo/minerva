@@ -15,4 +15,5 @@ pub mod rate_limit;
 pub mod sso_roles;
 pub mod sso_rules;
 pub mod status_override;
+pub mod task_relations;
 pub mod user_admin;

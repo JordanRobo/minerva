@@ -39,7 +39,7 @@ pub use sso_group_rule_repository::SsoGroupRuleRepository;
 pub use status_snapshot_trigger::{
     NoopStatusSnapshotTrigger, StatusChangeTarget, StatusSnapshotError, StatusSnapshotTrigger,
 };
-pub use task_relation_repository::TaskRelationRepository;
+pub use task_relation_repository::{TaskRelationCreateError, TaskRelationRepository};
 pub use task_repository::TaskRepository;
 pub use user_identity_repository::UserIdentityRepository;
 pub use user_repository::{AccessChange, AccessChangeError, UserRepository};
