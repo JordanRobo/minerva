@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::milestone::MilestoneId;
-use crate::task_relation::{TaskRelation, TaskRelationType};
 
 /// Identifier for a [`Task`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -63,16 +62,15 @@ pub struct Task {
 impl Task {
     /// Whether this task is currently blocked by something else.
     ///
-    /// A task is blocked when another task has a
-    /// [`TaskRelationType::Blocks`] relation pointing at it — that other
-    /// task's id is the relation's `source_task_id` and this task's id is its
-    /// `target_task_id`. A [`TaskRelationType::BlockedBy`] relation pointing
-    /// *at* this task does not count: it says the *other* task is blocked by
-    /// this one, so direction matters.
-    pub fn is_blocked(&self, relations: &[TaskRelation]) -> bool {
-        relations.iter().any(|relation| {
-            relation.target_task_id == self.id && relation.relation_type == TaskRelationType::Blocks
-        })
+    /// `blockers` are the tasks that block this one — the source tasks of
+    /// the [`crate::task_relation::TaskRelationType::Blocks`] relations
+    /// pointing at it (see [`crate::task_relation::TaskRelation::as_seen_by`]).
+    /// A blocker that is already [`TaskStatus::Done`] no longer blocks:
+    /// finished work holds nothing up.
+    pub fn is_blocked(&self, blockers: &[Task]) -> bool {
+        blockers
+            .iter()
+            .any(|blocker| blocker.status != TaskStatus::Done)
     }
 }
 
@@ -105,12 +103,10 @@ mod tests {
         }
     }
 
-    fn relation_between(
-        source: TaskId,
-        target: TaskId,
-        relation_type: TaskRelationType,
-    ) -> TaskRelation {
-        TaskRelation::new(source, target, relation_type, test_timestamp())
+    fn task_with_status(status: TaskStatus) -> Task {
+        let mut task = test_task(None);
+        task.status = status;
+        task
     }
 
     #[test]
@@ -128,53 +124,30 @@ mod tests {
     }
 
     #[test]
-    fn task_with_no_relations_is_not_blocked() {
+    fn task_with_no_blockers_is_not_blocked() {
         let task = test_task(None);
         assert!(!task.is_blocked(&[]));
     }
 
     #[test]
-    fn task_with_a_blocks_relation_pointing_at_it_is_blocked() {
+    fn task_whose_blockers_are_all_done_is_not_blocked() {
+        // Finished work holds nothing up: a Done blocker no longer blocks.
         let task = test_task(None);
-        let other = TaskId::new();
-        let relations = [relation_between(other, task.id, TaskRelationType::Blocks)];
-        assert!(task.is_blocked(&relations));
-    }
-
-    #[test]
-    fn task_with_a_blocked_by_relation_pointing_at_it_is_not_blocked() {
-        // A BlockedBy relation pointing at the task says the *other* task is
-        // blocked by this one, so it does not block this task.
-        let task = test_task(None);
-        let other = TaskId::new();
-        let relations = [relation_between(
-            other,
-            task.id,
-            TaskRelationType::BlockedBy,
-        )];
-        assert!(!task.is_blocked(&relations));
-    }
-
-    #[test]
-    fn task_that_blocks_another_task_is_not_blocked_itself() {
-        // Direction matters: an outgoing Blocks relation means this task
-        // blocks someone else, not that it is blocked.
-        let task = test_task(None);
-        let other = TaskId::new();
-        let relations = [relation_between(task.id, other, TaskRelationType::Blocks)];
-        assert!(!task.is_blocked(&relations));
-    }
-
-    #[test]
-    fn task_among_several_relations_is_blocked_if_any_blocks_relation_points_at_it() {
-        let task = test_task(None);
-        let first_other = TaskId::new();
-        let second_other = TaskId::new();
-        let relations = [
-            relation_between(task.id, first_other, TaskRelationType::Blocks),
-            relation_between(second_other, task.id, TaskRelationType::RelatesTo),
-            relation_between(first_other, task.id, TaskRelationType::Blocks),
+        let blockers = [
+            task_with_status(TaskStatus::Done),
+            task_with_status(TaskStatus::Done),
         ];
-        assert!(task.is_blocked(&relations));
+        assert!(!task.is_blocked(&blockers));
+    }
+
+    #[test]
+    fn task_is_blocked_when_any_blocker_is_not_done() {
+        let task = test_task(None);
+        let blockers = [
+            task_with_status(TaskStatus::Done),
+            task_with_status(TaskStatus::InProgress),
+            task_with_status(TaskStatus::Done),
+        ];
+        assert!(task.is_blocked(&blockers));
     }
 }

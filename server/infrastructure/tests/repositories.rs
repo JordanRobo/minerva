@@ -5,15 +5,16 @@
 
 use application::ports::{
     AccessChange, GoalMilestoneRepository, GoalRepository, MilestoneRepository,
-    ProgressSnapshotRepository, RepositoryError, TaskRelationRepository, TaskRepository,
-    UserIdentityRepository, UserRepository,
+    ProgressSnapshotRepository, RepositoryError, TaskRelationCreateError, TaskRelationRepository,
+    TaskRepository, UserIdentityRepository, UserRepository,
 };
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use domain::{
     Goal, GoalId, GoalMilestone, Milestone, MilestoneId, ProgressSnapshot, ProgressTarget, Role,
-    Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationType, TaskStatus, User, UserId,
-    UserIdentity,
+    Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId, TaskRelationType, TaskStatus,
+    User, UserId, UserIdentity,
 };
 
 /// `Utc::now()` has nanosecond precision but Postgres `timestamptz` only
@@ -23,11 +24,13 @@ fn now() -> DateTime<Utc> {
         .unwrap()
 }
 use infrastructure::db::PgPool;
+use infrastructure::repositories::mapping::{TaskRelationRow, task_relation_from_row};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
     PostgresProgressSnapshotRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
     PostgresUserIdentityRepository, PostgresUserRepository,
 };
+use infrastructure::schema::{task_relations, tasks};
 use uuid::Uuid;
 
 /// Set once the migrations have been applied by [`pool`], so the tests are
@@ -668,7 +671,19 @@ async fn task_relation_repository_round_trip() {
     tasks.create(target.clone()).await.unwrap();
 
     let relation = TaskRelation::new(source.id, target.id, TaskRelationType::Blocks, now());
-    repo.create(relation.clone()).await.unwrap();
+    assert_eq!(repo.create(relation.clone()).await.unwrap(), relation);
+
+    // find_by_id returns the stored row, and None for an unknown id.
+    assert_eq!(
+        repo.find_by_id(relation.id).await.unwrap(),
+        Some(relation.clone())
+    );
+    assert!(
+        repo.find_by_id(TaskRelationId::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // The task appears in the listing whether it is the source or the
     // target of the relation.
@@ -681,12 +696,521 @@ async fn task_relation_repository_round_trip() {
         vec![relation.clone()]
     );
 
-    repo.delete(relation.id).await.unwrap();
+    // delete reports whether a row was removed.
+    assert!(repo.delete(relation.id).await.unwrap());
+    assert!(!repo.delete(relation.id).await.unwrap());
     assert!(repo.list_for_task(source.id).await.unwrap().is_empty());
     assert!(repo.list_for_task(target.id).await.unwrap().is_empty());
 
     tasks.delete(source.id).await.unwrap();
     tasks.delete(target.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_blocks_relation_is_rejected() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRelationRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool);
+
+    let a = test_task(None);
+    let b = test_task(None);
+    tasks.create(a.clone()).await.unwrap();
+    tasks.create(b.clone()).await.unwrap();
+
+    let first = TaskRelation::new(a.id, b.id, TaskRelationType::Blocks, now());
+    repo.create(first.clone()).await.unwrap();
+    assert!(matches!(
+        repo.create(TaskRelation::new(
+            a.id,
+            b.id,
+            TaskRelationType::Blocks,
+            now()
+        ))
+        .await,
+        Err(TaskRelationCreateError::Duplicate)
+    ));
+    assert_eq!(repo.list_for_task(a.id).await.unwrap(), vec![first]);
+
+    tasks.delete(a.id).await.unwrap();
+    tasks.delete(b.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn reversed_blocks_relation_is_rejected() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRelationRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool);
+
+    let a = test_task(None);
+    let b = test_task(None);
+    tasks.create(a.clone()).await.unwrap();
+    tasks.create(b.clone()).await.unwrap();
+
+    repo.create(TaskRelation::new(
+        a.id,
+        b.id,
+        TaskRelationType::Blocks,
+        now(),
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        repo.create(TaskRelation::new(
+            b.id,
+            a.id,
+            TaskRelationType::Blocks,
+            now()
+        ))
+        .await,
+        Err(TaskRelationCreateError::ReverseExists)
+    ));
+
+    tasks.delete(a.id).await.unwrap();
+    tasks.delete(b.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn normalised_blocked_by_colliding_with_an_existing_blocks_row_is_rejected() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRelationRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool);
+
+    let a = test_task(None);
+    let b = test_task(None);
+    tasks.create(a.clone()).await.unwrap();
+    tasks.create(b.clone()).await.unwrap();
+
+    repo.create(TaskRelation::new(
+        a.id,
+        b.id,
+        TaskRelationType::Blocks,
+        now(),
+    ))
+    .await
+    .unwrap();
+    // "b is blocked by a" normalises to the same canonical row: blocks(a -> b).
+    let (source, target, kind) =
+        TaskRelation::canonical_form(b.id, a.id, TaskRelationType::BlockedBy);
+    assert_eq!(
+        (source, target, kind),
+        (a.id, b.id, TaskRelationType::Blocks)
+    );
+    assert!(matches!(
+        repo.create(TaskRelation::new(source, target, kind, now()))
+            .await,
+        Err(TaskRelationCreateError::Duplicate)
+    ));
+
+    tasks.delete(a.id).await.unwrap();
+    tasks.delete(b.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn relates_to_in_either_order_yields_one_row_and_the_second_is_a_duplicate() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRelationRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool);
+
+    let a = test_task(None);
+    let b = test_task(None);
+    tasks.create(a.clone()).await.unwrap();
+    tasks.create(b.clone()).await.unwrap();
+
+    // Both submission orders normalise to the same canonical row...
+    let (s1, t1, k1) = TaskRelation::canonical_form(a.id, b.id, TaskRelationType::RelatesTo);
+    let (s2, t2, k2) = TaskRelation::canonical_form(b.id, a.id, TaskRelationType::RelatesTo);
+    assert_eq!((s1, t1, k1), (s2, t2, k2));
+    // ...so the second create is a duplicate.
+    repo.create(TaskRelation::new(s1, t1, k1, now()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        repo.create(TaskRelation::new(s2, t2, k2, now())).await,
+        Err(TaskRelationCreateError::Duplicate)
+    ));
+    assert_eq!(repo.list_for_task(a.id).await.unwrap().len(), 1);
+
+    tasks.delete(a.id).await.unwrap();
+    tasks.delete(b.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn blocks_and_relates_to_between_the_same_tasks_coexist() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRelationRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool);
+
+    let a = test_task(None);
+    let b = test_task(None);
+    tasks.create(a.clone()).await.unwrap();
+    tasks.create(b.clone()).await.unwrap();
+
+    repo.create(TaskRelation::new(
+        a.id,
+        b.id,
+        TaskRelationType::Blocks,
+        now(),
+    ))
+    .await
+    .unwrap();
+    let (source, target, kind) =
+        TaskRelation::canonical_form(a.id, b.id, TaskRelationType::RelatesTo);
+    repo.create(TaskRelation::new(source, target, kind, now()))
+        .await
+        .unwrap();
+
+    // One row per type: both endpoints list two relations.
+    assert_eq!(repo.list_for_task(a.id).await.unwrap().len(), 2);
+    assert_eq!(repo.list_for_task(b.id).await.unwrap().len(), 2);
+
+    tasks.delete(a.id).await.unwrap();
+    tasks.delete(b.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn self_relation_is_rejected() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRelationRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool);
+
+    let a = test_task(None);
+    tasks.create(a.clone()).await.unwrap();
+
+    assert!(matches!(
+        repo.create(TaskRelation::new(
+            a.id,
+            a.id,
+            TaskRelationType::Blocks,
+            now()
+        ))
+        .await,
+        Err(TaskRelationCreateError::SelfRelation)
+    ));
+    assert!(repo.list_for_task(a.id).await.unwrap().is_empty());
+
+    tasks.delete(a.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_opposite_blocks_creates_leave_exactly_one_row() {
+    let Some(pool) = pool() else { return };
+    // A second single-connection pool so both inserts are genuinely in flight
+    // at once; the shared `pool()` allows only one connection.
+    let url = std::env::var("DATABASE_URL").expect("checked by pool()");
+    let other = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create second test pool");
+
+    let repo_a = PostgresTaskRelationRepository::new(pool.clone());
+    let repo_b = PostgresTaskRelationRepository::new(other);
+    let tasks = PostgresTaskRepository::new(pool);
+
+    let a = test_task(None);
+    let b = test_task(None);
+    tasks.create(a.clone()).await.unwrap();
+    tasks.create(b.clone()).await.unwrap();
+
+    let (first, second) = tokio::join!(
+        repo_a.create(TaskRelation::new(
+            a.id,
+            b.id,
+            TaskRelationType::Blocks,
+            now()
+        )),
+        repo_b.create(TaskRelation::new(
+            b.id,
+            a.id,
+            TaskRelationType::Blocks,
+            now()
+        )),
+    );
+    // Exactly one racer won; the loser read the committed row and was told it
+    // reversed an existing blocks relation.
+    let outcomes = [first, second];
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    for outcome in &outcomes {
+        if let Err(error) = outcome {
+            assert!(matches!(error, TaskRelationCreateError::ReverseExists));
+        }
+    }
+    assert_eq!(repo_a.list_for_task(a.id).await.unwrap().len(), 1);
+
+    tasks.delete(a.id).await.unwrap();
+    tasks.delete(b.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_either_task_cascades_its_relations() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRelationRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool);
+
+    // Without ON DELETE CASCADE the delete itself would fail; a surviving
+    // relation row would still join to the task in the listing below.
+    let a = test_task(None);
+    let b = test_task(None);
+    tasks.create(a.clone()).await.unwrap();
+    tasks.create(b.clone()).await.unwrap();
+    let relation = TaskRelation::new(a.id, b.id, TaskRelationType::Blocks, now());
+    repo.create(relation.clone()).await.unwrap();
+
+    tasks.delete(a.id).await.unwrap();
+    assert!(repo.find_by_id(relation.id).await.unwrap().is_none());
+    assert!(repo.list_for_task(b.id).await.unwrap().is_empty());
+    tasks.delete(b.id).await.unwrap();
+
+    // And the other direction.
+    let a = test_task(None);
+    let b = test_task(None);
+    tasks.create(a.clone()).await.unwrap();
+    tasks.create(b.clone()).await.unwrap();
+    let relation = TaskRelation::new(a.id, b.id, TaskRelationType::Blocks, now());
+    repo.create(relation.clone()).await.unwrap();
+
+    tasks.delete(b.id).await.unwrap();
+    assert!(repo.find_by_id(relation.id).await.unwrap().is_none());
+    assert!(repo.list_for_task(a.id).await.unwrap().is_empty());
+    tasks.delete(a.id).await.unwrap();
+}
+
+/// A relation with a fixed id and created_at for ordering tests.
+fn relation_on(
+    id: u128,
+    source: TaskId,
+    target: TaskId,
+    kind: TaskRelationType,
+    created_at: DateTime<Utc>,
+) -> TaskRelation {
+    let mut relation = TaskRelation::new(source, target, kind, created_at);
+    relation.id = TaskRelationId(Uuid::from_u128(id));
+    relation
+}
+
+/// The single boolean column of an `EXISTS (…)` probe.
+#[derive(diesel::QueryableByName)]
+struct Exists {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    exists: bool,
+}
+
+fn constraint_exists(conn: &mut diesel::PgConnection, name: &str) -> bool {
+    let Exists { exists } = diesel::sql_query(format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{name}') AS exists"
+    ))
+    .get_result(conn)
+    .expect("could not probe pg_constraint");
+    exists
+}
+
+fn index_exists(conn: &mut diesel::PgConnection, name: &str) -> bool {
+    let Exists { exists } = diesel::sql_query(format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = '{name}') AS exists"
+    ))
+    .get_result(conn)
+    .expect("could not probe pg_indexes");
+    exists
+}
+
+/// Read one relation row back by id, or `None` when it is gone.
+fn stored_relation(conn: &mut diesel::PgConnection, id: TaskRelationId) -> Option<TaskRelation> {
+    let row: Option<TaskRelationRow> = task_relations::table
+        .find(id.0)
+        .first(conn)
+        .optional()
+        .expect("could not read back a seeded row");
+    row.map(task_relation_from_row)
+        .transpose()
+        .expect("row maps to a domain relation")
+}
+
+#[tokio::test]
+async fn task_relation_migration_cleans_offending_rows_and_reverts() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip Postgres tests in CI");
+        }
+        return;
+    };
+
+    // This test drops and re-adds the 3.6 constraints, so it runs on a scratch
+    // database instead of sharing the schema with the other (parallel) tests.
+    // A scratch database left behind by a crashed run is dropped again here.
+    let db_name = "minerva_task_relation_migration_test";
+    let admin_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create admin test pool");
+    {
+        let mut conn = admin_pool.get().expect("admin pool connects");
+        conn.batch_execute(format!("DROP DATABASE IF EXISTS {db_name}").as_str())
+            .expect("could not drop a stale scratch database");
+        conn.batch_execute(format!("CREATE DATABASE {db_name}").as_str())
+            .expect("could not create the scratch database");
+    }
+
+    let slash = url.rfind('/').expect("DATABASE_URL names a database");
+    let scratch_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(
+            diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(
+                url[..slash + 1].to_owned() + db_name,
+            ),
+        )
+        .expect("could not create scratch test pool");
+
+    // Fresh database: the embedded migrations apply cleanly, including the
+    // 3.6 one.
+    infrastructure::migrations::run_migrations(&scratch_pool)
+        .expect("migrations failed on a fresh database");
+
+    {
+        let mut conn = scratch_pool.get().expect("scratch pool connects");
+        // Back to the schema this migration started from...
+        conn.batch_execute(
+            "DROP INDEX IF EXISTS task_relations_unique_relates_to_pair;
+             DROP INDEX IF EXISTS task_relations_unique_blocks_pair;
+             ALTER TABLE task_relations DROP CONSTRAINT IF EXISTS task_relations_no_self_relation;",
+        )
+        .expect("could not reset to the pre-migration schema");
+
+        // ...with rows that violate it: a self-relation; reversed `blocks`
+        // rows for one pair (the older must survive); duplicate `relates_to`
+        // rows for another.
+        let a = test_task(None);
+        let b = test_task(None);
+        let c = test_task(None);
+        for task in [&a, &b, &c] {
+            diesel::insert_into(tasks::table)
+                .values((
+                    tasks::id.eq(task.id.0),
+                    tasks::title.eq("Migration test task"),
+                    tasks::status.eq("backlog"),
+                    tasks::created_at.eq(&task.created_at),
+                    tasks::updated_at.eq(&task.updated_at),
+                ))
+                .execute(&mut conn)
+                .expect("could not seed a task");
+        }
+        let self_relation = relation_on(10, a.id, a.id, TaskRelationType::Blocks, at(1, 1));
+        let old_blocks = relation_on(11, a.id, b.id, TaskRelationType::Blocks, at(1, 2));
+        let new_blocks = relation_on(12, b.id, a.id, TaskRelationType::Blocks, at(1, 3));
+        let first_relates = relation_on(13, a.id, c.id, TaskRelationType::RelatesTo, at(1, 4));
+        let second_relates = relation_on(14, c.id, a.id, TaskRelationType::RelatesTo, at(1, 5));
+        for (relation, kind) in [
+            (&self_relation, "blocks"),
+            (&old_blocks, "blocks"),
+            (&new_blocks, "blocks"),
+            (&first_relates, "relates_to"),
+            (&second_relates, "relates_to"),
+        ] {
+            diesel::insert_into(task_relations::table)
+                .values((
+                    task_relations::id.eq(relation.id.0),
+                    task_relations::source_task_id.eq(relation.source_task_id.0),
+                    task_relations::target_task_id.eq(relation.target_task_id.0),
+                    task_relations::relation_type.eq(kind),
+                    task_relations::created_at.eq(&relation.created_at),
+                ))
+                .execute(&mut conn)
+                .expect("could not seed an offending row");
+        }
+
+        // The migration applies over the mess and leaves only canonical rows.
+        conn.batch_execute(include_str!(
+            "../../migrations/20261007000001_constrain_task_relations/up.sql"
+        ))
+        .expect("up migration failed on a database with offending rows");
+
+        // The self-relation is gone and each pair keeps exactly its oldest row.
+        assert!(stored_relation(&mut conn, self_relation.id).is_none());
+        assert_eq!(
+            stored_relation(&mut conn, old_blocks.id),
+            Some(old_blocks.clone())
+        );
+        assert!(stored_relation(&mut conn, new_blocks.id).is_none());
+        assert_eq!(
+            stored_relation(&mut conn, first_relates.id),
+            Some(first_relates.clone())
+        );
+        assert!(stored_relation(&mut conn, second_relates.id).is_none());
+
+        // The new constraints are in place.
+        assert!(constraint_exists(
+            &mut conn,
+            "task_relations_no_self_relation"
+        ));
+        assert!(index_exists(&mut conn, "task_relations_unique_blocks_pair"));
+        assert!(index_exists(
+            &mut conn,
+            "task_relations_unique_relates_to_pair"
+        ));
+
+        // And the migration reverts cleanly.
+        conn.batch_execute(include_str!(
+            "../../migrations/20261007000001_constrain_task_relations/down.sql"
+        ))
+        .expect("down migration failed");
+        assert!(!constraint_exists(
+            &mut conn,
+            "task_relations_no_self_relation"
+        ));
+        assert!(!index_exists(
+            &mut conn,
+            "task_relations_unique_blocks_pair"
+        ));
+        assert!(!index_exists(
+            &mut conn,
+            "task_relations_unique_relates_to_pair"
+        ));
+        // The surviving rows are untouched by the revert.
+        assert_eq!(stored_relation(&mut conn, old_blocks.id), Some(old_blocks));
+    }
+
+    drop(scratch_pool);
+    let mut conn = admin_pool.get().expect("admin pool connects");
+    conn.batch_execute(format!("DROP DATABASE {db_name}").as_str())
+        .expect("could not drop the scratch database");
+}
+
+#[tokio::test]
+async fn list_for_task_is_ordered_by_created_at_then_id() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRelationRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool);
+
+    let task = test_task(None);
+    tasks.create(task.clone()).await.unwrap();
+    let others: Vec<Task> = (0..3).map(|_| test_task(None)).collect();
+    for other in &others {
+        tasks.create(other.clone()).await.unwrap();
+    }
+
+    // created_at decides first; a tie on created_at is broken by id. The task
+    // is the source of two rows and the target of one.
+    let earliest = relation_on(1, task.id, others[0].id, TaskRelationType::Blocks, at(1, 1));
+    let tied_lower_id = relation_on(
+        2,
+        task.id,
+        others[1].id,
+        TaskRelationType::RelatesTo,
+        at(1, 2),
+    );
+    let tied_higher_id = relation_on(4, others[2].id, task.id, TaskRelationType::Blocks, at(1, 2));
+    for relation in [&earliest, &tied_lower_id, &tied_higher_id] {
+        repo.create(relation.clone()).await.unwrap();
+    }
+
+    assert_eq!(
+        repo.list_for_task(task.id).await.unwrap(),
+        vec![earliest, tied_lower_id, tied_higher_id]
+    );
+
+    tasks.delete(task.id).await.unwrap();
+    for other in &others {
+        tasks.delete(other.id).await.unwrap();
+    }
 }
 
 #[tokio::test]
