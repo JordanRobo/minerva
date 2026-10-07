@@ -624,6 +624,22 @@ async fn task_repository_round_trip() {
         .unwrap()
         .expect("task to exist");
     assert_eq!(found, task);
+
+    // A batched lookup returns only the ids that exist, in id order.
+    let other = test_task(None);
+    repo.create(other.clone()).await.unwrap();
+    let (first, second) = if task.id.0 <= other.id.0 {
+        (task.clone(), other.clone())
+    } else {
+        (other.clone(), task.clone())
+    };
+    assert_eq!(
+        repo.find_by_ids(&[second.id, first.id, TaskId::new()])
+            .await
+            .unwrap(),
+        vec![first, second]
+    );
+
     assert!(
         repo.list_unassigned()
             .await
@@ -656,6 +672,7 @@ async fn task_repository_round_trip() {
 
     repo.delete(task.id).await.unwrap();
     assert!(repo.find_by_id(task.id).await.unwrap().is_none());
+    repo.delete(other.id).await.unwrap();
     milestones.delete(milestone.id).await.unwrap();
 }
 
