@@ -237,8 +237,8 @@ extractor and asking `authz` for its permission:
 
 | Extractor | Permission | Used by |
 |---|---|---|
-| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones` and `GET /api/milestones/{id}/goals` |
-| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}` |
+| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones`, `GET /api/milestones/{id}/goals` and `GET /api/tasks/{id}/relations` |
+| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}`, plus `POST /api/tasks/{id}/relations` and `DELETE /api/tasks/{id}/relations/{relation_id}` |
 | `AdminAccess` | `ManageUsers` | the `/api/users` routes, the invite and password-reset routes (`/api/invites`, `/api/users/{id}/password-reset`) and the temporary `/debug/*` routes (until their roadmap items replace them) |
 
 A missing or invalid session is a 401; a valid session whose role lacks the
@@ -389,6 +389,56 @@ included). Unknown ids are 404s with distinct `goal_not_found`/
 was missing. Linking does not fire the snapshot hook: status computation is
 3.13's and snapshots 3.14's (D5).
 
+### Task relations
+
+Tasks are related through the `task_relations` table (roadmap 3.6, D4) with
+**one canonical row per relationship**. The API accepts three relation types
+from the path task's perspective — `blocks`, `blocked_by` and `relates_to` —
+but storage keeps a single form: a submitted `blocked_by` is normalised on
+write to a `blocks` row with the endpoints swapped, and a `relates_to` stores
+the lower task id as the source. Both views are then derived per task when
+reading (`TaskRelation::as_seen_by`), so there is exactly one row no matter
+which side created the relation or which type it used.
+
+The guarantees live in the database, not in application checks that could
+race: migration 20261007000001 adds a `CHECK (source_task_id <>
+target_task_id)` self-relation constraint and unique indexes on the unordered
+pair — `(LEAST(source, target), GREATEST(source, target))` — for `blocks` and
+for `relates_to`, so duplicate pairs and direct reverse loops (two tasks
+blocking each other) are impossible at the database level with no race
+window. The same migration first deletes offending rows on existing
+databases: self-relations are removed, and duplicate or reversed pairs keep
+only the oldest row (earliest `created_at`, then lowest id). Pre-existing
+`blocked_by` rows are left as-is — they violate none of the new constraints,
+and application writes no longer produce them.
+
+The rules live in `application::task_relations::TaskRelationService`, not in
+the handlers:
+
+- Creating a relation checks that both tasks exist (a missing path task and a
+  missing related task are distinct 404s), rejects a task relating to itself,
+  and lets the unique indexes reject duplicates and reverse loops — surfaced
+  as typed `RelationExists`/`ReverseRelationExists` errors.
+- Deleting requires the relation to involve the task named in the path; a
+  relation that belongs to other tasks answers the same 404, so its
+  existence is not leaked.
+- Listing returns every relation the task participates in, from its
+  perspective, each with a summary of the other task (id, title, current
+  status), ordered by creation time then id.
+
+The routes are `POST /api/tasks/{id}/relations` and
+`DELETE /api/tasks/{id}/relations/{relation_id}` — Staff or Admin
+(`EditAccess`), answering 201 with the new relation and 204 — plus
+`GET /api/tasks/{id}/relations`, open to any signed-in role (`ViewAccess`),
+answering 200 with an array of `{id, relation_type, related_task: {id, title,
+status}, created_at}`. A self-relation is a 400 (`self_relation`); a
+duplicate or the opposite blocking relationship is a 409
+(`relation_exists`/`reverse_relation_exists`); unknown tasks are 404s with
+the generic `not_found` code, the message naming which of the two ids was
+missing; a missing or unrelated relation on delete is a 404
+`relation_not_found`. Longer cycle detection (A blocks B, B blocks C, C
+blocks A) is deliberately out of v1.
+
 ## API documentation
 
 The `interface` crate generates an OpenAPI 3 document from code annotations
@@ -399,8 +449,8 @@ The `interface` crate generates an OpenAPI 3 document from code annotations
 
 Under Docker compose the API is mapped to host port 3010, so use
 http://localhost:3010/api-docs/swagger-ui/ there. All `/api/*` endpoints
-(auth, goals, goal–milestone links, milestones, tasks, users, invites and SSO
-group rules) are documented; the temporary
+(auth, goals, goal–milestone links, milestones, tasks, task relations, users,
+invites and SSO group rules) are documented; the temporary
 `/debug/*` routes are not. Protected endpoints declare the `session_cookie` security
 scheme (the session cookie as an API key, registered by a `utoipa::Modify`
 addon in `interface/src/openapi.rs`) so Swagger UI's Authorize button can
