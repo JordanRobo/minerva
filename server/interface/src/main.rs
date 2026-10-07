@@ -14,6 +14,7 @@ mod openapi;
 mod redirect;
 mod routes;
 mod sso_rules;
+mod task_relations;
 mod tasks;
 mod users;
 
@@ -31,6 +32,9 @@ mod rate_limit_tests;
 
 #[cfg(test)]
 mod status_override_tests;
+
+#[cfg(test)]
+mod task_relation_tests;
 
 use actix_web::cookie::Key;
 use actix_web::{App, HttpServer, web};

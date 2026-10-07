@@ -12,7 +12,7 @@ use crate::error::ApiError;
 use crate::openapi::ApiDoc;
 use crate::{
     account_links, auth, debug, goal_milestones, goals, invites, milestones, redirect, sso_rules,
-    tasks, users,
+    task_relations, tasks, users,
 };
 
 async fn health() -> HttpResponse {
@@ -85,6 +85,20 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/tasks/{id}", web::get().to(tasks::get_task))
                 .route("/tasks/{id}", web::put().to(tasks::update_task))
                 .route("/tasks/{id}", web::delete().to(tasks::delete_task))
+                // Task relations (roadmap 3.6): one module owns the relation
+                // endpoints.
+                .route(
+                    "/tasks/{id}/relations",
+                    web::post().to(task_relations::create_task_relation),
+                )
+                .route(
+                    "/tasks/{id}/relations",
+                    web::get().to(task_relations::list_task_relations),
+                )
+                .route(
+                    "/tasks/{id}/relations/{relation_id}",
+                    web::delete().to(task_relations::delete_task_relation),
+                )
                 .route("/users", web::get().to(users::list_users))
                 .route("/users/{id}/role", web::put().to(users::change_user_role))
                 .route(

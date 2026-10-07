@@ -26,6 +26,7 @@ use application::ports::{
 use application::rate_limit::RateLimitService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_override::StatusOverrideService;
+use application::task_relations::TaskRelationService;
 use application::user_admin::UserAdminService;
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
@@ -150,6 +151,10 @@ macro_rules! test_app {
                     Arc::new(PostgresGoalRepository::new(pool.clone())),
                     Arc::new(PostgresMilestoneRepository::new(pool.clone())),
                     Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+                )))
+                .app_data(web::Data::new(TaskRelationService::new(
+                    Arc::new(PostgresTaskRepository::new(pool.clone())),
+                    Arc::new(PostgresTaskRelationRepository::new(pool.clone())),
                 )))
                 .app_data(providers)
                 .app_data(web::Data::new(CookieSettings { secure: false }))
@@ -429,6 +434,28 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
         (
             Method::DELETE,
             format!("/api/tasks/{task}"),
+            Permission::EditContent,
+            None,
+        ),
+        // The task-relation routes (roadmap 3.6).
+        (
+            Method::POST,
+            format!("/api/tasks/{task}/relations"),
+            Permission::EditContent,
+            Some(serde_json::json!({
+                "relation_type": "blocks",
+                "related_task_id": Uuid::new_v4().to_string()
+            })),
+        ),
+        (
+            Method::GET,
+            format!("/api/tasks/{task}/relations"),
+            Permission::ViewContent,
+            None,
+        ),
+        (
+            Method::DELETE,
+            format!("/api/tasks/{task}/relations/{debug_id}"),
             Permission::EditContent,
             None,
         ),
