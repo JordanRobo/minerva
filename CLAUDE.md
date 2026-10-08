@@ -29,6 +29,8 @@ bun run check    # svelte-check type checking
 
 The frontend uses **Bun** as its package manager (`bun install`; lockfile is `apps/web/bun.lock`).
 
+Design-system styles live in `apps/web/src/lib/styles/`; `tokens.css` there is generated from `docs/design/brand.json` (do not edit it by hand).
+
 No test framework is configured yet.
 
 ### Backend (`server`, Rust Cargo workspace)
