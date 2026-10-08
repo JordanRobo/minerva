@@ -174,7 +174,7 @@ pub enum StatusSourceDoc {
         crate::goals::StatusOverrideRequest,
         crate::milestones::MilestoneRequest,
         crate::milestones::MilestoneResponse,
-        crate::tasks::TaskListQuery,
+        crate::tasks::TaskPage,
         crate::tasks::TaskRequest,
         crate::tasks::TaskResponse,
         crate::tasks::TaskStatusRequest,

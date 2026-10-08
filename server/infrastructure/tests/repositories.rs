@@ -3,10 +3,11 @@
 //! Skipped unless `DATABASE_URL` is set (compose Postgres in local dev);
 //! each test cleans up after itself, so it is safe to run repeatedly.
 
+use application::pagination::PageRequest;
 use application::ports::{
     AccessChange, GoalMilestoneRepository, GoalRepository, MilestoneRepository,
-    ProgressSnapshotRepository, RepositoryError, TaskRelationCreateError, TaskRelationRepository,
-    TaskRepository, UserIdentityRepository, UserRepository,
+    ProgressSnapshotRepository, RepositoryError, TaskListFilter, TaskRelationCreateError,
+    TaskRelationRepository, TaskRepository, UserIdentityRepository, UserRepository,
 };
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use diesel::connection::SimpleConnection;
@@ -129,6 +130,26 @@ fn test_task(milestone_id: Option<MilestoneId>) -> Task {
         created_at: now,
         updated_at: now,
     }
+}
+
+/// A task with a fixed id, status, title, target date and created_at for the
+/// list-ordering and paging tests.
+fn task_on(
+    id: u128,
+    milestone_id: Option<MilestoneId>,
+    status: TaskStatus,
+    title: &str,
+    target_date: Option<NaiveDate>,
+    created_at: DateTime<Utc>,
+) -> Task {
+    let mut task = test_task(milestone_id);
+    task.id = TaskId(Uuid::from_u128(id));
+    task.status = status;
+    task.title = title.to_owned();
+    task.target_date = target_date;
+    task.created_at = created_at;
+    task.updated_at = created_at;
+    task
 }
 
 #[tokio::test]
@@ -640,35 +661,12 @@ async fn task_repository_round_trip() {
         vec![first, second]
     );
 
-    assert!(
-        repo.list_unassigned()
-            .await
-            .unwrap()
-            .iter()
-            .any(|t| t.id == task.id)
-    );
-
     // Assign the task to the milestone and move it along the board.
     let mut updated = found;
     updated.milestone_id = Some(milestone.id);
     updated.status = TaskStatus::InProgress;
     repo.update(updated.clone()).await.unwrap();
     assert_eq!(repo.find_by_id(task.id).await.unwrap().unwrap(), updated);
-    assert!(
-        repo.list_by_milestone(milestone.id)
-            .await
-            .unwrap()
-            .iter()
-            .any(|t| t.id == task.id)
-    );
-    assert!(
-        !repo
-            .list_unassigned()
-            .await
-            .unwrap()
-            .iter()
-            .any(|t| t.id == task.id)
-    );
 
     repo.delete(task.id).await.unwrap();
     assert!(repo.find_by_id(task.id).await.unwrap().is_none());
@@ -734,6 +732,372 @@ async fn task_set_status_does_not_clobber_a_concurrent_update() {
     assert_eq!(moved.status, TaskStatus::InProgress);
 
     repo.delete(task.id).await.unwrap();
+}
+
+/// The default order (roadmap 3.16): target date ascending with undated tasks
+/// last, then created_at, then id.
+#[tokio::test]
+async fn task_list_page_orders_by_target_date_nulls_last_then_created_at_then_id() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRepository::new(pool);
+    // A unique title prefix keeps the test independent of other rows.
+    let prefix = format!("order-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    let a = task_on(
+        base,
+        None,
+        TaskStatus::Backlog,
+        &format!("{prefix}-a"),
+        None,
+        at(1, 2),
+    );
+    let b = task_on(
+        base + 1,
+        None,
+        TaskStatus::Backlog,
+        &format!("{prefix}-b"),
+        None,
+        at(1, 1),
+    );
+    let c = task_on(
+        base + 2,
+        None,
+        TaskStatus::Backlog,
+        &format!("{prefix}-c"),
+        Some(date(6, 1)),
+        at(1, 3),
+    );
+    let d = task_on(
+        base + 3,
+        None,
+        TaskStatus::Backlog,
+        &format!("{prefix}-d"),
+        Some(date(6, 1)),
+        at(1, 2),
+    );
+    let e = task_on(
+        base + 4,
+        None,
+        TaskStatus::Backlog,
+        &format!("{prefix}-e"),
+        Some(date(7, 1)),
+        at(1, 1),
+    );
+    for task in [&a, &b, &c, &d, &e] {
+        repo.create(task.clone()).await.unwrap();
+    }
+
+    let filter = TaskListFilter {
+        q: Some(prefix),
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&filter, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+
+    // Dated tasks first (the 6/1 tie breaks on created_at), undated last.
+    assert_eq!(
+        page.items.iter().map(|t| t.id.0).collect::<Vec<_>>(),
+        vec![d.id.0, c.id.0, e.id.0, b.id.0, a.id.0]
+    );
+    assert_eq!(page.total, 5);
+
+    for task in [&a, &b, &c, &d, &e] {
+        repo.delete(task.id).await.unwrap();
+    }
+}
+
+/// Paging through many tasks that share one target date returns every match
+/// exactly once: no duplicates, no gaps.
+#[tokio::test]
+async fn task_list_page_walks_every_match_exactly_once() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRepository::new(pool);
+    let prefix = format!("walk-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    // Seven tasks sharing one target date and created_at: id is their only
+    // distinguishing column, so any ordering instability shows up here.
+    let mut created = Vec::new();
+    for i in 0..7u128 {
+        let task = task_on(
+            base + i,
+            None,
+            TaskStatus::Backlog,
+            &format!("{prefix}-{i}"),
+            Some(date(5, 5)),
+            at(3, 1),
+        );
+        repo.create(task.clone()).await.unwrap();
+        created.push(task.id);
+    }
+
+    let filter = TaskListFilter {
+        q: Some(prefix),
+        ..Default::default()
+    };
+    let mut seen = Vec::new();
+    for offset in [0i64, 3, 6] {
+        let page = repo
+            .list_page(&filter, &PageRequest::new(Some(3), Some(offset)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(page.total, 7);
+        seen.extend(page.items.iter().map(|t| t.id));
+    }
+    // Every created task exactly once (TaskId has no ordering of its own, so
+    // compare through the inner uuid).
+    let mut expected = created.clone();
+    expected.sort_by_key(|id| id.0);
+    let mut seen_sorted = seen.clone();
+    seen_sorted.sort_by_key(|id| id.0);
+    assert_eq!(seen_sorted, expected);
+
+    // An offset past the end is an empty page with the total intact.
+    let past_end = repo
+        .list_page(&filter, &PageRequest::new(Some(3), Some(9)).unwrap())
+        .await
+        .unwrap();
+    assert!(past_end.items.is_empty());
+    assert_eq!(past_end.total, 7);
+
+    for id in created {
+        repo.delete(id).await.unwrap();
+    }
+}
+
+/// `total` honours every filter but ignores limit/offset.
+#[tokio::test]
+async fn task_list_total_honours_filters_but_ignores_paging() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRepository::new(pool);
+    let prefix = format!("total-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    for (i, status) in [
+        (0u128, TaskStatus::Done),
+        (1, TaskStatus::Done),
+        (2, TaskStatus::Backlog),
+        (3, TaskStatus::Backlog),
+        (4, TaskStatus::Backlog),
+    ] {
+        repo.create(task_on(
+            base + i,
+            None,
+            status,
+            &format!("{prefix}-{i}"),
+            None,
+            at(2, 1),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let filter = TaskListFilter {
+        q: Some(prefix.clone()),
+        ..Default::default()
+    };
+    // A deep page of one: the total still counts all five matches.
+    let deep = repo
+        .list_page(&filter, &PageRequest::new(Some(1), Some(4)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(deep.total, 5);
+    assert_eq!(deep.items.len(), 1);
+
+    // With a status filter the total counts only the two Done tasks.
+    let done = TaskListFilter {
+        q: Some(prefix),
+        statuses: vec![TaskStatus::Done],
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&done, &PageRequest::new(Some(1), None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(page.total, 2);
+
+    for i in 0..5u128 {
+        repo.delete(TaskId(Uuid::from_u128(base + i)))
+            .await
+            .unwrap();
+    }
+}
+
+/// Every filter combines with AND; date bounds are inclusive and exclude
+/// undated tasks while either bound is set.
+#[tokio::test]
+async fn task_list_filters_combine_and_date_bounds_are_inclusive() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+    let prefix = format!("combo-{}", Uuid::new_v4());
+
+    let milestone = test_milestone();
+    milestones.create(milestone.clone()).await.unwrap();
+
+    let base = Uuid::new_v4().as_u128();
+    let in_range = task_on(
+        base,
+        Some(milestone.id),
+        TaskStatus::Done,
+        &format!("{prefix}-one"),
+        Some(date(6, 10)),
+        at(2, 1),
+    );
+    let on_boundary = task_on(
+        base + 1,
+        Some(milestone.id),
+        TaskStatus::Done,
+        &format!("{prefix}-two"),
+        Some(date(6, 1)),
+        at(2, 1),
+    );
+    let too_early = task_on(
+        base + 2,
+        Some(milestone.id),
+        TaskStatus::Done,
+        &format!("{prefix}-three"),
+        Some(date(5, 31)),
+        at(2, 1),
+    );
+    let wrong_status = task_on(
+        base + 3,
+        Some(milestone.id),
+        TaskStatus::Backlog,
+        &format!("{prefix}-four"),
+        Some(date(6, 5)),
+        at(2, 1),
+    );
+    let unassigned = task_on(
+        base + 4,
+        None,
+        TaskStatus::Done,
+        &format!("{prefix}-five"),
+        Some(date(6, 5)),
+        at(2, 1),
+    );
+    let undated = task_on(
+        base + 5,
+        Some(milestone.id),
+        TaskStatus::Done,
+        &format!("{prefix}-six"),
+        None,
+        at(2, 1),
+    );
+    for task in [
+        &in_range,
+        &on_boundary,
+        &too_early,
+        &wrong_status,
+        &unassigned,
+        &undated,
+    ] {
+        repo.create(task.clone()).await.unwrap();
+    }
+
+    let filter = TaskListFilter {
+        q: Some(prefix),
+        statuses: vec![TaskStatus::Done],
+        milestone_id: Some(milestone.id),
+        target_after: Some(date(6, 1)),
+        target_before: Some(date(6, 30)),
+    };
+    let page = repo
+        .list_page(&filter, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+
+    // Only the in-range task and the one sitting on the lower boundary.
+    assert_eq!(
+        page.items.iter().map(|t| t.id.0).collect::<Vec<_>>(),
+        vec![on_boundary.id.0, in_range.id.0]
+    );
+    assert_eq!(page.total, 2);
+
+    for task in [
+        &in_range,
+        &on_boundary,
+        &too_early,
+        &wrong_status,
+        &unassigned,
+        &undated,
+    ] {
+        repo.delete(task.id).await.unwrap();
+    }
+    milestones.delete(milestone.id).await.unwrap();
+}
+
+/// The `q` search is a literal substring: the LIKE wildcards in the needle
+/// match only titles containing that exact text.
+#[tokio::test]
+async fn task_list_q_matches_wildcard_characters_literally() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRepository::new(pool);
+    let prefix = format!("wild-{}", Uuid::new_v4());
+
+    let base = Uuid::new_v4().as_u128();
+    let percent = task_on(
+        base,
+        None,
+        TaskStatus::Backlog,
+        &format!("{prefix}-100% done"),
+        None,
+        at(2, 1),
+    );
+    let underscore = task_on(
+        base + 1,
+        None,
+        TaskStatus::Backlog,
+        &format!("{prefix}-a_b"),
+        None,
+        at(2, 1),
+    );
+    let sibling = task_on(
+        base + 2,
+        None,
+        TaskStatus::Backlog,
+        &format!("{prefix}-axb"),
+        None,
+        at(2, 1),
+    );
+    for task in [&percent, &underscore, &sibling] {
+        repo.create(task.clone()).await.unwrap();
+    }
+
+    // A needle ending in `%` finds the literal percent sign only...
+    let by_percent = TaskListFilter {
+        q: Some(format!("{prefix}-100%")),
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&by_percent, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|t| t.id.0).collect::<Vec<_>>(),
+        vec![percent.id.0]
+    );
+
+    // ...and a `_` in the needle is not a one-character wildcard.
+    let by_underscore = TaskListFilter {
+        q: Some(format!("{prefix}-a_b")),
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&by_underscore, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|t| t.id.0).collect::<Vec<_>>(),
+        vec![underscore.id.0]
+    );
+
+    for task in [&percent, &underscore, &sibling] {
+        repo.delete(task.id).await.unwrap();
+    }
 }
 
 #[tokio::test]

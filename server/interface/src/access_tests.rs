@@ -26,6 +26,7 @@ use application::ports::{
 use application::rate_limit::RateLimitService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_override::StatusOverrideService;
+use application::task_list::TaskListService;
 use application::task_relations::TaskRelationService;
 use application::task_status::TaskStatusService;
 use application::user_admin::UserAdminService;
@@ -158,6 +159,9 @@ macro_rules! test_app {
                     Arc::new(PostgresTaskRelationRepository::new(pool.clone())),
                 )))
                 .app_data(web::Data::new(TaskStatusService::new(Arc::new(
+                    PostgresTaskRepository::new(pool.clone()),
+                ))))
+                .app_data(web::Data::new(TaskListService::new(Arc::new(
                     PostgresTaskRepository::new(pool.clone()),
                 ))))
                 .app_data(providers)
@@ -410,10 +414,10 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Permission::ViewContent,
             None,
         ),
-        // `GET /api/tasks` 400s without a filter, before any auth answer.
+        // `GET /api/tasks` lists every task when no filter is given.
         (
             Method::GET,
-            "/api/tasks?unassigned=true".into(),
+            "/api/tasks".into(),
             Permission::ViewContent,
             None,
         ),

@@ -1,9 +1,10 @@
 //! Postgres implementation of [`TaskRepository`].
 
-use application::ports::{RepositoryError, TaskRepository};
+use application::pagination::{Page, PageRequest};
+use application::ports::{RepositoryError, TaskListFilter, TaskRepository};
 use chrono::Utc;
 use diesel::prelude::*;
-use domain::{MilestoneId, Task, TaskId, TaskStatus};
+use domain::{Task, TaskId, TaskStatus};
 use uuid::Uuid;
 
 use crate::db::{PgPool, run_on_postgres};
@@ -130,30 +131,86 @@ impl TaskRepository for PostgresTaskRepository {
         .await
     }
 
-    async fn list_by_milestone(
+    async fn list_page(
         &self,
-        milestone_id: MilestoneId,
-    ) -> Result<Vec<Task>, RepositoryError> {
+        filter: &TaskListFilter,
+        page: &PageRequest,
+    ) -> Result<Page<Task>, RepositoryError> {
         let pool = self.pool.clone();
+        let filter = filter.clone();
+        let page = *page;
+        let limit = page.limit as i64;
+        let offset = page.offset as i64;
         run_on_postgres(pool, move |conn| {
-            let rows: Vec<TaskRow> = tasks::table
-                .filter(tasks::milestone_id.eq(milestone_id.0))
+            // The count and the page share one filtered base query (roadmap
+            // 3.10): total honours every filter but ignores limit/offset. A
+            // boxed query is consumed by both `count` and `load`, so the
+            // builder runs twice.
+            let build_query = || {
+                let mut query = tasks::table.into_boxed();
+                if !filter.statuses.is_empty() {
+                    let statuses: Vec<&'static str> = filter
+                        .statuses
+                        .iter()
+                        .copied()
+                        .map(task_status_to_db)
+                        .collect();
+                    query = query.filter(tasks::status.eq_any(statuses));
+                }
+                if let Some(milestone_id) = filter.milestone_id {
+                    query = query.filter(tasks::milestone_id.eq(milestone_id.0));
+                }
+                if let Some(needle) = &filter.q {
+                    query = query.filter(tasks::title.ilike(escape_like_pattern(needle)));
+                }
+                if let Some(after) = filter.target_after {
+                    query = query.filter(tasks::target_date.ge(after));
+                }
+                if let Some(before) = filter.target_before {
+                    query = query.filter(tasks::target_date.le(before));
+                }
+                query
+            };
+            let total: i64 = build_query()
+                .count()
+                .first(conn)
+                .map_err(map_diesel_error)?;
+            // The default order (roadmap 3.16): target date ascending with
+            // nulls last, then created_at, then id.
+            let rows: Vec<TaskRow> = build_query()
+                .order((
+                    tasks::target_date.asc().nulls_last(),
+                    tasks::created_at.asc(),
+                    tasks::id.asc(),
+                ))
+                .limit(limit)
+                .offset(offset)
                 .load(conn)
                 .map_err(map_diesel_error)?;
-            rows.into_iter().map(task_from_row).collect()
+            Ok(Page {
+                items: rows
+                    .into_iter()
+                    .map(task_from_row)
+                    .collect::<Result<Vec<_>, _>>()?,
+                total: total as u64,
+                limit: page.limit,
+                offset: page.offset,
+            })
         })
         .await
     }
+}
 
-    async fn list_unassigned(&self) -> Result<Vec<Task>, RepositoryError> {
-        let pool = self.pool.clone();
-        run_on_postgres(pool, |conn| {
-            let rows: Vec<TaskRow> = tasks::table
-                .filter(tasks::milestone_id.is_null())
-                .load(conn)
-                .map_err(map_diesel_error)?;
-            rows.into_iter().map(task_from_row).collect()
-        })
-        .await
+/// A `LIKE`/`ILIKE` pattern matching `needle` literally as a substring: the
+/// wildcard characters are escaped, so a search for `100%` finds only titles
+/// containing that exact text.
+fn escape_like_pattern(needle: &str) -> String {
+    let mut escaped = String::with_capacity(needle.len() + 2);
+    for ch in needle.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
     }
+    format!("%{escaped}%")
 }

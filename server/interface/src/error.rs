@@ -49,6 +49,16 @@ impl ApiError {
         }
     }
 
+    /// 400 — a query-string parameter is missing or malformed (the message
+    /// names the offending parameter).
+    pub fn invalid_query(message: impl Into<String>) -> Self {
+        Self {
+            code: "invalid_query".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
     /// 401 — the request carries no valid credentials (a failed login, or a
     /// missing/expired session cookie). Deliberately generic: it must not
     /// reveal whether an account with the given email exists.
@@ -247,7 +257,7 @@ impl ResponseError for ApiError {
             | "relation_exists"
             | "reverse_relation_exists" => http::StatusCode::CONFLICT,
             "internal_error" => http::StatusCode::INTERNAL_SERVER_ERROR,
-            // bad_request, invalid_reference, invalid_token, and any unknown code
+            // bad_request, invalid_query, invalid_reference, invalid_token, and any unknown code
             _ => http::StatusCode::BAD_REQUEST,
         }
     }

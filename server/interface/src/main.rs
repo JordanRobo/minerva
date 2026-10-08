@@ -34,6 +34,9 @@ mod rate_limit_tests;
 mod status_override_tests;
 
 #[cfg(test)]
+mod task_list_tests;
+
+#[cfg(test)]
 mod task_relation_tests;
 
 #[cfg(test)]
@@ -58,6 +61,7 @@ use application::rate_limit::{RateLimitService, RateLimiter};
 use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_override::StatusOverrideService;
+use application::task_list::TaskListService;
 use application::task_relations::TaskRelationService;
 use application::task_status::TaskStatusService;
 use application::user_admin::UserAdminService;
@@ -167,6 +171,11 @@ async fn main() -> std::io::Result<()> {
     // service it takes ports, over its own repository instance on the shared
     // pool. No snapshot trigger: a board move is not a status change (D5).
     let task_status_service = web::Data::new(TaskStatusService::new(Arc::new(
+        PostgresTaskRepository::new(pool.clone()),
+    )));
+    // Task list pagination & filtering (roadmap 3.10, 3.16, D16): the list
+    // goes through the service so the handler never touches a repository.
+    let task_list_service = web::Data::new(TaskListService::new(Arc::new(
         PostgresTaskRepository::new(pool.clone()),
     )));
     // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
@@ -411,6 +420,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(goal_milestone_link_service.clone())
             .app_data(task_relation_service.clone())
             .app_data(task_status_service.clone())
+            .app_data(task_list_service.clone())
             .app_data(status_snapshots_data.clone())
             .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())

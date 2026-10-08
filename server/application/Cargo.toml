@@ -14,3 +14,5 @@ sha2 = { workspace = true }
 [dev-dependencies]
 # Test runtime for the SessionService unit tests only; never a runtime dep.
 tokio = { version = "1", features = ["macros", "rt"] }
+# Deterministic ids in the task-list fake's ordering and paging tests only.
+uuid = { version = "1", features = ["v4"] }
