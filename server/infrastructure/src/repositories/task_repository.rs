@@ -1,8 +1,9 @@
 //! Postgres implementation of [`TaskRepository`].
 
 use application::ports::{RepositoryError, TaskRepository};
+use chrono::Utc;
 use diesel::prelude::*;
-use domain::{MilestoneId, Task, TaskId};
+use domain::{MilestoneId, Task, TaskId, TaskStatus};
 use uuid::Uuid;
 
 use crate::db::{PgPool, run_on_postgres};
@@ -92,6 +93,25 @@ impl TaskRepository for PostgresTaskRepository {
                 return Err(RepositoryError::NotFound);
             }
             Ok(task)
+        })
+        .await
+    }
+
+    async fn set_status(&self, id: TaskId, status: TaskStatus) -> Result<Task, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            // One UPDATE ... RETURNING that writes only the status column and
+            // updated_at, so a concurrent edit of any other field survives it
+            // (roadmap 3.7). A task that does not exist matches no row.
+            let row: TaskRow = diesel::update(tasks::table.find(id.0))
+                .set((
+                    tasks::status.eq(task_status_to_db(status)),
+                    tasks::updated_at.eq(Utc::now()),
+                ))
+                .returning(tasks::all_columns)
+                .get_result(conn)
+                .map_err(map_diesel_error)?;
+            task_from_row(row)
         })
         .await
     }

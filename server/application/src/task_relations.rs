@@ -339,6 +339,19 @@ mod tests {
             }
         }
 
+        async fn set_status(
+            &self,
+            id: TaskId,
+            status: TaskStatus,
+        ) -> Result<Task, RepositoryError> {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            task.status = status;
+            Ok(task.clone())
+        }
+
         async fn delete(&self, id: TaskId) -> Result<(), RepositoryError> {
             if self.tasks.lock().unwrap().remove(&id).is_none() {
                 return Err(RepositoryError::NotFound);

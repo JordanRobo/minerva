@@ -85,6 +85,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/tasks/{id}", web::get().to(tasks::get_task))
                 .route("/tasks/{id}", web::put().to(tasks::update_task))
                 .route("/tasks/{id}", web::delete().to(tasks::delete_task))
+                // Board-state transitions (roadmap 3.7): the drag-and-drop
+                // column move, changing only the status column.
+                .route(
+                    "/tasks/{id}/status",
+                    web::patch().to(tasks::set_task_status),
+                )
                 // Task relations (roadmap 3.6): one module owns the relation
                 // endpoints.
                 .route(

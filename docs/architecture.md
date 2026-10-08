@@ -238,7 +238,7 @@ extractor and asking `authz` for its permission:
 | Extractor | Permission | Used by |
 |---|---|---|
 | `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones`, `GET /api/milestones/{id}/goals` and `GET /api/tasks/{id}/relations` |
-| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}`, plus `POST /api/tasks/{id}/relations` and `DELETE /api/tasks/{id}/relations/{relation_id}` |
+| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}`, plus `POST /api/tasks/{id}/relations` and `DELETE /api/tasks/{id}/relations/{relation_id}`, plus `PATCH /api/tasks/{id}/status` |
 | `AdminAccess` | `ManageUsers` | the `/api/users` routes, the invite and password-reset routes (`/api/invites`, `/api/users/{id}/password-reset`) and the temporary `/debug/*` routes (until their roadmap items replace them) |
 
 A missing or invalid session is a 401; a valid session whose role lacks the
@@ -438,6 +438,31 @@ the generic `not_found` code, the message naming which of the two ids was
 missing; a missing or unrelated relation on delete is a 404
 `relation_not_found`. Longer cycle detection (A blocks B, B blocks C, C
 blocks A) is deliberately out of v1.
+
+### Task board transitions
+
+The drag-and-drop task board moves cards between columns through
+`PATCH /api/tasks/{id}/status` (roadmap 3.7, D6). The move is a single-column
+write: `TaskRepository::set_status` issues one `UPDATE … RETURNING` that sets
+only the status column and `updated_at`, so a concurrent edit of any other
+field through `PUT /api/tasks/{id}` cannot be clobbered — there is no
+load-modify-save round trip. An unknown id matches no row and surfaces as the
+typed not-found error.
+
+The rules live in `application::task_status::TaskStatusService`:
+
+- Any column may move to any other, including Done back to Backlog — v1 has
+  no workflow restrictions (D6).
+- A blocked task is never refused; flagging a move past unfinished blockers
+  is the UI's call (D6), not the API's.
+- Setting the column a task already has is an idempotent no-op: the service
+  answers with the stored task without writing, so `updated_at` is untouched.
+
+A board move does not fire the snapshot trigger and does not touch goal or
+milestone status computation (D5): snapshots are 3.14's and computed status
+3.13's. The route is Staff or Admin (`EditAccess`) and answers 200 with the
+updated task in the standard task response shape; an unknown task is a 404,
+and an unknown status string a 400 from JSON parsing before the handler runs.
 
 ## API documentation
 

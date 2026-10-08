@@ -36,6 +36,9 @@ mod status_override_tests;
 #[cfg(test)]
 mod task_relation_tests;
 
+#[cfg(test)]
+mod task_status_tests;
+
 use actix_web::cookie::Key;
 use actix_web::{App, HttpServer, web};
 use application::account_links::AccountLinkService;
@@ -56,6 +59,7 @@ use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_override::StatusOverrideService;
 use application::task_relations::TaskRelationService;
+use application::task_status::TaskStatusService;
 use application::user_admin::UserAdminService;
 use chrono::Utc;
 use infrastructure::Argon2PasswordHasher;
@@ -158,6 +162,13 @@ async fn main() -> std::io::Result<()> {
         Arc::new(PostgresTaskRepository::new(pool.clone())),
         Arc::new(PostgresTaskRelationRepository::new(pool.clone())),
     ));
+    // Board-state transitions (roadmap 3.7, D6): the column move goes through
+    // the service so the no-op rule lives in one place; like the relation
+    // service it takes ports, over its own repository instance on the shared
+    // pool. No snapshot trigger: a board move is not a status change (D5).
+    let task_status_service = web::Data::new(TaskStatusService::new(Arc::new(
+        PostgresTaskRepository::new(pool.clone()),
+    )));
     // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
     // service so name validation and the duplicate-name conflict live in one
     // place (see application::sso_rules).
@@ -399,6 +410,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(status_override_service.clone())
             .app_data(goal_milestone_link_service.clone())
             .app_data(task_relation_service.clone())
+            .app_data(task_status_service.clone())
             .app_data(status_snapshots_data.clone())
             .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())

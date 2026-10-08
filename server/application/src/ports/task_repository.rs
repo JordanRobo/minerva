@@ -1,6 +1,6 @@
 //! Persistence port for [`Task`]s.
 
-use domain::{MilestoneId, Task, TaskId};
+use domain::{MilestoneId, Task, TaskId, TaskStatus};
 
 use crate::ports::RepositoryError;
 
@@ -16,6 +16,11 @@ pub trait TaskRepository: Send + Sync {
     async fn find_by_ids(&self, ids: &[TaskId]) -> Result<Vec<Task>, RepositoryError>;
 
     async fn update(&self, task: Task) -> Result<Task, RepositoryError>;
+
+    /// Change only the task's board column (and `updated_at`), in a single
+    /// write that cannot clobber fields another writer changed in between;
+    /// returns the updated task. An unknown id is a `NotFound`.
+    async fn set_status(&self, id: TaskId, status: TaskStatus) -> Result<Task, RepositoryError>;
 
     async fn delete(&self, id: TaskId) -> Result<(), RepositoryError>;
 
