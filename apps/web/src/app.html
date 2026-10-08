@@ -3,7 +3,17 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="color-scheme" content="light dark" />
 		<meta name="text-scale" content="scale" />
+		<script>
+			// Roadmap 6.2: follow the OS colour scheme before first paint and keep
+			// html.dark in sync with it. No manual toggle, no storage.
+			const darkQuery = matchMedia('(prefers-color-scheme: dark)');
+			const applyDark = () =>
+				document.documentElement.classList.toggle('dark', darkQuery.matches);
+			applyDark();
+			darkQuery.addEventListener('change', applyDark);
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

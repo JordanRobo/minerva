@@ -1,0 +1,8 @@
+/* Hand-maintained shell layout tokens for the 6.3 app shell. Do not regenerate. */
+:root {
+	--minerva-shell-sidebar-w: 264px;
+	--minerva-shell-sidebar-w-min: 72px;
+	--minerva-shell-page-max: 1200px;
+	--minerva-shell-topbar-h: 56px;
+	--minerva-shell-tabbar-h: 64px;
+}

@@ -1,0 +1,1042 @@
+<!doctype html>
+<!--
+  Minerva — app shell (design spec & prototype)
+  Single self-contained file. Shell tokens bind to the Minerva design system;
+  shell-only additions are listed in the "Handoff" section at the bottom.
+-->
+<html lang="en">
+<head><script type="application/json" data-od-external-dependencies>["https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap"]</script>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Minerva · App shell</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap" rel="stylesheet" />
+  <style>
+    /* ─── tokens (Minerva design system) ─────────────────────────────
+       Light palette is the registered brand palette. Dark values come
+       from the Minerva posture (dark mode) and extend the palette for
+       dark surfaces only. No raw hex outside this block. */
+    :root {
+      --bg: #fbf6ee;          /* cream — page canvas */
+      --surface: #ffffff;     /* white — cards, panels */
+      --fg: #1e2233;          /* ink — text, dark surfaces */
+      --muted: #5b6078;       /* slate — secondary text */
+      --border: #dfdbd7;      /* ink line — 1px rules */
+      --accent: #c4502b;      /* terracotta — light backgrounds only */
+      --accent-2: #e9805f;    /* ember — dark backgrounds only */
+      --bg-dark: #171a28;     /* posture: dark canvas */
+      --surface-dark: #1e2233;/* posture: dark cards */
+      --fg-dark: #f3ece1;     /* posture: dark text */
+
+      --font-display: 'Fraunces', Georgia, serif;
+      --font-body: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+
+      --radius: 12px;
+
+      /* shell-only tokens (new — listed in Handoff) */
+      --shell-sidebar-w: 264px;
+      --shell-sidebar-w-min: 72px;
+      --shell-page-max: 1200px;
+      --shell-pad: 32px;
+      --shell-pad-sm: 20px;
+      --shell-topbar-h: 56px;
+      --shell-tabbar-h: 64px;
+      --touch-min: 44px;
+
+      --gap-xs: 8px; --gap-sm: 12px; --gap-md: 20px; --gap-lg: 32px; --gap-xl: 56px;
+    }
+
+    /* ─── reset & base ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font-family: var(--font-body); font-size: 16px; line-height: 1.65;
+      text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
+    }
+    img, svg { display: block; max-width: 100%; }
+    a { color: inherit; text-decoration: none; }
+    button { font: inherit; color: inherit; cursor: pointer; background: none; border: 0; padding: 0; }
+    p { text-wrap: pretty; margin: 0; }
+    h1, h2, h3, h4 { text-wrap: balance; margin: 0; font-family: var(--font-display); font-weight: 500; }
+    :focus-visible { outline: 2px solid var(--sh-accent, var(--accent)); outline-offset: 2px; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+
+    /* ─── shared type & primitives ─────────────────────────────────── */
+    .lead { font-size: 17px; line-height: 1.55; color: var(--muted); max-width: 62ch; }
+    .eyebrow {
+      font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--accent); margin: 0 0 var(--gap-md);
+    }
+    .meta { font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
+    .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+    .container { max-width: 1060px; margin-inline: auto; padding-inline: var(--gap-lg); }
+    .section { padding-block: var(--gap-xl); }
+    .section + .section { border-top: 1px solid var(--border); }
+    .rule { border: 0; border-top: 1px solid var(--border); margin: 0; }
+    .ic { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+    .ds-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .ds-table th, .ds-table td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .ds-table th { color: var(--muted); font-weight: 500; font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+    .ds-table td.num, .ds-table .num-col { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .log-row { display: grid; grid-template-columns: 150px 1fr 110px; gap: var(--gap-md); padding: 18px 0; border-top: 1px solid var(--border); align-items: baseline; }
+    .log-row h3 { font-family: var(--font-body); font-size: 15px; font-weight: 600; }
+    .log-row p { font-size: 14px; color: var(--muted); margin-top: 2px; }
+    .log-row .pull { text-align: right; }
+    .tag { display: inline-flex; align-items: center; padding: 3px 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; font-size: 12px; white-space: nowrap; }
+
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field label { font-size: 13px; color: var(--muted); }
+    .input {
+      width: 100%; min-height: var(--touch-min); padding: 10px 14px;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--surface); color: var(--fg); font: inherit; font-size: 15px;
+    }
+    .input::placeholder { color: var(--muted); opacity: .7; }
+    .input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+
+    /* ─── spec sheet chrome (this document, not the shell) ────────── */
+    .specbar { border-bottom: 1px solid var(--border); }
+    .specbar .container { display: flex; align-items: baseline; justify-content: space-between; gap: var(--gap-md); padding-block: 18px; flex-wrap: wrap; }
+    .wordmark { font-family: var(--font-display); font-weight: 600; font-size: 21px; letter-spacing: -0.01em; }
+    .dot { position: relative; }
+    .dot::after {
+      content: ''; position: absolute; width: .28em; height: .28em; border-radius: 50%;
+      background: var(--sh-accent, var(--accent)); left: 50%; top: -0.32em; transform: translateX(-50%);
+    }
+    .frame { margin-top: var(--gap-xl); }
+    .frame:first-of-type { margin-top: 0; }
+    .frame h2 { font-size: 25px; letter-spacing: -0.01em; }
+    .frame-note { margin-top: 6px; font-size: 14.5px; color: var(--muted); max-width: 72ch; }
+    .demo { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; }
+    .demo-group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .demo-label { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-right: 2px; }
+    .demo-btn {
+      border: 1px solid var(--border); background: var(--surface); color: var(--fg);
+      font-size: 13px; font-weight: 500; padding: 6px 12px; border-radius: 8px;
+      transition: border-color 0.15s ease, background 0.15s ease;
+    }
+    .demo-btn:hover { border-color: var(--fg); }
+    .demo-btn[aria-pressed='true'] { background: var(--fg); border-color: var(--fg); color: var(--bg); }
+    .browser { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg); }
+    .browser .shell.desktop { height: 640px; }
+    .browser.bare { height: 560px; display: grid; place-items: center; padding: 24px; }
+    .pagefoot { border-top: 1px solid var(--border); padding-block: var(--gap-lg); color: var(--muted); font-size: 13px; }
+
+    /* ─── shell scope: light + dark tokens ─────────────────────────── */
+    .shell {
+      --sh-bg: var(--bg); --sh-surface: var(--surface); --sh-fg: var(--fg);
+      --sh-muted: var(--muted); --sh-line: var(--border); --sh-accent: var(--accent);
+      background: var(--sh-bg); color: var(--sh-fg);
+      font-family: var(--font-body); font-size: 16px; line-height: 1.65;
+    }
+    .shell.dark {
+      --sh-bg: var(--bg-dark); --sh-surface: var(--surface-dark); --sh-fg: var(--fg-dark);
+      --sh-muted: color-mix(in oklch, var(--fg-dark) 62%, transparent);
+      --sh-line: color-mix(in oklch, var(--fg-dark) 15%, transparent);
+      --sh-accent: var(--accent-2);
+    }
+
+    /* skip link (first tab stop in every shell) */
+    .skip {
+      position: absolute; left: 12px; top: -64px; z-index: 60;
+      background: var(--sh-surface); border: 1px solid var(--sh-line); border-radius: 8px;
+      padding: 8px 14px; font-size: 14px; font-weight: 500; color: var(--sh-fg);
+      transition: top 0.15s ease;
+    }
+    .skip:focus { top: 12px; }
+
+    /* ─── buttons (in-shell) ─────────────────────────────────────────
+       Primary labels sit on terracotta at 18px+ per posture. */
+    .shell .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      border-radius: var(--radius); border: 1px solid transparent;
+      font-weight: 500; white-space: nowrap;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .shell .btn:active { transform: translateY(1px); }
+    .shell .btn-primary {
+      background: var(--sh-accent); color: var(--surface);
+      font-size: 18px; padding: 9px 20px; min-height: var(--touch-min);
+    }
+    .shell .btn-primary:hover { background: color-mix(in oklch, var(--sh-accent) 88%, black); }
+    .shell.dark .btn-primary { color: var(--fg); }
+    .shell.dark .btn-primary:hover { background: color-mix(in oklch, var(--sh-accent) 88%, black); }
+    .shell .btn-secondary {
+      background: transparent; color: var(--sh-fg); border-color: var(--sh-line);
+      font-size: 14.5px; padding: 8px 16px; min-height: 40px;
+    }
+    .shell .btn-secondary:hover { border-color: var(--sh-fg); }
+    .shell .btn-ghost {
+      background: transparent; color: var(--sh-fg); font-size: 14.5px;
+      padding: 8px 10px; min-height: 40px;
+    }
+    .shell .btn-ghost:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); }
+
+    /* ─── desktop shell: grid ──────────────────────────────────────── */
+    .tdot { color: var(--sh-accent, var(--accent)); }
+    .shell.desktop {
+      position: relative;
+      display: grid; grid-template-columns: var(--shell-sidebar-w) minmax(0, 1fr);
+      height: 100%;
+    }
+    .shell.desktop.collapsed { grid-template-columns: var(--shell-sidebar-w-min) minmax(0, 1fr); }
+
+    /* sidebar */
+    .sidebar {
+      background: var(--sh-surface); border-right: 1px solid var(--sh-line);
+      display: flex; flex-direction: column; padding: 16px 12px 12px; min-height: 0;
+    }
+    .brand-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px 16px; }
+    .brand {
+      font-family: var(--font-display); font-weight: 600; font-size: 21px;
+      letter-spacing: -0.01em; color: var(--sh-fg);
+    }
+    .brand .sym { display: none; }
+    .collapse-btn {
+      width: 30px; height: 30px; display: grid; place-items: center;
+      border-radius: 8px; color: var(--sh-muted);
+    }
+    .collapse-btn:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); color: var(--sh-fg); }
+    .collapse-btn .ic { width: 16px; height: 16px; transition: transform 0.2s ease; }
+    .collapsed .collapse-btn .ic { transform: rotate(180deg); }
+
+    .nav { display: flex; flex-direction: column; gap: 2px; min-height: 0; overflow-y: auto; }
+    .navlink {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 12px; border-radius: 8px;
+      font-size: 14.5px; font-weight: 500; color: var(--sh-fg);
+      transition: background 0.15s ease;
+    }
+    .navlink .ic { color: var(--sh-muted); }
+    .navlink:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); }
+    .navlink:hover .ic { color: var(--sh-fg); }
+    .navlink.active { background: color-mix(in oklch, var(--sh-accent) 12%, transparent); }
+    .navlink.active .ic { color: var(--sh-accent); }
+    .nav-group-label {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--sh-muted); padding: 18px 12px 6px;
+    }
+    /* collapsed sidebar: icons only */
+    .collapsed .navlink { justify-content: center; padding: 11px 0; }
+    .collapsed .navlabel, .collapsed .nav-group-label,
+    .collapsed .userchip .uchip-text, .collapsed .brand .full { display: none; }
+    .collapsed .brand-row { justify-content: center; padding-bottom: 12px; }
+    .collapsed .brand .full { display: none; }
+    .collapsed .brand .sym { display: inline; }
+    .collapsed .userchip { justify-content: center; }
+
+    /* user chip (bottom of sidebar) + menu */
+    .userchip-wrap { margin-top: auto; position: relative; }
+    .userchip {
+      width: 100%; display: flex; align-items: center; gap: 10px;
+      padding: 10px; border-radius: 10px; text-align: left;
+    }
+    .userchip:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); }
+    .avatar {
+      width: 32px; height: 32px; flex: 0 0 auto; border-radius: 50%;
+      display: grid; place-items: center;
+      border: 1px solid var(--sh-line); background: color-mix(in oklch, var(--sh-fg) 6%, transparent);
+      font-size: 12px; font-weight: 600; color: var(--sh-fg);
+    }
+    .uchip-text { min-width: 0; }
+    .uchip-name { display: block; font-size: 13.5px; font-weight: 500; color: var(--sh-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .uchip-role { display: block; font-size: 12px; color: var(--sh-muted); }
+    .usermenu {
+      position: absolute; bottom: calc(100% + 8px); left: 0; width: 240px; z-index: 40;
+      background: var(--sh-surface); border: 1px solid var(--sh-line); border-radius: var(--radius);
+      box-shadow: 0 12px 32px color-mix(in oklch, var(--sh-fg) 14%, transparent);
+      padding: 8px; display: none;
+    }
+    .usermenu.open { display: block; }
+    .um-head { padding: 10px 12px 8px; }
+    .um-name { font-size: 15px; font-weight: 600; color: var(--sh-fg); }
+    .um-email { font-size: 13px; color: var(--sh-muted); }
+    .um-role { font-size: 12px; color: var(--sh-muted); margin-top: 2px; }
+    .usermenu .rule { margin: 8px 4px; border-top-color: var(--sh-line); }
+    .um-item {
+      width: 100%; display: flex; align-items: center; gap: 10px;
+      padding: 9px 12px; border-radius: 8px; font-size: 14px; color: var(--sh-fg); text-align: left;
+    }
+    .um-item:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); }
+    .um-item .ic { color: var(--sh-muted); }
+
+    /* main column */
+    .main-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .banner {
+      margin: 16px var(--shell-pad) 0; display: flex; align-items: center; gap: 10px;
+      background: var(--sh-surface); border: 1px solid var(--sh-line); border-radius: var(--radius);
+      padding: 10px 10px 10px 14px; font-size: 14px; color: var(--sh-fg);
+    }
+    .banner .ic { color: var(--sh-muted); width: 16px; height: 16px; }
+    .banner p { flex: 1; min-width: 0; }
+    .banner-close { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: var(--sh-muted); }
+    .banner-close:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); color: var(--sh-fg); }
+    .banner-close .ic { width: 14px; height: 14px; }
+    .banner[hidden] { display: none; }
+
+    .page-header {
+      display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+      padding: 22px var(--shell-pad) 18px; flex-wrap: wrap;
+    }
+    .page-header h1 { font-size: 27px; line-height: 1.15; letter-spacing: -0.01em; }
+    .page-header .desc { font-size: 14.5px; color: var(--sh-muted); margin-top: 4px; }
+    .actions { display: flex; align-items: center; gap: 10px; }
+
+    /* content area: page scrolls here, not the frame */
+    .content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 var(--shell-pad) var(--shell-pad); min-width: 0; min-height: 0; }
+    .content-inner { max-width: var(--shell-page-max); margin: 0 auto; }
+    .h-scroll { overflow-x: auto; border: 1px solid var(--sh-line); border-radius: var(--radius); background: var(--sh-surface); }
+    .h-scroll-inner { width: 1600px; padding: 20px 24px; }
+
+    /* placeholder content (demo only — real pages replace this) */
+    .ph-card { background: var(--sh-surface); border: 1px solid var(--sh-line); border-radius: var(--radius); padding: 24px; }
+    .ph-card h3 { font-family: var(--font-body); font-size: 15px; font-weight: 600; }
+    .ph-card .ph-sub { font-size: 13.5px; color: var(--sh-muted); margin-top: 2px; }
+    .ph-bar { height: 12px; border-radius: 6px; background: color-mix(in oklch, var(--sh-fg) 9%, transparent); margin-top: 16px; }
+    .ph-bar.w60 { width: 60%; } .ph-bar.w40 { width: 40%; }
+    .ph-note { margin-top: 18px; font-size: 12px; font-family: var(--font-mono); letter-spacing: 0.04em; color: var(--sh-muted); text-transform: uppercase; }
+
+    /* global states */
+    .state-panel { display: none; }
+    .shell[data-state='content'] .state-panel[data-panel='content'],
+    .shell[data-state='loading'] .state-panel[data-panel='loading'],
+    .shell[data-state='empty'] .state-panel[data-panel='empty'],
+    .shell[data-state='error'] .state-panel[data-panel='error'],
+    .shell[data-state='403'] .state-panel[data-panel='403'] { display: block; }
+    /* header primary action hidden while the content is in a full-page state */
+    .shell[data-state='empty'] .page-header .actions,
+    .shell[data-state='error'] .page-header .actions,
+    .shell[data-state='403'] .page-header .actions { display: none; }
+    /* read-only: no primary action at all */
+    .shell[data-role='readonly'] .page-header .actions .btn-primary { display: none; }
+    /* admin group: admins only */
+    .shell:not([data-role='admin']) .admin-group { display: none; }
+
+    .skeleton { animation: skpulse 1.5s ease-in-out infinite; }
+    @keyframes skpulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+    .sk-row { display: flex; gap: 12px; align-items: center; margin-top: 18px; }
+    .sk-dot { width: 36px; height: 36px; border-radius: 50%; flex: 0 0 auto; background: color-mix(in oklch, var(--sh-fg) 9%, transparent); }
+    .sk-line { height: 12px; border-radius: 6px; background: color-mix(in oklch, var(--sh-fg) 9%, transparent); flex: 1; }
+    .sk-line.w50 { max-width: 50%; }
+
+    .state-center { text-align: center; padding: 56px 24px; background: var(--sh-surface); border: 1px solid var(--sh-line); border-radius: var(--radius); }
+    .state-icon {
+      width: 48px; height: 48px; margin: 0 auto 16px; display: grid; place-items: center;
+      border: 1px solid var(--sh-line); border-radius: 50%; color: var(--sh-muted);
+      background: color-mix(in oklch, var(--sh-fg) 4%, transparent);
+    }
+    .state-icon .ic { width: 22px; height: 22px; }
+    .state-center h3 { font-size: 21px; letter-spacing: -0.01em; }
+    .state-center p { font-size: 15px; color: var(--sh-muted); max-width: 44ch; margin: 8px auto 20px; }
+    .state-center .btn-ghost { margin-top: 12px; display: inline-flex; }
+
+    /* ─── mobile shell ─────────────────────────────────────────────── */
+    .shell.mobile { position: relative; display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+    .m-topbar {
+      flex: 0 0 auto; height: var(--shell-topbar-h); z-index: 5;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 8px 0 16px; background: var(--sh-surface); border-bottom: 1px solid var(--sh-line);
+    }
+    .m-brand { font-family: var(--font-display); font-weight: 600; font-size: 17px; letter-spacing: -0.01em; color: var(--sh-fg); }
+    .m-avatar-btn { width: var(--touch-min); height: var(--touch-min); display: grid; place-items: center; border-radius: 50%; }
+    .m-avatar-btn:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); }
+    .m-avatar-btn .avatar { width: 34px; height: 34px; }
+    .m-content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 16px; min-width: 0; }
+    .m-banner { margin: 0 0 16px; }
+    .m-page-head { padding-bottom: 4px; }
+    .m-page-head h1 { font-size: 21px; letter-spacing: -0.01em; }
+    .m-page-head .desc { font-size: 13.5px; color: var(--sh-muted); margin-top: 2px; }
+    .m-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+    .m-actions .btn { width: 100%; }
+    .shell[data-state='empty'] .m-actions,
+    .shell[data-state='error'] .m-actions,
+    .shell[data-state='403'] .m-actions { display: none; }
+
+    .tabbar {
+      flex: 0 0 auto; z-index: 5; background: var(--sh-surface); border-top: 1px solid var(--sh-line);
+      display: grid; grid-template-columns: repeat(5, 1fr);
+      padding-bottom: env(safe-area-inset-bottom); min-height: var(--shell-tabbar-h);
+    }
+    .tab {
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+      padding: 8px 2px; color: var(--sh-muted); font-size: 10.5px; font-weight: 400; min-height: var(--shell-tabbar-h);
+      transition: color 0.15s ease;
+    }
+    .tab .ic { width: 20px; height: 20px; }
+    .tab:hover { color: var(--sh-fg); }
+    .tab.active { color: var(--sh-fg); font-weight: 500; }
+    .tab.active .ic { color: var(--sh-accent); }
+
+    /* user sheet (mobile) — Admin group lives here */
+    .scrim { position: absolute; inset: 0; background: color-mix(in oklch, var(--sh-fg) 40%, transparent); opacity: 0; pointer-events: none; transition: opacity 0.2s ease; z-index: 20; }
+    .scrim.open { opacity: 1; pointer-events: auto; }
+    .sheet {
+      position: absolute; left: 0; right: 0; bottom: 0; z-index: 30;
+      background: var(--sh-surface); border-top: 1px solid var(--sh-line);
+      border-radius: var(--radius) var(--radius) 0 0; padding: 8px 16px calc(16px + env(safe-area-inset-bottom));
+      transform: translateY(102%); transition: transform 0.22s ease;
+    }
+    .sheet.open { transform: translateY(0); }
+    .sheet .rule { margin: 10px 0; border-top-color: var(--sh-line); }
+    .sheet-close { position: absolute; top: 8px; right: 8px; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 8px; color: var(--sh-muted); }
+    .sheet-close:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); color: var(--sh-fg); }
+    .sheet-close .ic { width: 15px; height: 15px; }
+    .sheet-id { display: flex; align-items: center; gap: 12px; padding: 12px 40px 10px 4px; }
+    .sheet-id .avatar { width: 40px; height: 40px; font-size: 14px; }
+    .sheet-group-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--sh-muted); padding: 4px 12px 6px; }
+    .shell.mobile:not([data-role='admin']) .sheet .admin-block { display: none; }
+
+    /* phone frame (spec chrome) */
+    .phone-wrap { display: flex; justify-content: center; padding: var(--gap-lg); background: color-mix(in oklch, var(--fg) 3%, transparent); border: 1px solid var(--border); border-radius: var(--radius); }
+    .phone { width: 380px; height: 680px; max-width: 100%; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg); }
+    .phone.w768 { width: 768px; }
+    .phone.wauto { width: min(768px, 100%); }
+
+    /* ─── bare pre-sign-in layout ──────────────────────────────────── */
+    .auth { display: flex; flex-direction: column; align-items: center; gap: 22px; }
+    .auth .wordmark { font-size: 28px; }
+    .auth-card { width: 380px; max-width: 100%; background: var(--sh-surface); border: 1px solid var(--sh-line); border-radius: var(--radius); padding: 28px; }
+    .auth-card h2 { font-size: 22px; letter-spacing: -0.01em; }
+    .auth-card .auth-sub { font-size: 14px; color: var(--sh-muted); margin: 6px 0 20px; }
+    .auth-card .field { margin-bottom: 14px; }
+    .auth-card .btn-primary { width: 100%; margin-top: 6px; }
+    .auth-foot { font-size: 13px; color: var(--muted); margin-top: 16px; }
+    .auth-foot a { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
+    .auth-foot a:hover { color: var(--accent); }
+
+    /* ─── responsive: the spec sheet itself reflows ────────────────── */
+    @media (max-width: 920px) {
+      .log-row { grid-template-columns: 1fr; gap: 6px; }
+      .log-row .pull { text-align: left; }
+      .browser .shell.desktop { height: 560px; }
+    }
+  </style>
+</head>
+<body>
+  <!-- icon sprite (monoline, stroke = currentColor) -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-dash" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-goal" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/></symbol>
+    <symbol id="i-mile" viewBox="0 0 24 24"><path d="M5.5 21V4"/><path d="M5.5 4.5h11l-2.6 4 2.6 4h-11"/></symbol>
+    <symbol id="i-task" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 5-5.5"/></symbol>
+    <symbol id="i-my" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.5"/><path d="M3.5 19.5c.8-3 3-4.5 5.5-4.5s4.7 1.5 5.5 4.5"/><path d="M15 11.5l2 2 3.5-4"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="9" r="3.5"/><path d="M3.5 19.5c.7-3 3-4.5 5.5-4.5s4.8 1.5 5.5 4.5"/><path d="M15.5 6a3.5 3.5 0 010 6.7M17.2 15.2c1.7.7 2.9 2 3.3 4.3"/></symbol>
+    <symbol id="i-invite" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M4.5 7.5l7.5 5.5 7.5-5.5"/></symbol>
+    <symbol id="i-sso" viewBox="0 0 24 24"><circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H20M16.5 12v3M19.5 12v2.5"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5l9.5 15h-19z"/><path d="M12 10.5v4M12 17.5h.01"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5.5" y="10.5" width="13" height="9.5" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 017 0v2.5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-out" viewBox="0 0 24 24"><path d="M13.5 4H18a2 2 0 012 2v12a2 2 0 01-2 2h-4.5"/><path d="M10 8l-4 4 4 4M6 12h9"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></symbol>
+  </svg>
+
+  <div class="specbar" data-od-id="specbar">
+    <div class="container">
+      <span class="wordmark">Minerva<span class="dot">.</span></span>
+      <span class="meta">App shell · design spec &amp; interactive prototype</span>
+    </div>
+  </div>
+
+  <div class="container" id="content">
+    <section class="section" data-od-id="intro">
+      <p class="eyebrow">Minerva · App shell</p>
+      <h1 style="font-size: clamp(34px, 4.6vw, 48px); line-height: 1.06; letter-spacing: -0.02em; max-width: 22ch;">The frame every signed-in screen lives inside.</h1>
+      <p class="lead" style="margin-top: 18px;">One shell for staff, administrators and read-only viewers — sidebar, page header, banner slot and content area. The controls under each frame switch variants in place; page content is placeholder only, so the shell can be judged on its own.</p>
+    </section>
+
+    <section class="section frame" data-od-id="frame-desktop">
+      <h2>Desktop shell</h2>
+      <p class="frame-note">One frame covers all three desktop variants: <strong>Staff</strong> (no Admin group, primary action present), <strong>Administrator</strong> (Admin group appears), and <strong>Read-only</strong> (primary action absent). The banner, collapsed sidebar and dark mode are toggles. Content states — loading, empty, error, 403 — replace the content area only; the frame never moves.</p>
+      <div class="demo" role="group" aria-label="Desktop demo controls" data-od-id="demo-desktop">
+        <span class="demo-group"><span class="demo-label">Role</span>
+          <button class="demo-btn" data-d-role="staff" aria-pressed="true">Staff</button>
+          <button class="demo-btn" data-d-role="admin" aria-pressed="false">Administrator</button>
+          <button class="demo-btn" data-d-role="readonly" aria-pressed="false">Read-only</button>
+        </span>
+        <span class="demo-group"><span class="demo-label">Content state</span>
+          <button class="demo-btn" data-d-state="content" aria-pressed="true">Content</button>
+          <button class="demo-btn" data-d-state="loading" aria-pressed="false">Loading</button>
+          <button class="demo-btn" data-d-state="empty" aria-pressed="false">Empty</button>
+          <button class="demo-btn" data-d-state="error" aria-pressed="false">Error</button>
+          <button class="demo-btn" data-d-state="403" aria-pressed="false">403</button>
+        </span>
+        <span class="demo-group">
+          <button class="demo-btn" data-d-banner aria-pressed="false">Banner</button>
+          <button class="demo-btn" data-d-collapse aria-pressed="false">Collapse nav</button>
+          <button class="demo-btn" data-d-dark aria-pressed="false">Dark</button>
+        </span>
+      </div>
+      <div class="browser" style="margin-top: 16px;" data-od-id="desktop-frame">
+        <div class="shell desktop" id="shell-desktop" data-role="staff" data-state="content">
+          <a class="skip" href="#dc-content" data-skip="dc-content">Skip to content</a>
+
+          <aside class="sidebar" data-od-id="sidebar">
+            <div class="brand-row">
+              <span class="brand">
+                <span class="full">Minerv<span class="dot">ı</span>a</span>
+                <span class="sym">M<span class="tdot">.</span></span>
+              </span>
+              <button class="collapse-btn" data-d-collapse aria-label="Collapse sidebar" title="Collapse">
+                <svg class="ic" aria-hidden="true"><use href="#i-chev"/></svg>
+              </button>
+            </div>
+
+            <nav class="nav" aria-label="Primary" data-od-id="nav-primary">
+              <a class="navlink active" href="#" data-title="Dashboard" data-desc="How the school is tracking against this term's goals.">
+                <svg class="ic" aria-hidden="true"><use href="#i-dash"/></svg><span class="navlabel">Dashboard</span>
+              </a>
+              <a class="navlink" href="#" data-title="Goals" data-desc="What the school is trying to achieve this term.">
+                <svg class="ic" aria-hidden="true"><use href="#i-goal"/></svg><span class="navlabel">Goals</span>
+              </a>
+              <a class="navlink" href="#" data-title="Milestones" data-desc="The steps each goal is broken into.">
+                <svg class="ic" aria-hidden="true"><use href="#i-mile"/></svg><span class="navlabel">Milestones</span>
+              </a>
+              <a class="navlink" href="#" data-title="Tasks" data-desc="The day-to-day board — what needs doing now.">
+                <svg class="ic" aria-hidden="true"><use href="#i-task"/></svg><span class="navlabel">Tasks</span>
+              </a>
+              <a class="navlink" href="#" data-title="My tasks" data-desc="Your tasks across every goal.">
+                <svg class="ic" aria-hidden="true"><use href="#i-my"/></svg><span class="navlabel">My tasks</span>
+              </a>
+            </nav>
+
+            <nav class="nav admin-group" aria-label="Admin" data-od-id="nav-admin">
+              <p class="nav-group-label" aria-hidden="true">Admin</p>
+              <a class="navlink" href="#" data-title="Users" data-desc="Who can see and change things in your school.">
+                <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span class="navlabel">Users</span>
+              </a>
+              <a class="navlink" href="#" data-title="Invites" data-desc="Invite staff, volunteers and board members.">
+                <svg class="ic" aria-hidden="true"><use href="#i-invite"/></svg><span class="navlabel">Invites</span>
+              </a>
+              <a class="navlink" href="#" data-title="Single sign-on" data-desc="Let people sign in with your school's provider.">
+                <svg class="ic" aria-hidden="true"><use href="#i-sso"/></svg><span class="navlabel">Single sign-on</span>
+              </a>
+            </nav>
+
+            <div class="userchip-wrap" data-od-id="user-chip">
+              <button class="userchip" data-d-usermenu aria-haspopup="true" aria-expanded="false">
+                <span class="avatar" data-d-initials aria-hidden="true">AO</span>
+                <span class="uchip-text">
+                  <span class="uchip-name" data-d-name>Amara Okafor</span>
+                  <span class="uchip-role" data-d-rolelabel>Staff</span>
+                </span>
+              </button>
+              <div class="usermenu" data-d-menu>
+                <div class="um-head">
+                  <p class="um-name" data-d-name>Amara Okafor</p>
+                  <p class="um-email" data-d-email>amara@stbrigid.school</p>
+                  <p class="um-role" data-d-rolelabel>Staff</p>
+                </div>
+                <hr class="rule" />
+                <button class="um-item">
+                  <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg>Sign out
+                </button>
+              </div>
+            </div>
+          </aside>
+
+          <div class="main-col">
+            <div class="banner" data-d-banner-el hidden data-od-id="banner-slot">
+              <svg class="ic" aria-hidden="true"><use href="#i-info"/></svg>
+              <p>This item's status is set manually — it won't change from its milestones.</p>
+              <button class="banner-close" data-d-banner-dismiss aria-label="Dismiss notice">
+                <svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>
+              </button>
+            </div>
+
+            <header class="page-header" data-od-id="page-header">
+              <div>
+                <h1 id="dc-title">Dashboard</h1>
+                <p class="desc" id="dc-desc">How the school is tracking against this term's goals.</p>
+              </div>
+              <div class="actions">
+                <button class="btn btn-secondary">Export</button>
+                <button class="btn btn-primary">New goal</button>
+              </div>
+            </header>
+
+            <main class="content" id="dc-content" tabindex="-1" data-od-id="content-area">
+              <div class="content-inner">
+
+                <div class="state-panel" data-panel="content">
+                  <div class="ph-card">
+                    <h3>Placeholder — page content</h3>
+                    <p class="ph-sub">Real pages replace this block. The shell only owns the frame around it.</p>
+                    <div class="ph-bar"></div>
+                    <div class="ph-bar w60"></div>
+                  </div>
+                  <div class="h-scroll" style="margin-top: 16px;" data-od-id="h-scroll-demo">
+                    <div class="h-scroll-inner">
+                      <p class="ph-note">Wide content · boards and timelines</p>
+                      <div class="ph-bar"></div>
+                      <div class="ph-bar w40"></div>
+                    </div>
+                  </div>
+                  <p class="ph-note" style="margin-top: 10px;">Scrolls sideways — the page itself doesn't move</p>
+                </div>
+
+                <div class="state-panel" data-panel="loading" data-od-id="state-loading">
+                  <div class="ph-card skeleton" aria-busy="true" aria-label="Loading content">
+                    <div class="sk-row"><span class="sk-dot"></span><span class="sk-line"></span></div>
+                    <div class="sk-row"><span class="sk-dot"></span><span class="sk-line w50"></span></div>
+                    <div class="sk-row"><span class="sk-dot"></span><span class="sk-line"></span></div>
+                    <div class="sk-row"><span class="sk-dot"></span><span class="sk-line w50"></span></div>
+                  </div>
+                </div>
+
+                <div class="state-panel" data-panel="empty" data-od-id="state-empty">
+                  <div class="state-center">
+                    <div class="state-icon"><svg class="ic" aria-hidden="true"><use href="#i-goal"/></svg></div>
+                    <h3>No goals yet</h3>
+                    <p>Start with what you're trying to achieve this term, then break it into milestones.</p>
+                    <button class="btn btn-primary">New goal</button>
+                  </div>
+                </div>
+
+                <div class="state-panel" data-panel="error" data-od-id="state-error">
+                  <div class="state-center">
+                    <div class="state-icon"><svg class="ic" aria-hidden="true"><use href="#i-alert"/></svg></div>
+                    <h3>Something went wrong</h3>
+                    <p>We couldn't load this page. Check your connection and try again.</p>
+                    <button class="btn btn-primary">Try again</button>
+                  </div>
+                </div>
+
+                <div class="state-panel" data-panel="403" data-od-id="state-403">
+                  <div class="state-center">
+                    <div class="state-icon"><svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg></div>
+                    <h3>You don't have access to this</h3>
+                    <p>This area is only for administrators. Ask your school's admin if you need it.</p>
+                    <button class="btn btn-ghost" data-goto="Dashboard">Back to dashboard</button>
+                  </div>
+                </div>
+
+              </div>
+            </main>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="section frame" data-od-id="frame-mobile">
+      <h2>Mobile shell</h2>
+      <p class="frame-note">Same five destinations as desktop, as a bottom tab bar — no drawer, no hidden "More". The user sheet (avatar, top right) carries the account, the Admin group for administrators, and Sign out. Check it at 380&nbsp;px and 768&nbsp;px.</p>
+      <div class="demo" role="group" aria-label="Mobile demo controls" data-od-id="demo-mobile">
+        <span class="demo-group"><span class="demo-label">Width</span>
+          <button class="demo-btn" data-m-width="380" aria-pressed="true">380</button>
+          <button class="demo-btn" data-m-width="768" aria-pressed="false">768</button>
+          <button class="demo-btn" data-m-width="auto" aria-pressed="false">Auto</button>
+        </span>
+        <span class="demo-group"><span class="demo-label">Role</span>
+          <button class="demo-btn" data-m-role="staff" aria-pressed="true">Staff</button>
+          <button class="demo-btn" data-m-role="admin" aria-pressed="false">Administrator</button>
+        </span>
+        <span class="demo-group"><span class="demo-label">Content state</span>
+          <button class="demo-btn" data-m-state="content" aria-pressed="true">Content</button>
+          <button class="demo-btn" data-m-state="loading" aria-pressed="false">Loading</button>
+          <button class="demo-btn" data-m-state="empty" aria-pressed="false">Empty</button>
+          <button class="demo-btn" data-m-state="error" aria-pressed="false">Error</button>
+          <button class="demo-btn" data-m-state="403" aria-pressed="false">403</button>
+        </span>
+        <span class="demo-group">
+          <button class="demo-btn" data-m-menu aria-pressed="false">User menu</button>
+        </span>
+      </div>
+      <div class="phone-wrap" style="margin-top: 16px;" data-od-id="mobile-frame">
+        <div class="phone" id="phone">
+          <div class="shell mobile" id="shell-mobile" data-role="staff" data-state="content">
+            <a class="skip" href="#mc-content" data-skip="mc-content">Skip to content</a>
+
+            <header class="m-topbar" data-od-id="mobile-topbar">
+              <span class="m-brand">Minerv<span class="dot">ı</span>a</span>
+              <button class="m-avatar-btn" data-m-avatar aria-label="Account menu">
+                <span class="avatar" data-m-initials aria-hidden="true">AO</span>
+              </button>
+            </header>
+
+            <main class="m-content" id="mc-content" tabindex="-1" data-od-id="mobile-content">
+              <div class="banner m-banner" data-m-banner-el hidden data-od-id="mobile-banner">
+                <svg class="ic" aria-hidden="true"><use href="#i-info"/></svg>
+                <p>This item's status is set manually.</p>
+                <button class="banner-close" data-m-banner-dismiss aria-label="Dismiss notice">
+                  <svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>
+                </button>
+              </div>
+
+              <div class="m-page-head">
+                <h1 id="mc-title">Dashboard</h1>
+                <p class="desc" id="mc-desc">How the school is tracking against this term's goals.</p>
+                <div class="m-actions" data-m-actions>
+                  <button class="btn btn-primary">New goal</button>
+                  <button class="btn btn-secondary">Export</button>
+                </div>
+              </div>
+
+              <div style="margin-top: 16px;">
+                <div class="state-panel" data-panel="content">
+                  <div class="ph-card">
+                    <h3>Placeholder — page content</h3>
+                    <p class="ph-sub">The shell owns the frame; pages own what's inside.</p>
+                    <div class="ph-bar"></div>
+                    <div class="ph-bar w60"></div>
+                  </div>
+                  <div class="h-scroll" style="margin-top: 12px;">
+                    <div class="h-scroll-inner">
+                      <p class="ph-note">Wide content · board</p>
+                      <div class="ph-bar w40"></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="state-panel" data-panel="loading">
+                  <div class="ph-card skeleton" aria-busy="true" aria-label="Loading content">
+                    <div class="sk-row"><span class="sk-dot"></span><span class="sk-line"></span></div>
+                    <div class="sk-row"><span class="sk-dot"></span><span class="sk-line w50"></span></div>
+                    <div class="sk-row"><span class="sk-dot"></span><span class="sk-line"></span></div>
+                  </div>
+                </div>
+                <div class="state-panel" data-panel="empty">
+                  <div class="state-center" style="padding: 40px 18px;">
+                    <div class="state-icon"><svg class="ic" aria-hidden="true"><use href="#i-goal"/></svg></div>
+                    <h3>No goals yet</h3>
+                    <p>Start with what you're trying to achieve this term, then break it into milestones.</p>
+                    <button class="btn btn-primary">New goal</button>
+                  </div>
+                </div>
+                <div class="state-panel" data-panel="error">
+                  <div class="state-center" style="padding: 40px 18px;">
+                    <div class="state-icon"><svg class="ic" aria-hidden="true"><use href="#i-alert"/></svg></div>
+                    <h3>Something went wrong</h3>
+                    <p>We couldn't load this page. Check your connection and try again.</p>
+                    <button class="btn btn-primary">Try again</button>
+                  </div>
+                </div>
+                <div class="state-panel" data-panel="403">
+                  <div class="state-center" style="padding: 40px 18px;">
+                    <div class="state-icon"><svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg></div>
+                    <h3>You don't have access to this</h3>
+                    <p>This area is only for administrators.</p>
+                    <button class="btn btn-ghost" data-goto="Dashboard">Back to dashboard</button>
+                  </div>
+                </div>
+              </div>
+            </main>
+
+            <nav class="tabbar" aria-label="Primary" data-od-id="mobile-tabbar">
+              <a class="tab active" href="#" data-title="Dashboard" data-desc="How the school is tracking against this term's goals.">
+                <svg class="ic" aria-hidden="true"><use href="#i-dash"/></svg><span>Dashboard</span>
+              </a>
+              <a class="tab" href="#" data-title="Goals" data-desc="What the school is trying to achieve this term.">
+                <svg class="ic" aria-hidden="true"><use href="#i-goal"/></svg><span>Goals</span>
+              </a>
+              <a class="tab" href="#" data-title="Milestones" data-desc="The steps each goal is broken into.">
+                <svg class="ic" aria-hidden="true"><use href="#i-mile"/></svg><span>Milestones</span>
+              </a>
+              <a class="tab" href="#" data-title="Tasks" data-desc="The day-to-day board — what needs doing now.">
+                <svg class="ic" aria-hidden="true"><use href="#i-task"/></svg><span>Tasks</span>
+              </a>
+              <a class="tab" href="#" data-title="My tasks" data-desc="Your tasks across every goal.">
+                <svg class="ic" aria-hidden="true"><use href="#i-my"/></svg><span>My tasks</span>
+              </a>
+            </nav>
+
+            <div class="scrim" data-m-scrim></div>
+            <div class="sheet" data-m-sheet role="dialog" aria-label="Account" aria-modal="true" data-od-id="user-sheet">
+              <button class="sheet-close" data-m-close aria-label="Close menu">
+                <svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>
+              </button>
+              <div class="sheet-id">
+                <span class="avatar" data-m-initials aria-hidden="true">AO</span>
+                <div>
+                  <p class="um-name" data-m-name>Amara Okafor</p>
+                  <p class="um-email" data-m-email>amara@stbrigid.school</p>
+                  <p class="um-role" data-m-rolelabel>Staff</p>
+                </div>
+              </div>
+              <hr class="rule" />
+              <div class="admin-block">
+                <p class="sheet-group-label" aria-hidden="true">Admin</p>
+                <a class="um-item" href="#" data-title="Users" data-desc="Who can see and change things in your school.">
+                  <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg>Users
+                </a>
+                <a class="um-item" href="#" data-title="Invites" data-desc="Invite staff, volunteers and board members.">
+                  <svg class="ic" aria-hidden="true"><use href="#i-invite"/></svg>Invites
+                </a>
+                <a class="um-item" href="#" data-title="Single sign-on" data-desc="Let people sign in with your school's provider.">
+                  <svg class="ic" aria-hidden="true"><use href="#i-sso"/></svg>Single sign-on
+                </a>
+              </div>
+              <hr class="rule" />
+              <button class="um-item">
+                <svg class="ic" aria-hidden="true"><use href="#i-out"/></svg>Sign out
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section frame" data-od-id="frame-bare">
+      <h2>Bare pre-sign-in layout</h2>
+      <p class="frame-note">The minimal frame for screens before sign-in: the wordmark centred on the cream canvas above a single card. Login and invite screens reuse it as-is — no shell chrome, no banner, no tab bar.</p>
+      <div class="browser bare" style="margin-top: 16px;" data-od-id="bare-frame">
+        <div class="auth shell" data-od-id="auth-layout">
+          <span class="wordmark" style="font-size: 28px;">Minerv<span class="dot">ı</span>a</span>
+          <div class="auth-card">
+            <h2>Sign in to Minerva</h2>
+            <p class="auth-sub">Use the account your school admin set up for you.</p>
+            <form onsubmit="return false;">
+              <div class="field">
+                <label for="auth-email">Email</label>
+                <input class="input" id="auth-email" type="email" placeholder="you@school.org" autocomplete="email" />
+              </div>
+              <div class="field">
+                <label for="auth-pass">Password</label>
+                <input class="input" id="auth-pass" type="password" placeholder="••••••••" autocomplete="current-password" />
+              </div>
+              <button class="btn btn-primary" type="submit">Sign in</button>
+            </form>
+            <p class="auth-foot">New here? <a href="#">Ask your admin for an invite</a></p>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="section frame" data-od-id="spec-tokens">
+      <h2>New tokens for the design system</h2>
+      <p class="frame-note">Everything else — colours, type, radius, the 4px spacing grid, 1px borders — is the existing Minerva system. The shell adds only these layout tokens, as CSS custom properties. No new colour tokens: light mode uses the registered palette; dark mode uses the posture values (canvas <span class="num">#171A28</span>, cards <span class="num">#1E2233</span>, text <span class="num">#F3ECE1</span>, ember accent).</p>
+      <table class="ds-table" style="margin-top: 20px;">
+        <thead><tr><th>Token</th><th>Value</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td class="num">--shell-sidebar-w</td><td class="num">264px</td><td>Expanded sidebar, desktop</td></tr>
+          <tr><td class="num">--shell-sidebar-w-min</td><td class="num">72px</td><td>Collapsed sidebar, icons only</td></tr>
+          <tr><td class="num">--shell-page-max</td><td class="num">1200px</td><td>Max width of page content, centred; boards and timelines run edge-to-edge inside it</td></tr>
+          <tr><td class="num">--shell-pad</td><td class="num">32px · 20px mobile</td><td>Content area padding</td></tr>
+          <tr><td class="num">--shell-topbar-h</td><td class="num">56px</td><td>Mobile top bar height</td></tr>
+          <tr><td class="num">--shell-tabbar-h</td><td class="num">64px</td><td>Mobile tab bar height, plus <span class="num">env(safe-area-inset-bottom)</span></td></tr>
+          <tr><td class="num">--touch-min</td><td class="num">44px</td><td>Minimum tap target, mobile</td></tr>
+        </tbody>
+      </table>
+      <p class="frame-note" style="margin-top: 16px;">Focus ring: <span class="num">2px solid</span> accent, <span class="num">2px</span> offset — accent is terracotta on light, ember on dark. Primary button labels sit on the accent at <span class="num">18px</span> minimum, per posture.</p>
+    </section>
+
+    <section class="section frame" data-od-id="spec-components">
+      <h2>Components the shell introduces</h2>
+      <p class="frame-note">Each is a small Svelte component driven by the tokens above; states are data attributes or classes, not new markup. Nothing needs a component library.</p>
+      <div style="margin-top: 20px;">
+        <article class="log-row"><span class="meta">Shell.svelte</span><div><h3>AppShell</h3><p>Desktop: 2-column grid, sidebar + main column, 100% viewport height. Only the main column scrolls; the frame never does.</p></div><span class="pull"><span class="tag">frame</span></span></article>
+        <article class="log-row"><span class="meta">Sidebar.svelte</span><div><h3>Sidebar</h3><p>264px expanded, 72px collapsed. Wordmark swaps to the M<span class="tdot">.</span> symbol when collapsed; labels hide, icons stay.</p></div><span class="pull"><span class="tag">2 states</span></span></article>
+        <article class="log-row"><span class="meta">NavItem.svelte</span><div><h3>NavItem</h3><p>Default, hover (6% fg tint, text stays ink), focus (2px accent ring), active (12% accent tint, accent icon, 500 weight). Touch target ≥ 44px with padding.</p></div><span class="pull"><span class="tag">4 states</span></span></article>
+        <article class="log-row"><span class="meta">AdminGroup</span><div><h3>AdminGroup</h3><p>Group label + Users, Invites, Single sign-on. Rendered only for the admin role; absent otherwise, not hidden-with-styling leftovers.</p></div><span class="pull"><span class="tag">role-gated</span></span></article>
+        <article class="log-row"><span class="meta">UserMenu.svelte</span><div><h3>UserMenu / UserSheet</h3><p>Name, email, role in plain language (Administrator / Staff / Read-only), Sign out. Desktop: dropdown from the user chip. Mobile: bottom sheet; the Admin group lives here.</p></div><span class="pull"><span class="tag">2 platforms</span></span></article>
+        <article class="log-row"><span class="meta">PageHeader.svelte</span><div><h3>PageHeader</h3><p>Title (Fraunces 27px / 21px mobile), optional one-line description, primary action slot, secondary slot. Primary hidden for Read-only users and while the content area shows a full-page state.</p></div><span class="pull"><span class="tag">3 variants</span></span></article>
+        <article class="log-row"><span class="meta">Banner.svelte</span><div><h3>BannerSlot</h3><p>System-notice slot above the page header: white card, 1px border, info icon, one line of text, dismiss. Optional per page.</p></div><span class="pull"><span class="tag">optional</span></span></article>
+        <article class="log-row"><span class="meta">ContentFrame</span><div><h3>ContentFrame</h3><p>Conventions: 1200px max, 32/20px padding, vertical scroll inside the main column. Wide boards and timelines use an <span class="num">.h-scroll</span> wrapper so they scroll sideways without moving the page.</p></div><span class="pull"><span class="tag">convention</span></span></article>
+        <article class="log-row"><span class="meta">Skeleton.svelte</span><div><h3>Skeleton</h3><p>Static-shape loading: bars at 9% fg, opacity pulse only (1.5s), disabled under reduced-motion. No shimmer gradients.</p></div><span class="pull"><span class="tag">state</span></span></article>
+        <article class="log-row"><span class="meta">EmptyState.svelte</span><div><h3>EmptyState</h3><p>One icon, one short heading, one instructional line, one primary action. Friendly, never an apology.</p></div><span class="pull"><span class="tag">state</span></span></article>
+        <article class="log-row"><span class="meta">ErrorState.svelte</span><div><h3>ErrorState</h3><p>"Something went wrong", one line of what to do, Try again. One primary action.</p></div><span class="pull"><span class="tag">state</span></span></article>
+        <article class="log-row"><span class="meta">AccessDenied.svelte</span><div><h3>AccessDenied (403)</h3><p>"You don't have access to this", plain-language reason, no primary action — there is nothing to do on this page.</p></div><span class="pull"><span class="tag">state</span></span></article>
+        <article class="log-row"><span class="meta">MobileTopBar</span><div><h3>MobileTopBar</h3><p>56px: wordmark left, 44px avatar button right (opens the UserSheet). Sticky above the scrolling content.</p></div><span class="pull"><span class="tag">mobile</span></span></article>
+        <article class="log-row"><span class="meta">MobileTabBar</span><div><h3>MobileTabBar</h3><p>Five destinations, 64px + safe area, 1px top border. Active: accent icon, ink label 500. All five fit at 380px; roomier at 768px.</p></div><span class="pull"><span class="tag">mobile</span></span></article>
+        <article class="log-row"><span class="meta">BareAuthLayout</span><div><h3>BareAuthLayout</h3><p>Pre-sign-in frame: wordmark centred on the cream canvas above a 380px card. Reused by login and invite screens.</p></div><span class="pull"><span class="tag">frame</span></span></article>
+      </div>
+    </section>
+
+    <section class="section frame" data-od-id="spec-sveltekit">
+      <h2>Building it in SvelteKit</h2>
+      <div style="margin-top: 20px;">
+        <article class="log-row"><span class="meta">(app)/+layout.svelte</span><div><h3>Shell route group</h3><p>One layout renders the frame: skip link first in DOM, then aside with two labelled navs, then the main column (banner slot, header, content). Pre-sign-in screens sit outside the group and use BareAuthLayout.</p></div><span class="pull"><span class="tag">layout</span></span></article>
+        <article class="log-row"><span class="meta">data.user.role</span><div><h3>Role gating</h3><p>Same mapping as the <span class="num">data-role</span> attribute here: <span class="num">{#if role === 'admin'}</span> renders AdminGroup; <span class="num">{#if role !== 'readonly'}</span> renders the primary action. Role comes from the server session, never the client.</p></div><span class="pull"><span class="tag">roles</span></span></article>
+        <article class="log-row"><span class="meta">+page.ts → error(403)</span><div><h3>403 flow</h3><p>Permission checks throw <span class="num">error(403)</span>; <span class="num">+error.svelte</span> renders AccessDenied inside the shell, so the frame stays put.</p></div><span class="pull"><span class="tag">error</span></span></article>
+        <article class="log-row"><span class="meta">tokens.css</span><div><h3>Tokens</h3><p>Append the seven shell tokens from above to the design system's <span class="num">tokens.css</span>; import once in <span class="num">app.html</span>. Dark mode: <span class="num">prefers-color-scheme</span> flips the same shell variables the <span class="num">.dark</span> class demonstrates here.</p></div><span class="pull"><span class="tag">tokens</span></span></article>
+        <article class="log-row"><span class="meta">a11y baseline</span><div><h3>Accessibility</h3><p>Skip link focuses <span class="num">main[tabindex="-1"]</span>; visible <span class="num">:focus-visible</span> ring on everything; landmarks: nav ×2 (aria-label), header, main. 44px targets on mobile. Contrast: ink on cream 14.7:1, slate on cream 5.8:1, white on terracotta 4.6:1, ink on ember 5.8:1 (dark).</p></div><span class="pull"><span class="tag">baseline</span></span></article>
+        <article class="log-row"><span class="meta">localStorage</span><div><h3>State restoration</h3><p>Remember the last-visited destination the same way this prototype persists its demo controls — one key, a couple of fields. No session storage needed.</p></div><span class="pull"><span class="tag">state</span></span></article>
+      </div>
+    </section>
+
+    <section class="section frame" data-od-id="acceptance">
+      <h2>Acceptance frames</h2>
+      <p class="frame-note">Every requested frame is reachable in the two interactive frames above — no duplicates to drift out of sync.</p>
+      <table class="ds-table" style="margin-top: 20px;">
+        <thead><tr><th>Frame</th><th>How to reach it</th></tr></thead>
+        <tbody>
+          <tr><td>Desktop · Staff</td><td>Desktop shell — default</td></tr>
+          <tr><td>Desktop · Admin</td><td>Desktop shell — Role: Administrator (Admin group appears in the sidebar)</td></tr>
+          <tr><td>Desktop · Read-only</td><td>Desktop shell — Role: Read-only (no "New goal" in the header)</td></tr>
+          <tr><td>Mobile · Staff</td><td>Mobile shell — default</td></tr>
+          <tr><td>Mobile · Admin menu open</td><td>Mobile shell — Role: Administrator, then User menu</td></tr>
+          <tr><td>Empty state</td><td>Either frame — Content state: Empty</td></tr>
+          <tr><td>Loading</td><td>Either frame — Content state: Loading</td></tr>
+          <tr><td>Error</td><td>Either frame — Content state: Error</td></tr>
+          <tr><td>403 / no access</td><td>Either frame — Content state: 403</td></tr>
+          <tr><td>Bare pre-sign-in</td><td>"Bare pre-sign-in layout" section above</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </div>
+
+  <footer class="pagefoot" data-od-id="pagefoot">
+    <div class="container" style="display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap;">
+      <span>Minerva app shell · single-file prototype · every value traces to the Minerva design system</span>
+      <span class="meta">tokens &amp; component spec above — ready for SvelteKit</span>
+    </div>
+  </footer>
+
+  <script>
+  (function () {
+    var $ = function (s, c) { return (c || document).querySelector(s); };
+    var $$ = function (s, c) { return Array.prototype.slice.call((c || document).querySelectorAll(s)); };
+
+    var USERS = {
+      staff:    { name: 'Amara Okafor', email: 'amara@stbrigid.school', initials: 'AO', label: 'Staff' },
+      admin:    { name: 'Daniel Reyes', email: 'daniel@stbrigid.school', initials: 'DR', label: 'Administrator' },
+      readonly: { name: 'Grace Lin',    email: 'grace@stbrigid.school',  initials: 'GL', label: 'Read-only' }
+    };
+
+    var KEY = 'minerva-shell-demo';
+    var state = {
+      dRole: 'staff', dState: 'content', dBanner: false, dCollapsed: false, dDark: false,
+      mRole: 'staff', mState: 'content', mWidth: '380', mMenu: false
+    };
+    try { Object.assign(state, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (e) {}
+    function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+
+    var dShell = $('#shell-desktop'), mShell = $('#shell-mobile'), phone = $('#phone');
+    var dDemo = $('[data-od-id="demo-desktop"]'), mDemo = $('[data-od-id="demo-mobile"]');
+    var bannerBtn = $('[data-d-banner]'), bannerEl = $('[data-d-banner-el]', dShell);
+    var darkBtn = $('[data-d-dark]');
+    var mMenuBtn = $('[data-m-menu]'), mSheet = $('[data-m-sheet]', mShell), mScrim = $('[data-m-scrim]', mShell);
+
+    function setIdentity(root, pre, role) {
+      var u = USERS[role];
+      $$('[data-' + pre + '-name]', root).forEach(function (n) { n.textContent = u.name; });
+      $$('[data-' + pre + '-email]', root).forEach(function (n) { n.textContent = u.email; });
+      $$('[data-' + pre + '-initials]', root).forEach(function (n) { n.textContent = u.initials; });
+      $$('[data-' + pre + '-rolelabel]', root).forEach(function (n) { n.textContent = u.label; });
+    }
+
+    function setMenu(open) {
+      var uChip = $('[data-d-usermenu]', dShell), uMenu = $('[data-d-menu]', dShell);
+      uChip.setAttribute('aria-expanded', String(open));
+      uMenu.classList.toggle('open', open);
+    }
+
+    function setMobileMenu(open) {
+      state.mMenu = open;
+      mSheet.classList.toggle('open', open);
+      mScrim.classList.toggle('open', open);
+      mMenuBtn.setAttribute('aria-pressed', String(open));
+      if (open) { setMobileMenu.lastFocus = document.activeElement; $('[data-m-close]', mShell).focus(); }
+      else if (setMobileMenu.lastFocus && setMobileMenu.lastFocus.focus) setMobileMenu.lastFocus.focus();
+      save();
+    }
+
+    /* desktop controls */
+    $$('[data-d-role]', dDemo).forEach(function (b) { b.addEventListener('click', function () {
+      state.dRole = b.dataset.dRole; dShell.dataset.role = state.dRole;
+      setIdentity(dShell, 'd', state.dRole); save();
+    }); });
+    $$('[data-d-state]', dDemo).forEach(function (b) { b.addEventListener('click', function () {
+      state.dState = b.dataset.dState; dShell.dataset.state = state.dState; save();
+    }); });
+    function setBanner(on) { state.dBanner = on; bannerEl.hidden = !on; save(); }
+    bannerBtn.addEventListener('click', function () { setBanner(!state.dBanner); });
+    $('[data-d-banner-dismiss]', dShell).addEventListener('click', function () { setBanner(false); });
+    function setCollapsed(on) { state.dCollapsed = on; dShell.classList.toggle('collapsed', on); save(); }
+    $('[data-d-collapse]', dDemo).addEventListener('click', function () { setCollapsed(!state.dCollapsed); });
+    $('[data-d-collapse]', dShell).addEventListener('click', function () { setCollapsed(!state.dCollapsed); });
+    function setDark(on) { state.dDark = on; dShell.classList.toggle('dark', on); save(); }
+    darkBtn.addEventListener('click', function () { setDark(!state.dDark); });
+
+    /* user menu (desktop) */
+    $('[data-d-usermenu]', dShell).addEventListener('click', function (e) {
+      e.stopPropagation();
+      setMenu(!$('[data-d-menu]', dShell).classList.contains('open'));
+    });
+    document.addEventListener('click', function (e) {
+      var uMenu = $('[data-d-menu]', dShell);
+      if (uMenu.classList.contains('open') && !uMenu.contains(e.target) && !e.target.closest('[data-d-usermenu]')) setMenu(false);
+    });
+
+    /* mobile controls */
+    $$('[data-m-width]', mDemo).forEach(function (b) { b.addEventListener('click', function () {
+      state.mWidth = b.dataset.mWidth;
+      phone.classList.remove('w768', 'wauto');
+      if (state.mWidth === '768') phone.classList.add('w768');
+      if (state.mWidth === 'auto') phone.classList.add('wauto');
+      save();
+    }); });
+    $$('[data-m-role]', mDemo).forEach(function (b) { b.addEventListener('click', function () {
+      state.mRole = b.dataset.mRole; mShell.dataset.role = state.mRole;
+      setIdentity(mShell, 'm', state.mRole); save();
+    }); });
+    $$('[data-m-state]', mDemo).forEach(function (b) { b.addEventListener('click', function () {
+      state.mState = b.dataset.mState; mShell.dataset.state = state.mState; save();
+    }); });
+    mMenuBtn.addEventListener('click', function () { setMobileMenu(!mSheet.classList.contains('open')); });
+    $('[data-m-avatar]', mShell).addEventListener('click', function () { setMobileMenu(true); });
+    $('[data-m-close]', mShell).addEventListener('click', function () { setMobileMenu(false); });
+    mScrim.addEventListener('click', function () { setMobileMenu(false); });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { setMenu(false); setMobileMenu(false); }
+    });
+
+    /* nav switching (both frames) */
+    function wireNav(root, titleSel, descSel) {
+      $$('a[data-title]', root).forEach(function (a) { a.addEventListener('click', function (e) {
+        e.preventDefault();
+        $$('a[data-title]', root).forEach(function (x) { x.classList.remove('active'); });
+        a.classList.add('active');
+        $(titleSel, root).textContent = a.dataset.title;
+        $(descSel, root).textContent = a.dataset.desc;
+        if (root.classList.contains('mobile')) setMobileMenu(false);
+      }); });
+    }
+    wireNav(dShell, '#dc-title', '#dc-desc');
+    wireNav(mShell, '#mc-title', '#mc-desc');
+    $$('button[data-goto]').forEach(function (b) { b.addEventListener('click', function (e) {
+      e.preventDefault();
+      var link = $$('a[data-title]', b.closest('.shell')).filter(function (a) {
+        return a.dataset.title === b.dataset.goto;
+      })[0];
+      if (link) link.click();
+    }); });
+
+    /* skip links */
+    $$('a[data-skip]').forEach(function (a) { a.addEventListener('click', function (e) {
+      e.preventDefault();
+      var t = document.getElementById(a.dataset.skip);
+      if (t) t.focus();
+    }); });
+
+    /* restore saved state + sync control visuals */
+    dShell.dataset.role = state.dRole; setIdentity(dShell, 'd', state.dRole);
+    dShell.dataset.state = state.dState;
+    dShell.classList.toggle('collapsed', state.dCollapsed);
+    dShell.classList.toggle('dark', state.dDark);
+    bannerEl.hidden = !state.dBanner;
+    mShell.dataset.role = state.mRole; setIdentity(mShell, 'm', state.mRole);
+    mShell.dataset.state = state.mState;
+    phone.classList.remove('w768', 'wauto');
+    if (state.mWidth === '768') phone.classList.add('w768');
+    if (state.mWidth === 'auto') phone.classList.add('wauto');
+    (function sync() {
+      $$('[data-d-role]', dDemo).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.dRole === state.dRole)); });
+      $$('[data-d-state]', dDemo).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.dState === state.dState)); });
+      $$('[data-m-role]', mDemo).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.mRole === state.mRole)); });
+      $$('[data-m-state]', mDemo).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.mState === state.mState)); });
+      $$('[data-m-width]', mDemo).forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.mWidth === state.mWidth)); });
+      bannerBtn.setAttribute('aria-pressed', String(state.dBanner));
+      darkBtn.setAttribute('aria-pressed', String(state.dDark));
+      $$('[data-d-collapse]').forEach(function (b) { b.setAttribute('aria-pressed', String(state.dCollapsed)); });
+      mMenuBtn.setAttribute('aria-pressed', String(state.mMenu));
+    })();
+  })();
+  </script>
+  </main>
+</body>
+</html>

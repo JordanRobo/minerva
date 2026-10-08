@@ -1,0 +1,160 @@
+{
+  "name": "Minerva",
+  "tagline": "Open source, goal/milestone-first project management for schools and non-profits.",
+  "description": "Open source, goal/milestone-first project management for schools and non-profits: teams start from what they are trying to achieve, break it into milestones, and track progress against those. SvelteKit frontend, Rust (Actix-web) backend, PostgreSQL. The identity should feel like a well-run staff room: warm, capable and unfussy.",
+  "sourceUrl": "designmd://minerva-is-open-source",
+  "seed": {
+    "colorPrimary": "#C4502B",
+    "colorLink": "#C4502B",
+    "colorTextBase": "#1E2233",
+    "colorBgBase": "#ffffff",
+    "fontFamily": "system-ui, -apple-system, 'Segoe UI', sans-serif",
+    "fontSize": 16,
+    "borderRadius": 12,
+    "controlHeight": 44
+  },
+  "logo": {
+    "primary": "assets/minerva-wordmark.svg",
+    "alternates": [
+      "assets/minerva-wordmark-reversed.svg",
+      "assets/minerva-wordmark-black.svg",
+      "assets/minerva-wordmark-white.svg",
+      "assets/minerva-wordmark-ink.svg",
+      "assets/minerva-symbol.svg",
+      "assets/minerva-favicon.svg",
+      "assets/minerva-app-icon.svg"
+    ],
+    "notes": "Fraunces wordmark with a terracotta dot over the i — the only colour in the wordmark. Clear space: 1/2 the height of the lowercase n (about 31% of the logo height) on every side, scaling with the logo. Minimum size: wordmark 96 px screen / 25 mm print; symbol (M.) 32 px or 16 px with the favicon file / 8 mm print. One-colour black, white and ink versions for fax, stamps and single-colour print. Never retype, stretch, squash, rotate, outline or add effects; approved logo backgrounds are cream, white, ink (reversed) and terracotta (all white)."
+  },
+  "colors": [
+    {
+      "role": "background",
+      "hex": "#fbf6ee",
+      "oklch": "oklch(0.975 0.0119 80)",
+      "name": "Cream",
+      "usage": "page canvas; PWA background colour; reversed (cream) text on ink"
+    },
+    {
+      "role": "surface",
+      "hex": "#ffffff",
+      "oklch": "oklch(1 0 90)",
+      "name": "White",
+      "usage": "cards and panels"
+    },
+    {
+      "role": "foreground",
+      "hex": "#1e2233",
+      "oklch": "oklch(0.256 0.0327 274)",
+      "name": "Ink",
+      "usage": "body text, headings and wordmark; dark surfaces; PWA theme colour"
+    },
+    {
+      "role": "muted",
+      "hex": "#5b6078",
+      "oklch": "oklch(0.494 0.0389 276)",
+      "name": "Slate",
+      "usage": "secondary text and metadata (5.8:1 on cream)"
+    },
+    {
+      "role": "border",
+      "hex": "#dfdbd7",
+      "oklch": "oklch(0.893 0.007 68)",
+      "name": "Ink line",
+      "usage": "rules and dividers — 1 px; in source CSS it is ink at 12.5% alpha on cream (#1E223320), on dark backgrounds cream at 15% (#F3ECE125)"
+    },
+    {
+      "role": "accent",
+      "hex": "#c4502b",
+      "oklch": "oklch(0.578 0.1572 38)",
+      "name": "Terracotta",
+      "usage": "the dot; primary actions and large accents on light backgrounds only; carries white or cream labels at 18 px or larger, never body copy (4.3:1 on cream)"
+    },
+    {
+      "role": "accent-secondary",
+      "hex": "#e9805f",
+      "oklch": "oklch(0.709 0.1378 38)",
+      "name": "Ember",
+      "usage": "the dot and accent on dark backgrounds only (5.8:1 on ink)"
+    }
+  ],
+  "typography": {
+    "display": {
+      "family": "Fraunces",
+      "fallbacks": [
+        "Georgia",
+        "serif"
+      ],
+      "weights": [
+        500
+      ]
+    },
+    "body": {
+      "family": "system-ui",
+      "fallbacks": [
+        "-apple-system",
+        "Segoe UI",
+        "sans-serif"
+      ],
+      "weights": [
+        400,
+        500
+      ]
+    }
+  },
+  "voice": {
+    "adjectives": [
+      "warm",
+      "capable",
+      "unfussy"
+    ],
+    "tone": "A well-run staff room: warm, capable and unfussy. Plain, direct sentences about getting the term's work done — no enterprise overhead, no corporate jargon.",
+    "messagingPillars": [
+      "Open source project management for schools and non-profits — self-hosted, without the enterprise overhead.",
+      "Goal/milestone-first: teams start from what they are trying to achieve, break it into milestones, and track progress against those — rather than managing a flat list of tasks.",
+      "Keeps staff, volunteers and boards on the same page."
+    ],
+    "vocabulary": {
+      "use": [
+        "goal",
+        "milestone",
+        "term",
+        "progress",
+        "staff",
+        "volunteers",
+        "boards"
+      ],
+      "avoid": [
+        "enterprise overhead or enterprise jargon",
+        "corporate or bureaucratic phrasing",
+        "flat task-list framing — Minerva is goal-first, not a to-do app"
+      ]
+    }
+  },
+  "imagery": {
+    "style": "Warm, editorial and human — a cream canvas, white cards and a single terracotta accent, the dot of the wordmark",
+    "subjects": [
+      "school staff, volunteers and boards",
+      "term and milestone planning",
+      "small, real workspaces"
+    ],
+    "treatment": "Real photography on cream or white with 1 px ink-tinted borders; terracotta is the only saturated colour in the interface; no shadows, gradients or effects on brand marks",
+    "avoid": [
+      "shadows, gradients or effects on the logo",
+      "recoloured dots or letters outside the palette",
+      "the colour logo on photos or busy backgrounds without a solid container",
+      "corporate-blue SaaS stock imagery"
+    ]
+  },
+  "layout": {
+    "radius": "12px",
+    "borderWeight": "1px",
+    "spacing": "4px base grid; 880px content column; 56-80px section rhythm; body 16px/1.65",
+    "postureRules": [
+      "Component kit should cover: Button, Card, Form, Navigation.",
+      "Cream canvas, white cards, 1px ink-tinted borders (12.5% ink on light; 15% cream on dark).",
+      "Terracotta is the only saturated colour: primary buttons, the dot, large accents — white or cream labels at 18px+ only.",
+      "Headlines set in Fraunces 500 (SOFT 100, WONK 1); body and interface in the system sans at 16px/1.65, weight 500 for emphasis.",
+      "Dark mode: ink surfaces (#171A28 canvas, #1E2233 cards, #F3ECE1 text) with ember accents — terracotta is reserved for light backgrounds."
+    ]
+  }
+}
