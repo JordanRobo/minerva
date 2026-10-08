@@ -1,7 +1,9 @@
 //! Postgres implementation of [`MilestoneRepository`].
 
-use application::ports::{MilestoneRepository, RepositoryError};
+use application::pagination::{Page, PageRequest};
+use application::ports::{MilestoneListFilter, MilestoneRepository, RepositoryError};
 use diesel::prelude::*;
+use diesel::sql_types::{Nullable, Text};
 use domain::{Milestone, MilestoneId, Status, StatusSource};
 
 use crate::db::{PgPool, run_on_postgres};
@@ -10,6 +12,13 @@ use crate::repositories::mapping::{
     MilestoneRow, milestone_from_row, status_source_to_db, status_to_db,
 };
 use crate::schema::milestones;
+
+// Diesel has no built-in `COALESCE`, so declare it: the effective-status
+// filter compares `COALESCE(status_override, status)` against the requested
+// statuses (roadmap 3.10).
+diesel::define_sql_function! {
+    fn coalesce(a: Nullable<Text>, b: Nullable<Text>) -> Nullable<Text>;
+}
 
 /// [`MilestoneRepository`] backed by Postgres through Diesel.
 pub struct PostgresMilestoneRepository {
@@ -136,4 +145,86 @@ impl MilestoneRepository for PostgresMilestoneRepository {
         })
         .await
     }
+
+    async fn list_page(
+        &self,
+        filter: &MilestoneListFilter,
+        page: &PageRequest,
+    ) -> Result<Page<Milestone>, RepositoryError> {
+        let pool = self.pool.clone();
+        let filter = filter.clone();
+        let page = *page;
+        let limit = page.limit as i64;
+        let offset = page.offset as i64;
+        run_on_postgres(pool, move |conn| {
+            // The count and the page share one filtered base query (roadmap
+            // 3.10): total honours every filter but ignores limit/offset. A
+            // boxed query is consumed by both `count` and `load`, so the
+            // builder runs twice.
+            let build_query = || {
+                let mut query = milestones::table.into_boxed();
+                if !filter.statuses.is_empty() {
+                    // The status filter matches the effective status (roadmap
+                    // 3.2): the manual override when set, else the automatic
+                    // value — hence the COALESCE over both columns.
+                    let statuses: Vec<&'static str> =
+                        filter.statuses.iter().copied().map(status_to_db).collect();
+                    query = query.filter(
+                        coalesce(milestones::status_override, milestones::status.nullable())
+                            .eq_any(statuses),
+                    );
+                }
+                if let Some(needle) = &filter.q {
+                    query = query.filter(milestones::title.ilike(escape_like_pattern(needle)));
+                }
+                if let Some(after) = filter.target_after {
+                    query = query.filter(milestones::target_date.ge(after));
+                }
+                if let Some(before) = filter.target_before {
+                    query = query.filter(milestones::target_date.le(before));
+                }
+                query
+            };
+            let total: i64 = build_query()
+                .count()
+                .first(conn)
+                .map_err(map_diesel_error)?;
+            // The default order (roadmap 3.16): target date ascending with
+            // nulls last, then created_at, then id.
+            let rows: Vec<MilestoneRow> = build_query()
+                .order((
+                    milestones::target_date.asc().nulls_last(),
+                    milestones::created_at.asc(),
+                    milestones::id.asc(),
+                ))
+                .limit(limit)
+                .offset(offset)
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            Ok(Page {
+                items: rows
+                    .into_iter()
+                    .map(milestone_from_row)
+                    .collect::<Result<Vec<_>, _>>()?,
+                total: total as u64,
+                limit: page.limit,
+                offset: page.offset,
+            })
+        })
+        .await
+    }
+}
+
+/// A `LIKE`/`ILIKE` pattern matching `needle` literally as a substring: the
+/// wildcard characters are escaped, so a search for `100%` finds only titles
+/// containing that exact text.
+fn escape_like_pattern(needle: &str) -> String {
+    let mut escaped = String::with_capacity(needle.len() + 2);
+    for ch in needle.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    format!("%{escaped}%")
 }

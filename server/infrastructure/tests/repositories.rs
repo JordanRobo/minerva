@@ -5,9 +5,10 @@
 
 use application::pagination::PageRequest;
 use application::ports::{
-    AccessChange, GoalMilestoneRepository, GoalRepository, MilestoneRepository,
-    ProgressSnapshotRepository, RepositoryError, TaskListFilter, TaskRelationCreateError,
-    TaskRelationRepository, TaskRepository, UserIdentityRepository, UserRepository,
+    AccessChange, GoalListFilter, GoalMilestoneRepository, GoalRepository, MilestoneListFilter,
+    MilestoneRepository, ProgressSnapshotRepository, RepositoryError, TaskListFilter,
+    TaskRelationCreateError, TaskRelationRepository, TaskRepository, UserIdentityRepository,
+    UserRepository,
 };
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use diesel::connection::SimpleConnection;
@@ -116,6 +117,48 @@ fn goal_on(id: u128, target_date: Option<NaiveDate>, created_at: DateTime<Utc>) 
     goal.created_at = created_at;
     goal.updated_at = created_at;
     goal
+}
+
+/// A goal with a fixed id, title, status, override, target date and
+/// created_at for the list-ordering, paging and filter tests.
+fn goal_row(
+    id: u128,
+    title: &str,
+    status: Status,
+    status_override: Option<Status>,
+    target_date: Option<NaiveDate>,
+    created_at: DateTime<Utc>,
+) -> Goal {
+    let mut goal = test_goal();
+    goal.id = GoalId(Uuid::from_u128(id));
+    goal.title = title.to_owned();
+    goal.status = status;
+    goal.status_override = status_override;
+    goal.target_date = target_date;
+    goal.created_at = created_at;
+    goal.updated_at = created_at;
+    goal
+}
+
+/// A milestone with a fixed id, title, status, override, target date and
+/// created_at for the list-ordering, paging and filter tests.
+fn milestone_row(
+    id: u128,
+    title: &str,
+    status: Status,
+    status_override: Option<Status>,
+    target_date: Option<NaiveDate>,
+    created_at: DateTime<Utc>,
+) -> Milestone {
+    let mut milestone = test_milestone();
+    milestone.id = MilestoneId(Uuid::from_u128(id));
+    milestone.title = title.to_owned();
+    milestone.status = status;
+    milestone.status_override = status_override;
+    milestone.target_date = target_date;
+    milestone.created_at = created_at;
+    milestone.updated_at = created_at;
+    milestone
 }
 
 fn test_task(milestone_id: Option<MilestoneId>) -> Task {
@@ -1097,6 +1140,838 @@ async fn task_list_q_matches_wildcard_characters_literally() {
 
     for task in [&percent, &underscore, &sibling] {
         repo.delete(task.id).await.unwrap();
+    }
+}
+
+/// The goal list's default order: target date ascending with nulls last, then
+/// created_at, then id.
+#[tokio::test]
+async fn goal_list_page_orders_by_target_date_nulls_last_then_created_at_then_id() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresGoalRepository::new(pool);
+    // A unique title prefix keeps the test independent of other rows.
+    let prefix = format!("goal-order-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    let a = goal_row(
+        base,
+        &format!("{prefix}-a"),
+        Status::OnTrack,
+        None,
+        None,
+        at(1, 2),
+    );
+    let b = goal_row(
+        base + 1,
+        &format!("{prefix}-b"),
+        Status::OnTrack,
+        None,
+        None,
+        at(1, 1),
+    );
+    let c = goal_row(
+        base + 2,
+        &format!("{prefix}-c"),
+        Status::OnTrack,
+        None,
+        Some(date(6, 1)),
+        at(1, 3),
+    );
+    let d = goal_row(
+        base + 3,
+        &format!("{prefix}-d"),
+        Status::OnTrack,
+        None,
+        Some(date(6, 1)),
+        at(1, 2),
+    );
+    let e = goal_row(
+        base + 4,
+        &format!("{prefix}-e"),
+        Status::OnTrack,
+        None,
+        Some(date(7, 1)),
+        at(1, 1),
+    );
+    for goal in [&a, &b, &c, &d, &e] {
+        repo.create(goal.clone()).await.unwrap();
+    }
+
+    let filter = GoalListFilter {
+        q: Some(prefix),
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&filter, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+
+    // Dated goals first (the 6/1 tie breaks on created_at), undated last.
+    assert_eq!(
+        page.items.iter().map(|g| g.id.0).collect::<Vec<_>>(),
+        vec![d.id.0, c.id.0, e.id.0, b.id.0, a.id.0]
+    );
+    assert_eq!(page.total, 5);
+
+    for goal in [&a, &b, &c, &d, &e] {
+        repo.delete(goal.id).await.unwrap();
+    }
+}
+
+/// Paging through many goals that share one target date returns every match
+/// exactly once: no duplicates, no gaps.
+#[tokio::test]
+async fn goal_list_page_walks_every_match_exactly_once() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresGoalRepository::new(pool);
+    let prefix = format!("goal-walk-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    // Seven goals sharing one target date and created_at: id is their only
+    // distinguishing column, so any ordering instability shows up here.
+    let mut created = Vec::new();
+    for i in 0..7u128 {
+        let goal = goal_row(
+            base + i,
+            &format!("{prefix}-{i}"),
+            Status::OnTrack,
+            None,
+            Some(date(5, 5)),
+            at(3, 1),
+        );
+        repo.create(goal.clone()).await.unwrap();
+        created.push(goal.id);
+    }
+
+    let filter = GoalListFilter {
+        q: Some(prefix),
+        ..Default::default()
+    };
+    let mut seen = Vec::new();
+    for offset in [0i64, 3, 6] {
+        let page = repo
+            .list_page(&filter, &PageRequest::new(Some(3), Some(offset)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(page.total, 7);
+        seen.extend(page.items.iter().map(|g| g.id));
+    }
+    // Every created goal exactly once (GoalId has no ordering of its own, so
+    // compare through the inner uuid).
+    let mut expected = created.clone();
+    expected.sort_by_key(|id| id.0);
+    let mut seen_sorted = seen.clone();
+    seen_sorted.sort_by_key(|id| id.0);
+    assert_eq!(seen_sorted, expected);
+
+    // An offset past the end is an empty page with the total intact.
+    let past_end = repo
+        .list_page(&filter, &PageRequest::new(Some(3), Some(9)).unwrap())
+        .await
+        .unwrap();
+    assert!(past_end.items.is_empty());
+    assert_eq!(past_end.total, 7);
+
+    for id in created {
+        repo.delete(id).await.unwrap();
+    }
+}
+
+/// `total` honours every goal filter but ignores limit/offset.
+#[tokio::test]
+async fn goal_list_total_honours_filters_but_ignores_paging() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresGoalRepository::new(pool);
+    let prefix = format!("goal-total-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    for (i, status) in [
+        (0u128, Status::Complete),
+        (1, Status::Complete),
+        (2, Status::OnTrack),
+        (3, Status::OnTrack),
+        (4, Status::OnTrack),
+    ] {
+        repo.create(goal_row(
+            base + i,
+            &format!("{prefix}-{i}"),
+            status,
+            None,
+            None,
+            at(2, 1),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let filter = GoalListFilter {
+        q: Some(prefix.clone()),
+        ..Default::default()
+    };
+    // A deep page of one: the total still counts all five matches.
+    let deep = repo
+        .list_page(&filter, &PageRequest::new(Some(1), Some(4)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(deep.total, 5);
+    assert_eq!(deep.items.len(), 1);
+
+    // With a status filter the total counts only the two Complete goals.
+    let complete = GoalListFilter {
+        q: Some(prefix),
+        statuses: vec![Status::Complete],
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&complete, &PageRequest::new(Some(1), None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(page.total, 2);
+
+    for i in 0..5u128 {
+        repo.delete(GoalId(Uuid::from_u128(base + i)))
+            .await
+            .unwrap();
+    }
+}
+
+/// Every goal filter combines with AND; date bounds are inclusive and exclude
+/// undated goals while either bound is set.
+#[tokio::test]
+async fn goal_list_filters_combine_and_date_bounds_are_inclusive() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresGoalRepository::new(pool);
+    let prefix = format!("goal-combo-{}", Uuid::new_v4());
+
+    let base = Uuid::new_v4().as_u128();
+    let in_range = goal_row(
+        base,
+        &format!("{prefix}-one"),
+        Status::Complete,
+        None,
+        Some(date(6, 10)),
+        at(2, 1),
+    );
+    let on_boundary = goal_row(
+        base + 1,
+        &format!("{prefix}-two"),
+        Status::Complete,
+        None,
+        Some(date(6, 1)),
+        at(2, 1),
+    );
+    let too_early = goal_row(
+        base + 2,
+        &format!("{prefix}-three"),
+        Status::Complete,
+        None,
+        Some(date(5, 31)),
+        at(2, 1),
+    );
+    let wrong_status = goal_row(
+        base + 3,
+        &format!("{prefix}-four"),
+        Status::OnTrack,
+        None,
+        Some(date(6, 5)),
+        at(2, 1),
+    );
+    let undated = goal_row(
+        base + 4,
+        &format!("{prefix}-five"),
+        Status::Complete,
+        None,
+        None,
+        at(2, 1),
+    );
+    for goal in [&in_range, &on_boundary, &too_early, &wrong_status, &undated] {
+        repo.create(goal.clone()).await.unwrap();
+    }
+
+    let filter = GoalListFilter {
+        q: Some(prefix),
+        statuses: vec![Status::Complete],
+        target_after: Some(date(6, 1)),
+        target_before: Some(date(6, 30)),
+    };
+    let page = repo
+        .list_page(&filter, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+
+    // Only the in-range goal and the one sitting on the lower boundary.
+    assert_eq!(
+        page.items.iter().map(|g| g.id.0).collect::<Vec<_>>(),
+        vec![on_boundary.id.0, in_range.id.0]
+    );
+    assert_eq!(page.total, 2);
+
+    for goal in [&in_range, &on_boundary, &too_early, &wrong_status, &undated] {
+        repo.delete(goal.id).await.unwrap();
+    }
+}
+
+/// The `q` search on goals is a literal substring: the LIKE wildcards in the
+/// needle match only titles containing that exact text.
+#[tokio::test]
+async fn goal_list_q_matches_wildcard_characters_literally() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresGoalRepository::new(pool);
+    let prefix = format!("goal-wild-{}", Uuid::new_v4());
+
+    let base = Uuid::new_v4().as_u128();
+    let percent = goal_row(
+        base,
+        &format!("{prefix}-100% done"),
+        Status::OnTrack,
+        None,
+        None,
+        at(2, 1),
+    );
+    let underscore = goal_row(
+        base + 1,
+        &format!("{prefix}-a_b"),
+        Status::OnTrack,
+        None,
+        None,
+        at(2, 1),
+    );
+    let sibling = goal_row(
+        base + 2,
+        &format!("{prefix}-axb"),
+        Status::OnTrack,
+        None,
+        None,
+        at(2, 1),
+    );
+    for goal in [&percent, &underscore, &sibling] {
+        repo.create(goal.clone()).await.unwrap();
+    }
+
+    // A needle ending in `%` finds the literal percent sign only...
+    let by_percent = GoalListFilter {
+        q: Some(format!("{prefix}-100%")),
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&by_percent, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|g| g.id.0).collect::<Vec<_>>(),
+        vec![percent.id.0]
+    );
+
+    // ...and a `_` in the needle is not a one-character wildcard.
+    let by_underscore = GoalListFilter {
+        q: Some(format!("{prefix}-a_b")),
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&by_underscore, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|g| g.id.0).collect::<Vec<_>>(),
+        vec![underscore.id.0]
+    );
+
+    for goal in [&percent, &underscore, &sibling] {
+        repo.delete(goal.id).await.unwrap();
+    }
+}
+
+/// The goal status filter matches the effective status: a manual override
+/// wins over the automatic value, so an overridden goal appears under the
+/// override's status and not under its own.
+#[tokio::test]
+async fn goal_list_status_filter_matches_the_effective_status() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresGoalRepository::new(pool);
+    let prefix = format!("goal-eff-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    // Automatic OnTrack, automatic AtRisk, and an OnTrack goal whose manual
+    // override says AtRisk.
+    let auto_on_track = goal_row(
+        base,
+        &format!("{prefix}-one"),
+        Status::OnTrack,
+        None,
+        None,
+        at(2, 1),
+    );
+    let auto_at_risk = goal_row(
+        base + 1,
+        &format!("{prefix}-two"),
+        Status::AtRisk,
+        None,
+        None,
+        at(2, 1),
+    );
+    let overridden = goal_row(
+        base + 2,
+        &format!("{prefix}-three"),
+        Status::OnTrack,
+        Some(Status::AtRisk),
+        None,
+        at(2, 1),
+    );
+    for goal in [&auto_on_track, &auto_at_risk, &overridden] {
+        repo.create(goal.clone()).await.unwrap();
+    }
+
+    let filter = GoalListFilter {
+        q: Some(prefix.clone()),
+        statuses: vec![Status::AtRisk],
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&filter, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    // The automatic AtRisk goal and the overridden one — not the plain
+    // OnTrack goal.
+    let mut at_risk: Vec<Uuid> = page.items.iter().map(|g| g.id.0).collect();
+    at_risk.sort();
+    let mut expected = vec![auto_at_risk.id.0, overridden.id.0];
+    expected.sort();
+    assert_eq!(at_risk, expected);
+
+    // And the OnTrack filter must not return the overridden goal: for now it
+    // is AtRisk, whatever its automatic value says.
+    let on_track = GoalListFilter {
+        q: Some(prefix),
+        statuses: vec![Status::OnTrack],
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&on_track, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|g| g.id.0).collect::<Vec<_>>(),
+        vec![auto_on_track.id.0]
+    );
+
+    for goal in [&auto_on_track, &auto_at_risk, &overridden] {
+        repo.delete(goal.id).await.unwrap();
+    }
+}
+
+/// The milestone list's default order: target date ascending with nulls last,
+/// then created_at, then id.
+#[tokio::test]
+async fn milestone_list_page_orders_by_target_date_nulls_last_then_created_at_then_id() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool);
+    // A unique title prefix keeps the test independent of other rows.
+    let prefix = format!("milestone-order-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    let a = milestone_row(
+        base,
+        &format!("{prefix}-a"),
+        Status::OnTrack,
+        None,
+        None,
+        at(1, 2),
+    );
+    let b = milestone_row(
+        base + 1,
+        &format!("{prefix}-b"),
+        Status::OnTrack,
+        None,
+        None,
+        at(1, 1),
+    );
+    let c = milestone_row(
+        base + 2,
+        &format!("{prefix}-c"),
+        Status::OnTrack,
+        None,
+        Some(date(6, 1)),
+        at(1, 3),
+    );
+    let d = milestone_row(
+        base + 3,
+        &format!("{prefix}-d"),
+        Status::OnTrack,
+        None,
+        Some(date(6, 1)),
+        at(1, 2),
+    );
+    let e = milestone_row(
+        base + 4,
+        &format!("{prefix}-e"),
+        Status::OnTrack,
+        None,
+        Some(date(7, 1)),
+        at(1, 1),
+    );
+    for milestone in [&a, &b, &c, &d, &e] {
+        repo.create(milestone.clone()).await.unwrap();
+    }
+
+    let filter = MilestoneListFilter {
+        q: Some(prefix),
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&filter, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+
+    // Dated milestones first (the 6/1 tie breaks on created_at), undated last.
+    assert_eq!(
+        page.items.iter().map(|m| m.id.0).collect::<Vec<_>>(),
+        vec![d.id.0, c.id.0, e.id.0, b.id.0, a.id.0]
+    );
+    assert_eq!(page.total, 5);
+
+    for milestone in [&a, &b, &c, &d, &e] {
+        repo.delete(milestone.id).await.unwrap();
+    }
+}
+
+/// Paging through many milestones that share one target date returns every
+/// match exactly once: no duplicates, no gaps.
+#[tokio::test]
+async fn milestone_list_page_walks_every_match_exactly_once() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool);
+    let prefix = format!("milestone-walk-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    // Seven milestones sharing one target date and created_at: id is their
+    // only distinguishing column, so any ordering instability shows up here.
+    let mut created = Vec::new();
+    for i in 0..7u128 {
+        let milestone = milestone_row(
+            base + i,
+            &format!("{prefix}-{i}"),
+            Status::OnTrack,
+            None,
+            Some(date(5, 5)),
+            at(3, 1),
+        );
+        repo.create(milestone.clone()).await.unwrap();
+        created.push(milestone.id);
+    }
+
+    let filter = MilestoneListFilter {
+        q: Some(prefix),
+        ..Default::default()
+    };
+    let mut seen = Vec::new();
+    for offset in [0i64, 3, 6] {
+        let page = repo
+            .list_page(&filter, &PageRequest::new(Some(3), Some(offset)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(page.total, 7);
+        seen.extend(page.items.iter().map(|m| m.id));
+    }
+    // Every created milestone exactly once (MilestoneId has no ordering of
+    // its own, so compare through the inner uuid).
+    let mut expected = created.clone();
+    expected.sort_by_key(|id| id.0);
+    let mut seen_sorted = seen.clone();
+    seen_sorted.sort_by_key(|id| id.0);
+    assert_eq!(seen_sorted, expected);
+
+    // An offset past the end is an empty page with the total intact.
+    let past_end = repo
+        .list_page(&filter, &PageRequest::new(Some(3), Some(9)).unwrap())
+        .await
+        .unwrap();
+    assert!(past_end.items.is_empty());
+    assert_eq!(past_end.total, 7);
+
+    for id in created {
+        repo.delete(id).await.unwrap();
+    }
+}
+
+/// `total` honours every milestone filter but ignores limit/offset.
+#[tokio::test]
+async fn milestone_list_total_honours_filters_but_ignores_paging() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool);
+    let prefix = format!("milestone-total-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    for (i, status) in [
+        (0u128, Status::Complete),
+        (1, Status::Complete),
+        (2, Status::OnTrack),
+        (3, Status::OnTrack),
+        (4, Status::OnTrack),
+    ] {
+        repo.create(milestone_row(
+            base + i,
+            &format!("{prefix}-{i}"),
+            status,
+            None,
+            None,
+            at(2, 1),
+        ))
+        .await
+        .unwrap();
+    }
+
+    let filter = MilestoneListFilter {
+        q: Some(prefix.clone()),
+        ..Default::default()
+    };
+    // A deep page of one: the total still counts all five matches.
+    let deep = repo
+        .list_page(&filter, &PageRequest::new(Some(1), Some(4)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(deep.total, 5);
+    assert_eq!(deep.items.len(), 1);
+
+    // With a status filter the total counts only the two Complete milestones.
+    let complete = MilestoneListFilter {
+        q: Some(prefix),
+        statuses: vec![Status::Complete],
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&complete, &PageRequest::new(Some(1), None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(page.total, 2);
+
+    for i in 0..5u128 {
+        repo.delete(MilestoneId(Uuid::from_u128(base + i)))
+            .await
+            .unwrap();
+    }
+}
+
+/// Every milestone filter combines with AND; date bounds are inclusive and
+/// exclude undated milestones while either bound is set.
+#[tokio::test]
+async fn milestone_list_filters_combine_and_date_bounds_are_inclusive() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool);
+    let prefix = format!("milestone-combo-{}", Uuid::new_v4());
+
+    let base = Uuid::new_v4().as_u128();
+    let in_range = milestone_row(
+        base,
+        &format!("{prefix}-one"),
+        Status::Complete,
+        None,
+        Some(date(6, 10)),
+        at(2, 1),
+    );
+    let on_boundary = milestone_row(
+        base + 1,
+        &format!("{prefix}-two"),
+        Status::Complete,
+        None,
+        Some(date(6, 1)),
+        at(2, 1),
+    );
+    let too_early = milestone_row(
+        base + 2,
+        &format!("{prefix}-three"),
+        Status::Complete,
+        None,
+        Some(date(5, 31)),
+        at(2, 1),
+    );
+    let wrong_status = milestone_row(
+        base + 3,
+        &format!("{prefix}-four"),
+        Status::OnTrack,
+        None,
+        Some(date(6, 5)),
+        at(2, 1),
+    );
+    let undated = milestone_row(
+        base + 4,
+        &format!("{prefix}-five"),
+        Status::Complete,
+        None,
+        None,
+        at(2, 1),
+    );
+    for milestone in [&in_range, &on_boundary, &too_early, &wrong_status, &undated] {
+        repo.create(milestone.clone()).await.unwrap();
+    }
+
+    let filter = MilestoneListFilter {
+        q: Some(prefix),
+        statuses: vec![Status::Complete],
+        target_after: Some(date(6, 1)),
+        target_before: Some(date(6, 30)),
+    };
+    let page = repo
+        .list_page(&filter, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+
+    // Only the in-range milestone and the one sitting on the lower boundary.
+    assert_eq!(
+        page.items.iter().map(|m| m.id.0).collect::<Vec<_>>(),
+        vec![on_boundary.id.0, in_range.id.0]
+    );
+    assert_eq!(page.total, 2);
+
+    for milestone in [&in_range, &on_boundary, &too_early, &wrong_status, &undated] {
+        repo.delete(milestone.id).await.unwrap();
+    }
+}
+
+/// The `q` search on milestones is a literal substring: the LIKE wildcards in
+/// the needle match only titles containing that exact text.
+#[tokio::test]
+async fn milestone_list_q_matches_wildcard_characters_literally() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool);
+    let prefix = format!("milestone-wild-{}", Uuid::new_v4());
+
+    let base = Uuid::new_v4().as_u128();
+    let percent = milestone_row(
+        base,
+        &format!("{prefix}-100% done"),
+        Status::OnTrack,
+        None,
+        None,
+        at(2, 1),
+    );
+    let underscore = milestone_row(
+        base + 1,
+        &format!("{prefix}-a_b"),
+        Status::OnTrack,
+        None,
+        None,
+        at(2, 1),
+    );
+    let sibling = milestone_row(
+        base + 2,
+        &format!("{prefix}-axb"),
+        Status::OnTrack,
+        None,
+        None,
+        at(2, 1),
+    );
+    for milestone in [&percent, &underscore, &sibling] {
+        repo.create(milestone.clone()).await.unwrap();
+    }
+
+    // A needle ending in `%` finds the literal percent sign only...
+    let by_percent = MilestoneListFilter {
+        q: Some(format!("{prefix}-100%")),
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&by_percent, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|m| m.id.0).collect::<Vec<_>>(),
+        vec![percent.id.0]
+    );
+
+    // ...and a `_` in the needle is not a one-character wildcard.
+    let by_underscore = MilestoneListFilter {
+        q: Some(format!("{prefix}-a_b")),
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&by_underscore, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|m| m.id.0).collect::<Vec<_>>(),
+        vec![underscore.id.0]
+    );
+
+    for milestone in [&percent, &underscore, &sibling] {
+        repo.delete(milestone.id).await.unwrap();
+    }
+}
+
+/// The milestone status filter matches the effective status: a manual
+/// override wins over the automatic value, so an overridden milestone appears
+/// under the override's status and not under its own.
+#[tokio::test]
+async fn milestone_list_status_filter_matches_the_effective_status() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool);
+    let prefix = format!("milestone-eff-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+
+    // Automatic OnTrack, automatic AtRisk, and an OnTrack milestone whose
+    // manual override says AtRisk.
+    let auto_on_track = milestone_row(
+        base,
+        &format!("{prefix}-one"),
+        Status::OnTrack,
+        None,
+        None,
+        at(2, 1),
+    );
+    let auto_at_risk = milestone_row(
+        base + 1,
+        &format!("{prefix}-two"),
+        Status::AtRisk,
+        None,
+        None,
+        at(2, 1),
+    );
+    let overridden = milestone_row(
+        base + 2,
+        &format!("{prefix}-three"),
+        Status::OnTrack,
+        Some(Status::AtRisk),
+        None,
+        at(2, 1),
+    );
+    for milestone in [&auto_on_track, &auto_at_risk, &overridden] {
+        repo.create(milestone.clone()).await.unwrap();
+    }
+
+    let filter = MilestoneListFilter {
+        q: Some(prefix.clone()),
+        statuses: vec![Status::AtRisk],
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&filter, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    // The automatic AtRisk milestone and the overridden one — not the plain
+    // OnTrack milestone.
+    let mut at_risk: Vec<Uuid> = page.items.iter().map(|m| m.id.0).collect();
+    at_risk.sort();
+    let mut expected = vec![auto_at_risk.id.0, overridden.id.0];
+    expected.sort();
+    assert_eq!(at_risk, expected);
+
+    // And the OnTrack filter must not return the overridden milestone: for
+    // now it is AtRisk, whatever its automatic value says.
+    let on_track = MilestoneListFilter {
+        q: Some(prefix),
+        statuses: vec![Status::OnTrack],
+        ..Default::default()
+    };
+    let page = repo
+        .list_page(&on_track, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|m| m.id.0).collect::<Vec<_>>(),
+        vec![auto_on_track.id.0]
+    );
+
+    for milestone in [&auto_on_track, &auto_at_risk, &overridden] {
+        repo.delete(milestone.id).await.unwrap();
     }
 }
 

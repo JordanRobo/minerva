@@ -288,6 +288,8 @@ mod tests {
     use application::auth::SessionService;
     use application::auth::password::PasswordAuthProvider;
     use application::auth::provider::AuthProviders;
+    use application::goal_list::GoalListService;
+    use application::milestone_list::MilestoneListService;
     use application::ports::{
         GoalRepository, PasswordHasher, SessionRepository, SessionTokens, SsoGroupRuleRepository,
         UserRepository,
@@ -397,6 +399,12 @@ mod tests {
                     .app_data(users_data)
                     .app_data(web::Data::new(session_service.clone()))
                     .app_data(web::Data::new(account_link_service))
+                    .app_data(web::Data::new(GoalListService::new(Arc::new(
+                        PostgresGoalRepository::new(pool.clone()),
+                    ))))
+                    .app_data(web::Data::new(MilestoneListService::new(Arc::new(
+                        PostgresMilestoneRepository::new(pool.clone()),
+                    ))))
                     .app_data(web::Data::new(UserAdminService::new(
                         users,
                         Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone())),

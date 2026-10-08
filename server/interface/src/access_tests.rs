@@ -18,7 +18,9 @@ use application::account_links::AccountLinkService;
 use application::auth::SessionService;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::AuthProviders;
+use application::goal_list::GoalListService;
 use application::goal_milestone_links::GoalMilestoneLinkService;
+use application::milestone_list::MilestoneListService;
 use application::ports::{
     GoalRepository, MilestoneRepository, NoopStatusSnapshotTrigger, PasswordHasher,
     SessionRepository, SessionTokens, SsoGroupRuleRepository, TaskRepository, UserRepository,
@@ -163,6 +165,12 @@ macro_rules! test_app {
                 ))))
                 .app_data(web::Data::new(TaskListService::new(Arc::new(
                     PostgresTaskRepository::new(pool.clone()),
+                ))))
+                .app_data(web::Data::new(GoalListService::new(Arc::new(
+                    PostgresGoalRepository::new(pool.clone()),
+                ))))
+                .app_data(web::Data::new(MilestoneListService::new(Arc::new(
+                    PostgresMilestoneRepository::new(pool.clone()),
                 ))))
                 .app_data(providers)
                 .app_data(web::Data::new(CookieSettings { secure: false }))

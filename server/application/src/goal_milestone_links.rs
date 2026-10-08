@@ -157,6 +157,11 @@ mod tests {
     use chrono::{DateTime, NaiveDate, TimeZone, Utc};
     use domain::Status;
 
+    use crate::pagination::{Page, PageRequest};
+    use crate::ports::goal_repository::fakes::{apply_goal_list_filter, page_goals};
+    use crate::ports::milestone_repository::fakes::{apply_milestone_list_filter, page_milestones};
+    use crate::ports::{GoalListFilter, MilestoneListFilter};
+
     use super::*;
 
     /// A fixed timestamp in 2026, exact to the second.
@@ -260,6 +265,15 @@ mod tests {
             }
             Ok(())
         }
+
+        async fn list_page(
+            &self,
+            filter: &GoalListFilter,
+            page: &PageRequest,
+        ) -> Result<Page<Goal>, RepositoryError> {
+            let matched = apply_goal_list_filter(self.goals.lock().unwrap().values(), filter);
+            Ok(page_goals(matched, page))
+        }
     }
 
     /// An in-memory [`MilestoneRepository`] with the behaviour the service
@@ -313,6 +327,16 @@ mod tests {
                 return Err(RepositoryError::NotFound);
             }
             Ok(())
+        }
+
+        async fn list_page(
+            &self,
+            filter: &MilestoneListFilter,
+            page: &PageRequest,
+        ) -> Result<Page<Milestone>, RepositoryError> {
+            let matched =
+                apply_milestone_list_filter(self.milestones.lock().unwrap().values(), filter);
+            Ok(page_milestones(matched, page))
         }
     }
 
