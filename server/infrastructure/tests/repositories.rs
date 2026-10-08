@@ -677,6 +677,66 @@ async fn task_repository_round_trip() {
 }
 
 #[tokio::test]
+async fn task_set_status_changes_only_the_status_column() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRepository::new(pool);
+
+    let mut task = test_task(None);
+    task.description = Some("Details".into());
+    task.target_date = Some(date(3, 1));
+    task.created_at = at(1, 1);
+    task.updated_at = at(1, 1);
+    repo.create(task.clone()).await.unwrap();
+
+    let updated = repo.set_status(task.id, TaskStatus::Done).await.unwrap();
+
+    assert_eq!(updated.status, TaskStatus::Done);
+    // Every other field is byte-for-byte what was written.
+    assert_eq!(updated.milestone_id, None);
+    assert_eq!(updated.title, "Test task");
+    assert_eq!(updated.description, Some("Details".into()));
+    assert_eq!(updated.target_date, Some(date(3, 1)));
+    assert_eq!(updated.created_at, at(1, 1));
+    // The write bumped updated_at...
+    assert!(updated.updated_at > at(1, 1));
+    // ...and the stored row agrees with what the update returned.
+    assert_eq!(repo.find_by_id(task.id).await.unwrap().unwrap(), updated);
+
+    // An unknown id is a typed NotFound.
+    assert!(matches!(
+        repo.set_status(TaskId::new(), TaskStatus::Done).await,
+        Err(RepositoryError::NotFound)
+    ));
+
+    repo.delete(task.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn task_set_status_does_not_clobber_a_concurrent_update() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRepository::new(pool);
+
+    let task = test_task(None);
+    repo.create(task.clone()).await.unwrap();
+
+    // A normal update changes the title (as a concurrent editor would)...
+    let mut edited = task.clone();
+    edited.title = "Edited title".into();
+    repo.update(edited).await.unwrap();
+
+    // ...and the column move lands on top of it without losing the edit.
+    let moved = repo
+        .set_status(task.id, TaskStatus::InProgress)
+        .await
+        .unwrap();
+
+    assert_eq!(moved.title, "Edited title");
+    assert_eq!(moved.status, TaskStatus::InProgress);
+
+    repo.delete(task.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn task_relation_repository_round_trip() {
     let Some(pool) = pool() else { return };
     let repo = PostgresTaskRelationRepository::new(pool.clone());

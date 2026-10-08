@@ -12,6 +12,7 @@ use application::goal_milestone_links::GoalMilestoneLinkError;
 use application::ports::RepositoryError;
 use application::status_override::StatusOverrideError;
 use application::task_relations::TaskRelationError;
+use application::task_status::TaskStatusError;
 use serde::Serialize;
 use std::time::Duration;
 use utoipa::ToSchema;
@@ -309,6 +310,16 @@ pub fn status_override_error_response(error: StatusOverrideError) -> ApiError {
     match error {
         StatusOverrideError::NotFound => ApiError::not_found(),
         StatusOverrideError::Repository(err) => repo_error_response(err),
+    }
+}
+
+/// Translate a [`TaskStatusError`] into the [`ApiError`] it renders as:
+/// a missing task -> 404 (the generic `not_found` code the other task routes
+/// answer with), repository failures map like any other.
+pub fn task_status_error_response(error: TaskStatusError) -> ApiError {
+    match error {
+        TaskStatusError::NotFound => ApiError::not_found(),
+        TaskStatusError::Repository(err) => repo_error_response(err),
     }
 }
 

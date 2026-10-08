@@ -27,6 +27,7 @@ use application::rate_limit::RateLimitService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_override::StatusOverrideService;
 use application::task_relations::TaskRelationService;
+use application::task_status::TaskStatusService;
 use application::user_admin::UserAdminService;
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
@@ -156,6 +157,9 @@ macro_rules! test_app {
                     Arc::new(PostgresTaskRepository::new(pool.clone())),
                     Arc::new(PostgresTaskRelationRepository::new(pool.clone())),
                 )))
+                .app_data(web::Data::new(TaskStatusService::new(Arc::new(
+                    PostgresTaskRepository::new(pool.clone()),
+                ))))
                 .app_data(providers)
                 .app_data(web::Data::new(CookieSettings { secure: false }))
                 // Rate limiting is disabled in these tests (they assert the
@@ -436,6 +440,13 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             format!("/api/tasks/{task}"),
             Permission::EditContent,
             None,
+        ),
+        // Board-state transitions (roadmap 3.7).
+        (
+            Method::PATCH,
+            format!("/api/tasks/{task}/status"),
+            Permission::EditContent,
+            Some(serde_json::json!({ "status": "in_progress" })),
         ),
         // The task-relation routes (roadmap 3.6).
         (

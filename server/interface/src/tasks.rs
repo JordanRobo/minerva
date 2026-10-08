@@ -6,6 +6,7 @@
 
 use actix_web::{HttpResponse, web};
 use application::ports::TaskRepository;
+use application::task_status::TaskStatusService;
 use chrono::{DateTime, NaiveDate, Utc};
 use domain::{MilestoneId, Task, TaskId, TaskStatus};
 use infrastructure::repositories::PostgresTaskRepository;
@@ -14,7 +15,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::access::{EditAccess, ViewAccess};
-use crate::error::{ApiError, repo_error_response};
+use crate::error::{ApiError, repo_error_response, task_status_error_response};
 use crate::openapi::TaskStatusDoc;
 
 /// JSON shape of a task in responses.
@@ -239,6 +240,47 @@ pub async fn update_task(
         }
         Ok(None) => Err(ApiError::not_found()),
         Err(err) => Err(repo_error_response(err)),
+    }
+}
+
+/// Body for `PATCH /api/tasks/{id}/status`: only the board column changes;
+/// the task's other fields are untouched.
+#[derive(Deserialize, ToSchema)]
+pub struct TaskStatusRequest {
+    #[schema(value_type = TaskStatusDoc)]
+    pub status: TaskStatus,
+}
+
+/// Move Task to Another Column
+///
+/// Move a task between the board columns (backlog, to_do, in_progress, done),
+/// changing only the column — the task's other fields are untouched. Any
+/// column may move to any other; a blocked task can still be moved, and
+/// repeating the same request is harmless. Requires the Staff or Admin role.
+#[utoipa::path(
+    patch,
+    path = "/api/tasks/{id}/status",
+    tags = ["tasks"],
+    security(("session_cookie" = [])),
+    params(("id" = Uuid, Path, description = "Task identifier")),
+    request_body = TaskStatusRequest,
+    responses(
+        (status = 200, description = "The updated task", body = TaskResponse),
+        (status = 400, description = "Unknown status value", body = ApiError),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
+        (status = 404, description = "No task with this id", body = ApiError)
+    )
+)]
+pub async fn set_task_status(
+    status: web::Data<TaskStatusService>,
+    _access: EditAccess,
+    path: web::Path<Uuid>,
+    body: web::Json<TaskStatusRequest>,
+) -> Result<HttpResponse, ApiError> {
+    match status.set_status(TaskId(*path), body.status).await {
+        Ok(task) => Ok(HttpResponse::Ok().json(TaskResponse::from(&task))),
+        Err(err) => Err(task_status_error_response(err)),
     }
 }
 

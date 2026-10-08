@@ -16,4 +16,5 @@ pub mod sso_roles;
 pub mod sso_rules;
 pub mod status_override;
 pub mod task_relations;
+pub mod task_status;
 pub mod user_admin;
