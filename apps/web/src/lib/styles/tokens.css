@@ -1,0 +1,49 @@
+/*
+ * Generated from docs/design/brand.json (OpenDesign export, see docs/design/).
+ * Do not edit by hand — regenerate the design export to change these values.
+ */
+
+:root {
+	/* Colour (DESIGN.md palette) */
+	--minerva-bg: #fbf6ee;
+	--minerva-surface: #ffffff;
+	--minerva-fg: #1e2233;
+	--minerva-fg-muted: #5b6078;
+	--minerva-border: #1e223320; /* ink at 12.5% on cream */
+	--minerva-accent: #c4502b;
+
+	/* Typography */
+	--minerva-font-display: "Fraunces", Georgia, serif;
+	--minerva-font-body: system-ui, -apple-system, "Segoe UI", sans-serif;
+	--minerva-text-size: 16px;
+	--minerva-line-height: 1.65;
+
+	/* Layout */
+	--minerva-radius: 12px;
+	--minerva-border-w: 1px;
+	--minerva-space-1: 4px;
+	--minerva-space-2: 8px;
+	--minerva-space-3: 12px;
+	--minerva-space-4: 16px;
+	--minerva-space-5: 20px;
+	--minerva-space-6: 24px;
+	--minerva-space-7: 32px;
+	--minerva-space-8: 48px;
+	--minerva-control-h: 44px;
+
+	/* Motion */
+	--minerva-motion-fast: 0.1s;
+	--minerva-motion-mid: 0.2s;
+	--minerva-motion-slow: 0.3s;
+	--minerva-motion-ease-in-out: cubic-bezier(0.645, 0.045, 0.355, 1);
+	--minerva-motion-ease-out: cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+.dark {
+	/* Dark mode (DESIGN.md posture rules): ink surfaces with ember accents. */
+	--minerva-bg: #171a28;
+	--minerva-surface: #1e2233;
+	--minerva-fg: #f3ece1;
+	--minerva-border: #f3ece125; /* cream at 15% on ink */
+	--minerva-accent: #e9805f;
+}
