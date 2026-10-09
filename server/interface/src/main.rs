@@ -22,7 +22,13 @@ mod users;
 mod access_tests;
 
 #[cfg(test)]
+mod goal_list_tests;
+
+#[cfg(test)]
 mod goal_milestone_tests;
+
+#[cfg(test)]
+mod milestone_list_tests;
 
 #[cfg(test)]
 mod public_routes;
@@ -32,6 +38,9 @@ mod rate_limit_tests;
 
 #[cfg(test)]
 mod status_override_tests;
+
+#[cfg(test)]
+mod task_list_tests;
 
 #[cfg(test)]
 mod task_relation_tests;
@@ -47,7 +56,9 @@ use application::auth::oidc::OidcAuthProvider;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::{AuthProviders, RedirectProvider};
 use application::bootstrap::{BootstrapAdmin, BootstrapOutcome, bootstrap_admin};
+use application::goal_list::GoalListService;
 use application::goal_milestone_links::GoalMilestoneLinkService;
+use application::milestone_list::MilestoneListService;
 use application::oidc_login::LoginPolicy;
 use application::ports::{
     AccountEmailSender, AccountTokenRepository, NoopStatusSnapshotTrigger, OidcProvider,
@@ -58,6 +69,7 @@ use application::rate_limit::{RateLimitService, RateLimiter};
 use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_override::StatusOverrideService;
+use application::task_list::TaskListService;
 use application::task_relations::TaskRelationService;
 use application::task_status::TaskStatusService;
 use application::user_admin::UserAdminService;
@@ -168,6 +180,20 @@ async fn main() -> std::io::Result<()> {
     // pool. No snapshot trigger: a board move is not a status change (D5).
     let task_status_service = web::Data::new(TaskStatusService::new(Arc::new(
         PostgresTaskRepository::new(pool.clone()),
+    )));
+    // Task list pagination & filtering (roadmap 3.10, 3.16, D16): the list
+    // goes through the service so the handler never touches a repository.
+    let task_list_service = web::Data::new(TaskListService::new(Arc::new(
+        PostgresTaskRepository::new(pool.clone()),
+    )));
+    // Goal and milestone list pagination & filtering (roadmap 3.10, 3.16):
+    // the same pattern as the task list — each service takes its own
+    // repository instance over the shared pool so the handler stays thin.
+    let goal_list_service = web::Data::new(GoalListService::new(Arc::new(
+        PostgresGoalRepository::new(pool.clone()),
+    )));
+    let milestone_list_service = web::Data::new(MilestoneListService::new(Arc::new(
+        PostgresMilestoneRepository::new(pool.clone()),
     )));
     // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
     // service so name validation and the duplicate-name conflict live in one
@@ -411,6 +437,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(goal_milestone_link_service.clone())
             .app_data(task_relation_service.clone())
             .app_data(task_status_service.clone())
+            .app_data(task_list_service.clone())
+            .app_data(goal_list_service.clone())
+            .app_data(milestone_list_service.clone())
             .app_data(status_snapshots_data.clone())
             .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())

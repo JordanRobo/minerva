@@ -359,29 +359,18 @@ mod tests {
             Ok(())
         }
 
-        async fn list_by_milestone(
+        async fn list_page(
             &self,
-            milestone_id: domain::MilestoneId,
-        ) -> Result<Vec<Task>, RepositoryError> {
-            Ok(self
-                .tasks
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|t| t.milestone_id == Some(milestone_id))
-                .cloned()
-                .collect())
-        }
-
-        async fn list_unassigned(&self) -> Result<Vec<Task>, RepositoryError> {
-            Ok(self
-                .tasks
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|t| t.milestone_id.is_none())
-                .cloned()
-                .collect())
+            filter: &crate::ports::TaskListFilter,
+            page: &crate::pagination::PageRequest,
+        ) -> Result<crate::pagination::Page<Task>, RepositoryError> {
+            let matched = crate::ports::task_repository::fakes::apply_task_list_filter(
+                self.tasks.lock().unwrap().values(),
+                filter,
+            );
+            Ok(crate::ports::task_repository::fakes::page_tasks(
+                matched, page,
+            ))
         }
     }
 

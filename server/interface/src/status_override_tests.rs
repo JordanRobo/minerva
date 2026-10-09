@@ -10,6 +10,8 @@ use actix_web::http::{Method, StatusCode, header};
 use actix_web::test::{TestRequest, init_service, read_body};
 use actix_web::web;
 use application::auth::SessionService;
+use application::goal_list::GoalListService;
+use application::milestone_list::MilestoneListService;
 use application::ports::{
     GoalRepository, MilestoneRepository, NoopStatusSnapshotTrigger, SessionRepository,
     UserRepository,
@@ -89,6 +91,12 @@ macro_rules! test_app {
                 .app_data(users_data)
                 .app_data(web::Data::new(session_service))
                 .app_data(web::Data::new(overrides))
+                .app_data(web::Data::new(GoalListService::new(Arc::new(
+                    PostgresGoalRepository::new(pool.clone()),
+                ))))
+                .app_data(web::Data::new(MilestoneListService::new(Arc::new(
+                    PostgresMilestoneRepository::new(pool.clone()),
+                ))))
                 .app_data(web::Data::new(CookieSettings { secure: false }))
                 .configure(routes::configure),
         )
@@ -238,16 +246,18 @@ async fn setting_a_goal_override_reports_the_manual_status() {
     );
     assert_eq!(get.status(), StatusCode::OK);
     assert_status(&json_of(get).await, "at_risk", "manual");
+    // The list is paginated, so narrow it to this test's own goals by title
+    // before looking the row up.
     let list = request!(
         &app,
         Method::GET,
-        "/api/goals",
+        "/api/goals?q=Override",
         Some(&token),
         None::<&serde_json::Value>
     );
     assert_eq!(list.status(), StatusCode::OK);
     let list_json = json_of(list).await;
-    let entry = list_json
+    let entry = list_json["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -495,16 +505,18 @@ async fn setting_a_milestone_override_reports_the_manual_status() {
     );
     assert_eq!(get.status(), StatusCode::OK);
     assert_status(&json_of(get).await, "off_track", "manual");
+    // The list is paginated, so narrow it to this test's own milestones by
+    // title before looking the row up.
     let list = request!(
         &app,
         Method::GET,
-        "/api/milestones",
+        "/api/milestones?q=Override",
         Some(&token),
         None::<&serde_json::Value>
     );
     assert_eq!(list.status(), StatusCode::OK);
     let list_json = json_of(list).await;
-    let entry = list_json
+    let entry = list_json["items"]
         .as_array()
         .unwrap()
         .iter()

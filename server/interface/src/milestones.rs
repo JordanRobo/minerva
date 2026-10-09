@@ -5,18 +5,23 @@
 //! independently of the domain model.
 
 use actix_web::{HttpResponse, web};
-use application::ports::MilestoneRepository;
+use application::milestone_list::MilestoneListService;
+use application::pagination::PageRequest;
+use application::ports::{MilestoneListFilter, MilestoneRepository};
 use application::status_override::StatusOverrideService;
 use chrono::{DateTime, NaiveDate, Utc};
 use domain::{Milestone, MilestoneId, Status, StatusSource};
 use infrastructure::repositories::PostgresMilestoneRepository;
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::access::{EditAccess, ViewAccess};
 use crate::error::{ApiError, repo_error_response, status_override_error_response};
-use crate::goals::StatusOverrideRequest;
+use crate::goals::{
+    StatusOverrideRequest, collect_list_query, parse_page_request, parse_q, parse_target_date,
+};
 use crate::openapi::{StatusDoc, StatusSourceDoc};
 
 /// JSON shape of a milestone in responses.
@@ -67,6 +72,105 @@ pub struct MilestoneRequest {
     pub target_date: Option<NaiveDate>,
 }
 
+/// One page of milestones plus the pagination metadata (roadmap 3.10, D16):
+/// `total` is the number of milestones matching the filters, ignoring paging,
+/// so a client can tell how many pages there are without fetching them all.
+#[derive(Serialize, ToSchema)]
+pub struct MilestonePage {
+    pub items: Vec<MilestoneResponse>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u64,
+}
+
+/// Query params for `GET /api/milestones`. Every parameter is optional and
+/// narrows the result set; they are all plain strings here because the
+/// handler validates each one itself so a 400 can name the offending
+/// parameter.
+#[derive(IntoParams)]
+pub struct MilestoneListQuery {
+    /// How many milestones per page (1–200). Defaults to 50.
+    pub limit: Option<String>,
+    /// How many matching milestones to skip before the page starts. Defaults
+    /// to 0.
+    pub offset: Option<String>,
+    /// Only milestones in these statuses (`on_track`, `at_risk`, `off_track`,
+    /// `complete`). The effective status is matched: a manual setting wins
+    /// over the automatic one. May be given several times or comma-separated.
+    pub status: Vec<String>,
+    /// Case-insensitive substring match on the milestone title.
+    pub q: Option<String>,
+    /// Only milestones whose target date is on or after this date
+    /// (`YYYY-MM-DD`).
+    pub target_after: Option<String>,
+    /// Only milestones whose target date is on or before this date
+    /// (`YYYY-MM-DD`).
+    pub target_before: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for MilestoneListQuery {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let pairs: Vec<(String, String)> = Deserialize::deserialize(deserializer)?;
+        let raw = collect_list_query(pairs).map_err(serde::de::Error::custom)?;
+        Ok(MilestoneListQuery {
+            limit: raw.limit,
+            offset: raw.offset,
+            status: raw.status,
+            q: raw.q,
+            target_after: raw.target_after,
+            target_before: raw.target_before,
+        })
+    }
+}
+
+/// Validate and translate the raw query string into the filter and page the
+/// service takes. Every failure is a 400 `invalid_query` naming the
+/// offending parameter; filters that match nothing are still valid (an empty
+/// result, never an error).
+fn parse_milestone_list_query(
+    params: &MilestoneListQuery,
+) -> Result<(MilestoneListFilter, PageRequest), ApiError> {
+    let page_request = parse_page_request(params.limit.as_deref(), params.offset.as_deref())?;
+
+    let mut statuses = Vec::new();
+    for raw in &params.status {
+        for token in raw.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            statuses.push(match token {
+                "on_track" => Status::OnTrack,
+                "at_risk" => Status::AtRisk,
+                "off_track" => Status::OffTrack,
+                "complete" => Status::Complete,
+                other => {
+                    return Err(ApiError::invalid_query(format!(
+                        "status must be one of on_track, at_risk, off_track or complete, got {other:?}"
+                    )));
+                }
+            });
+        }
+    }
+
+    let q = parse_q(params.q.as_deref())?;
+    let target_after = parse_target_date(params.target_after.as_deref(), "target_after")?;
+    let target_before = parse_target_date(params.target_before.as_deref(), "target_before")?;
+
+    Ok((
+        MilestoneListFilter {
+            statuses,
+            q,
+            target_after,
+            target_before,
+        },
+        page_request,
+    ))
+}
+
 /// Create Milestone
 ///
 /// Create a new milestone - a measurable step toward a goal.
@@ -111,28 +215,42 @@ pub async fn create_milestone(
 
 /// List all Milestones
 ///
-/// List every milestone, across all statuses. Any signed-in user may read.
+/// List milestones, one page at a time. Every query parameter is optional and
+/// narrows the result set; together they are combined with AND. The status
+/// filter matches the effective status — a manual setting wins over the
+/// automatic value. The order is fixed: target date ascending (milestones
+/// without one last), then creation time, then id — so pages are stable. A
+/// filter that matches nothing is an empty page, not an error. Any signed-in
+/// user may read.
 #[utoipa::path(
     get,
     path = "/api/milestones",
     tags = ["milestones"],
     security(("session_cookie" = [])),
+    params(MilestoneListQuery),
     responses(
-        (status = 200, description = "All milestones", body = Vec<MilestoneResponse>),
+        (status = 200, description = "One page of the matching milestones plus the total count", body = MilestonePage),
+        (
+            status = 400,
+            description = "A query parameter is missing or malformed; the message names it",
+            body = ApiError
+        ),
         (status = 401, description = "Missing or invalid session", body = ApiError)
     )
 )]
 pub async fn list_milestones(
-    milestones: web::Data<PostgresMilestoneRepository>,
+    query: web::Query<MilestoneListQuery>,
+    service: web::Data<MilestoneListService>,
     _access: ViewAccess,
 ) -> Result<HttpResponse, ApiError> {
-    match milestones.list().await {
-        Ok(milestones) => Ok(HttpResponse::Ok().json(
-            milestones
-                .iter()
-                .map(MilestoneResponse::from)
-                .collect::<Vec<_>>(),
-        )),
+    let (filter, page_request) = parse_milestone_list_query(&query.0)?;
+    match service.list_page(&filter, &page_request).await {
+        Ok(page) => Ok(HttpResponse::Ok().json(MilestonePage {
+            items: page.items.iter().map(MilestoneResponse::from).collect(),
+            total: page.total,
+            limit: page.limit,
+            offset: page.offset,
+        })),
         Err(err) => Err(repo_error_response(err)),
     }
 }

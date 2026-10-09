@@ -18,7 +18,9 @@ use application::account_links::AccountLinkService;
 use application::auth::SessionService;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::AuthProviders;
+use application::goal_list::GoalListService;
 use application::goal_milestone_links::GoalMilestoneLinkService;
+use application::milestone_list::MilestoneListService;
 use application::ports::{
     GoalRepository, MilestoneRepository, NoopStatusSnapshotTrigger, PasswordHasher,
     SessionRepository, SessionTokens, SsoGroupRuleRepository, TaskRepository, UserRepository,
@@ -26,6 +28,7 @@ use application::ports::{
 use application::rate_limit::RateLimitService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_override::StatusOverrideService;
+use application::task_list::TaskListService;
 use application::task_relations::TaskRelationService;
 use application::task_status::TaskStatusService;
 use application::user_admin::UserAdminService;
@@ -159,6 +162,15 @@ macro_rules! test_app {
                 )))
                 .app_data(web::Data::new(TaskStatusService::new(Arc::new(
                     PostgresTaskRepository::new(pool.clone()),
+                ))))
+                .app_data(web::Data::new(TaskListService::new(Arc::new(
+                    PostgresTaskRepository::new(pool.clone()),
+                ))))
+                .app_data(web::Data::new(GoalListService::new(Arc::new(
+                    PostgresGoalRepository::new(pool.clone()),
+                ))))
+                .app_data(web::Data::new(MilestoneListService::new(Arc::new(
+                    PostgresMilestoneRepository::new(pool.clone()),
                 ))))
                 .app_data(providers)
                 .app_data(web::Data::new(CookieSettings { secure: false }))
@@ -410,10 +422,10 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Permission::ViewContent,
             None,
         ),
-        // `GET /api/tasks` 400s without a filter, before any auth answer.
+        // `GET /api/tasks` lists every task when no filter is given.
         (
             Method::GET,
-            "/api/tasks?unassigned=true".into(),
+            "/api/tasks".into(),
             Permission::ViewContent,
             None,
         ),

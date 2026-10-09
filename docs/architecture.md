@@ -376,15 +376,16 @@ not in the handlers:
   so racing duplicates cannot error) — and both still answer 204.
 - Both ids must exist before either verb acts: the goal is checked first, then
   the milestone; an unknown id is a typed `GoalNotFound`/`MilestoneNotFound`.
-- The listings return full goals/milestones in a deterministic order: target
-  date (nulls last), then creation time, then id.
+- The listings are paginated (D16) and return full goals/milestones in the
+  shared default order: target date (nulls last), then creation time, then id.
 
 The routes are `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}` —
 Staff or Admin (`EditAccess`), both answering 204 with no body — and
 `GET /api/goals/{id}/milestones` plus `GET /api/milestones/{id}/goals`, open to
-any signed-in role (`ViewAccess`), answering 200 with plain arrays of the
-standard goal/milestone responses (effective `status` plus `status_source`
-included). Unknown ids are 404s with distinct `goal_not_found`/
+any signed-in role (`ViewAccess`), taking only `limit` and `offset` and
+answering 200 with the D16 envelope whose items are the standard goal/milestone
+responses (effective `status` plus `status_source` included) — see "List
+pagination, filtering and ordering". Unknown ids are 404s with distinct `goal_not_found`/
 `milestone_not_found` codes, so a client can tell which of the two ids it sent
 was missing. Linking does not fire the snapshot hook: status computation is
 3.13's and snapshots 3.14's (D5).
@@ -464,6 +465,56 @@ milestone status computation (D5): snapshots are 3.14's and computed status
 updated task in the standard task response shape; an unknown task is a 404,
 and an unknown status string a 400 from JSON parsing before the handler runs.
 
+### List pagination, filtering and ordering
+
+The five list endpoints — `GET /api/tasks`, `GET /api/goals`,
+`GET /api/milestones` and the two goal↔milestone link lists (roadmap 3.10,
+D16) — answer a shared envelope instead of a bare array:
+
+```json
+{ "items": [ … ], "total": 42, "limit": 50, "offset": 0 }
+```
+
+`total` counts every row matching the filters, ignoring paging. Paging is
+limit/offset: `limit` accepts 1–200 and defaults to 50, `offset` must be ≥ 0
+and defaults to 0. A malformed or out-of-range value is a 400 `invalid_query`
+naming the parameter — values are never clamped — and an offset past the end
+of the result is simply an empty page with the correct total. Every list goes
+through a small application service (`application::task_list`, `goal_list`,
+`milestone_list`, or the goal–milestone link service) so the handlers never
+touch a repository.
+
+Each endpoint's filters:
+
+- Tasks: `status` (comma-separated and/or repeated), `milestone_id`, `q`
+  (case-insensitive literal substring on the title, trimmed, at most 100
+  characters; `%`, `_` and `\` match literally) and inclusive
+  `target_after`/`target_before` (`YYYY-MM-DD`) that never match undated tasks.
+- Goals and milestones: the same minus `milestone_id`, with one difference —
+  `status` matches the **effective** status (the manual override when set, else
+  the automatic value; roadmap 3.2), which in Postgres is
+  `COALESCE(status_override, status)`.
+- The link lists take only `limit` and `offset`: the path id is the filter.
+
+No filter can 404: an unmatched filter — including an unknown `milestone_id` —
+is a 200 empty page. (An unknown *path* id on the link lists still 404s.)
+
+Ordering is one shared default for every list, not client-selectable (roadmap
+3.16): target date ascending with undated rows last, then `created_at`, then
+id. With a total count and a stable order, pages are deterministic — walking
+the pages reassembles the full result exactly once. There is no `sort`
+parameter in v1; manual card ordering would be the reason to add one.
+
+Migration 20261008000001 adds `idx_tasks_status` and
+`idx_tasks_list_order (target_date NULLS LAST, created_at, id)` for the task
+list; goals and milestones have no indexes yet — school-scale row counts do
+not justify one, and the effective-status filter is an expression over two
+columns that a plain b-tree cannot serve.
+
+Deliberately **not** paginated: `GET /api/users`, `GET /api/invites`,
+`GET /api/sso/group-rules` and `GET /api/tasks/{id}/relations` — each is small
+and bounded, so a bare array stays the simpler contract.
+
 ## API documentation
 
 The `interface` crate generates an OpenAPI 3 document from code annotations
@@ -480,4 +531,7 @@ invites and SSO group rules) are documented; the temporary
 scheme (the session cookie as an API key, registered by a `utoipa::Modify`
 addon in `interface/src/openapi.rs`) so Swagger UI's Authorize button can
 fill it in; a document test keeps every operation's security requirement and
-401/403 responses in sync with the access rules (see "Authorization").
+401/403 responses in sync with the access rules (see "Authorization"). The
+paginated list endpoints additionally document their paging and filter
+parameters and their page schemas (`TaskPage`, `GoalPage`, `MilestonePage`);
+see "List pagination, filtering and ordering".

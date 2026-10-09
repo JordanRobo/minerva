@@ -2,6 +2,7 @@
 
 use domain::{Goal, GoalId, GoalMilestone, Milestone, MilestoneId};
 
+use crate::pagination::{Page, PageRequest};
 use crate::ports::RepositoryError;
 
 #[async_trait::async_trait]
@@ -29,4 +30,19 @@ pub trait GoalMilestoneRepository: Send + Sync {
         &self,
         milestone_id: MilestoneId,
     ) -> Result<Vec<Goal>, RepositoryError>;
+
+    /// One page of [`Self::milestones_for_goal`]: `total` counts only the
+    /// linked rows and ignores paging (roadmap 3.10).
+    async fn milestones_for_goal_page(
+        &self,
+        goal_id: GoalId,
+        page: &PageRequest,
+    ) -> Result<Page<Milestone>, RepositoryError>;
+
+    /// One page of [`Self::goals_for_milestone`], same rules.
+    async fn goals_for_milestone_page(
+        &self,
+        milestone_id: MilestoneId,
+        page: &PageRequest,
+    ) -> Result<Page<Goal>, RepositoryError>;
 }

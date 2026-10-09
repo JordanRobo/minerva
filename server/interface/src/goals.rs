@@ -5,13 +5,16 @@
 //! independently of the domain model.
 
 use actix_web::{HttpResponse, web};
-use application::ports::GoalRepository;
+use application::goal_list::GoalListService;
+use application::pagination::{PageRequest, PageRequestError};
+use application::ports::{GoalListFilter, GoalRepository};
 use application::status_override::StatusOverrideService;
 use chrono::{DateTime, NaiveDate, Utc};
 use domain::{Goal, GoalId, Status, StatusSource};
 use infrastructure::repositories::PostgresGoalRepository;
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::access::{EditAccess, ViewAccess};
@@ -75,6 +78,213 @@ pub struct StatusOverrideRequest {
     pub status: Status,
 }
 
+/// One page of goals plus the pagination metadata (roadmap 3.10, D16):
+/// `total` is the number of goals matching the filters, ignoring paging, so
+/// a client can tell how many pages there are without fetching them all.
+#[derive(Serialize, ToSchema)]
+pub struct GoalPage {
+    pub items: Vec<GoalResponse>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u64,
+}
+
+/// The raw form of the list query parameters shared by the goal and
+/// milestone lists: every value is still a plain string because each handler
+/// validates its own parameters so a 400 can name the offending one.
+pub(crate) struct RawListQuery {
+    pub limit: Option<String>,
+    pub offset: Option<String>,
+    pub status: Vec<String>,
+    pub q: Option<String>,
+    pub target_after: Option<String>,
+    pub target_before: Option<String>,
+}
+
+/// Group the raw query-string pairs into a [`RawListQuery`]. A derived
+/// visitor cannot express what a query string allows: serde_urlencoded hands
+/// every key=value through as a scalar (a `Vec` field would be rejected
+/// outright) and errors on repeated keys, but `status` must accept both
+/// repeats and comma-separated values. So the pairs are grouped here:
+/// `status` accumulates, every other parameter may appear at most once (a
+/// repeat is an error naming it), and unknown parameters are ignored — the
+/// same leniency the derive had.
+pub(crate) fn collect_list_query(pairs: Vec<(String, String)>) -> Result<RawListQuery, String> {
+    let mut query = RawListQuery {
+        limit: None,
+        offset: None,
+        status: Vec::new(),
+        q: None,
+        target_after: None,
+        target_before: None,
+    };
+    for (key, value) in pairs {
+        match key.as_str() {
+            "status" => query.status.push(value),
+            "limit" | "offset" | "q" | "target_after" | "target_before" => {
+                let slot: &mut Option<String> = match key.as_str() {
+                    "limit" => &mut query.limit,
+                    "offset" => &mut query.offset,
+                    "q" => &mut query.q,
+                    "target_after" => &mut query.target_after,
+                    _ => &mut query.target_before,
+                };
+                if slot.is_some() {
+                    return Err(format!("duplicate parameter {key}"));
+                }
+                *slot = Some(value);
+            }
+            _ => {}
+        }
+    }
+    Ok(query)
+}
+
+/// Validate the raw `limit` and `offset` into a [`PageRequest`]; every
+/// failure is a 400 `invalid_query` naming the offending parameter.
+pub(crate) fn parse_page_request(
+    limit: Option<&str>,
+    offset: Option<&str>,
+) -> Result<PageRequest, ApiError> {
+    let limit = limit.map(|raw| {
+        raw.parse::<i32>().map_err(|_| {
+            ApiError::invalid_query(format!("limit must be a whole number, got {raw:?}"))
+        })
+    });
+    let offset = offset.map(|raw| {
+        raw.parse::<i64>().map_err(|_| {
+            ApiError::invalid_query(format!("offset must be a whole number, got {raw:?}"))
+        })
+    });
+    PageRequest::new(limit.transpose()?, offset.transpose()?).map_err(|err| match err {
+        PageRequestError::LimitOutOfRange(value) => ApiError::invalid_query(format!(
+            "limit must be between 1 and {}, got {value}",
+            PageRequest::MAX_PAGE_LIMIT
+        )),
+        PageRequestError::NegativeOffset(value) => {
+            ApiError::invalid_query(format!("offset must not be negative, got {value}"))
+        }
+    })
+}
+
+/// Validate the raw `q` search term: trimmed, empty after trimming means "no
+/// search", at most 100 characters.
+pub(crate) fn parse_q(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let q = raw
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(ToOwned::to_owned);
+    let q_len = q.as_deref().map_or(0, |q| q.chars().count());
+    if q_len > 100 {
+        return Err(ApiError::invalid_query(format!(
+            "q must be at most 100 characters, got {q_len}"
+        )));
+    }
+    Ok(q)
+}
+
+/// Validate a raw `YYYY-MM-DD` date bound; every failure is a 400
+/// `invalid_query` naming the offending parameter.
+pub(crate) fn parse_target_date(
+    raw: Option<&str>,
+    param: &str,
+) -> Result<Option<NaiveDate>, ApiError> {
+    match raw {
+        Some(raw) => Ok(Some(NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(
+            |_| {
+                ApiError::invalid_query(format!(
+                    "{param} must be a date in YYYY-MM-DD form, got {raw:?}"
+                ))
+            },
+        )?)),
+        None => Ok(None),
+    }
+}
+
+/// Query params for `GET /api/goals`. Every parameter is optional and narrows
+/// the result set; they are all plain strings here because the handler
+/// validates each one itself so a 400 can name the offending parameter.
+#[derive(IntoParams)]
+pub struct GoalListQuery {
+    /// How many goals per page (1–200). Defaults to 50.
+    pub limit: Option<String>,
+    /// How many matching goals to skip before the page starts. Defaults to 0.
+    pub offset: Option<String>,
+    /// Only goals in these statuses (`on_track`, `at_risk`, `off_track`,
+    /// `complete`). The effective status is matched: a manual setting wins
+    /// over the automatic one. May be given several times or comma-separated.
+    pub status: Vec<String>,
+    /// Case-insensitive substring match on the goal title.
+    pub q: Option<String>,
+    /// Only goals whose target date is on or after this date (`YYYY-MM-DD`).
+    pub target_after: Option<String>,
+    /// Only goals whose target date is on or before this date (`YYYY-MM-DD`).
+    pub target_before: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for GoalListQuery {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let pairs: Vec<(String, String)> = Deserialize::deserialize(deserializer)?;
+        let raw = collect_list_query(pairs).map_err(serde::de::Error::custom)?;
+        Ok(GoalListQuery {
+            limit: raw.limit,
+            offset: raw.offset,
+            status: raw.status,
+            q: raw.q,
+            target_after: raw.target_after,
+            target_before: raw.target_before,
+        })
+    }
+}
+
+/// Validate and translate the raw query string into the filter and page the
+/// service takes. Every failure is a 400 `invalid_query` naming the
+/// offending parameter; filters that match nothing are still valid (an empty
+/// result, never an error).
+fn parse_goal_list_query(
+    params: &GoalListQuery,
+) -> Result<(GoalListFilter, PageRequest), ApiError> {
+    let page_request = parse_page_request(params.limit.as_deref(), params.offset.as_deref())?;
+
+    let mut statuses = Vec::new();
+    for raw in &params.status {
+        for token in raw.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            statuses.push(match token {
+                "on_track" => Status::OnTrack,
+                "at_risk" => Status::AtRisk,
+                "off_track" => Status::OffTrack,
+                "complete" => Status::Complete,
+                other => {
+                    return Err(ApiError::invalid_query(format!(
+                        "status must be one of on_track, at_risk, off_track or complete, got {other:?}"
+                    )));
+                }
+            });
+        }
+    }
+
+    let q = parse_q(params.q.as_deref())?;
+    let target_after = parse_target_date(params.target_after.as_deref(), "target_after")?;
+    let target_before = parse_target_date(params.target_before.as_deref(), "target_before")?;
+
+    Ok((
+        GoalListFilter {
+            statuses,
+            q,
+            target_after,
+            target_before,
+        },
+        page_request,
+    ))
+}
+
 /// Create Goal
 ///
 /// Create a new goal - a strategic outcome the school is working toward.
@@ -120,25 +330,42 @@ pub async fn create_goal(
 
 /// List Goals
 ///
-/// List every goal, across all statuses. Any signed-in user may read.
+/// List goals, one page at a time. Every query parameter is optional and
+/// narrows the result set; together they are combined with AND. The status
+/// filter matches the effective status — a manual setting wins over the
+/// automatic value. The order is fixed: target date ascending (goals without
+/// one last), then creation time, then id — so pages are stable. A filter
+/// that matches nothing is an empty page, not an error. Any signed-in user
+/// may read.
 #[utoipa::path(
     get,
     path = "/api/goals",
     tags = ["goals"],
     security(("session_cookie" = [])),
+    params(GoalListQuery),
     responses(
-        (status = 200, description = "All goals", body = Vec<GoalResponse>),
+        (status = 200, description = "One page of the matching goals plus the total count", body = GoalPage),
+        (
+            status = 400,
+            description = "A query parameter is missing or malformed; the message names it",
+            body = ApiError
+        ),
         (status = 401, description = "Missing or invalid session", body = ApiError)
     )
 )]
 pub async fn list_goals(
-    goals: web::Data<PostgresGoalRepository>,
+    query: web::Query<GoalListQuery>,
+    service: web::Data<GoalListService>,
     _access: ViewAccess,
 ) -> Result<HttpResponse, ApiError> {
-    match goals.list().await {
-        Ok(goals) => {
-            Ok(HttpResponse::Ok().json(goals.iter().map(GoalResponse::from).collect::<Vec<_>>()))
-        }
+    let (filter, page_request) = parse_goal_list_query(&query.0)?;
+    match service.list_page(&filter, &page_request).await {
+        Ok(page) => Ok(HttpResponse::Ok().json(GoalPage {
+            items: page.items.iter().map(GoalResponse::from).collect(),
+            total: page.total,
+            limit: page.limit,
+            offset: page.offset,
+        })),
         Err(err) => Err(repo_error_response(err)),
     }
 }

@@ -30,6 +30,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .app_data(web::JsonConfig::default().error_handler(|err, _req| {
                     ApiError::bad_request(format!("invalid JSON body: {err}")).into()
                 }))
+                // Unparsable query strings get the standard error envelope
+                // instead of Actix's default plaintext.
+                .app_data(web::QueryConfig::default().error_handler(|err, _req| {
+                    ApiError::invalid_query(format!("invalid query parameters: {err}")).into()
+                }))
                 .route("/goals", web::post().to(goals::create_goal))
                 .route("/goals", web::get().to(goals::list_goals))
                 .route("/goals/{id}", web::get().to(goals::get_goal))

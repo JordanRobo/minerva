@@ -3,7 +3,10 @@
 //! unlink are no-ops that still answer 204, deleting either end drops the
 //! link from the other side's list, unknown ids 404 with the code that names
 //! which one is missing, listed entities carry their effective status, and
-//! the lists are deterministically ordered.
+//! the lists are deterministically ordered — now as pages (roadmap 3.10):
+//! the D16 envelope with a `total` that counts only linked rows, a paging
+//! walk that yields each link exactly once, and 400s naming malformed
+//! paging parameters.
 
 use actix_web::App;
 use actix_web::dev::{Service, ServiceResponse};
@@ -12,6 +15,7 @@ use actix_web::test::{TestRequest, init_service, read_body};
 use actix_web::web;
 use application::auth::SessionService;
 use application::goal_milestone_links::GoalMilestoneLinkService;
+use application::pagination::PageRequest;
 use application::ports::{GoalRepository, MilestoneRepository, SessionRepository, UserRepository};
 use chrono::{NaiveDate, Utc};
 use diesel::prelude::*;
@@ -119,10 +123,11 @@ async fn json_of(res: ServiceResponse) -> serde_json::Value {
     serde_json::from_slice(&read_body(res).await).expect("a JSON body")
 }
 
-/// The `id` fields of a list response, in list order.
+/// The `id` fields of the items in a page response, in list order.
 fn listed_ids(json: &serde_json::Value) -> Vec<Uuid> {
-    json.as_array()
-        .expect("a JSON array")
+    json["items"]
+        .as_array()
+        .expect("an items array")
         .iter()
         .map(|entry| {
             entry["id"]
@@ -606,7 +611,7 @@ async fn a_linked_milestone_reports_its_manual_override_in_the_list() {
     );
     assert_eq!(list.status(), StatusCode::OK);
     let json = json_of(list).await;
-    let entry = json
+    let entry = json["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -665,7 +670,10 @@ async fn deleting_either_end_drops_the_link_from_the_other_side() {
         Some(&token),
         None::<&serde_json::Value>
     );
-    assert_eq!(listed_ids(&json_of(list).await), Vec::<Uuid>::new());
+    let json = json_of(list).await;
+    assert_eq!(listed_ids(&json), Vec::<Uuid>::new());
+    // The total drops with the link, not just the items.
+    assert_eq!(json["total"], 0);
     milestones
         .delete(milestone.id)
         .await
@@ -700,7 +708,10 @@ async fn deleting_either_end_drops_the_link_from_the_other_side() {
         Some(&token),
         None::<&serde_json::Value>
     );
-    assert_eq!(listed_ids(&json_of(list).await), Vec::<Uuid>::new());
+    let json = json_of(list).await;
+    assert_eq!(listed_ids(&json), Vec::<Uuid>::new());
+    // The total drops with the link, not just the items.
+    assert_eq!(json["total"], 0);
 
     // The milestone itself was deleted through the API above; only the goal
     // still needs removing.
@@ -765,6 +776,340 @@ async fn lists_order_by_target_date_with_nulls_last() {
     for goal in [goal_january, goal_may, goal_undated] {
         goals.delete(goal.id).await.expect("cleanup goal");
     }
+    milestones
+        .delete(milestone.id)
+        .await
+        .expect("cleanup milestone");
+    delete_user(&pool, user.id);
+}
+
+#[actix_web::test]
+async fn the_link_lists_answer_the_page_envelope() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let app = test_app!(&url);
+
+    let (user, token) = staff(&pool).await;
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool.clone());
+    let goal = goals.create(test_goal(None)).await.expect("create goal");
+    let milestone = milestones
+        .create(test_milestone(None))
+        .await
+        .expect("create milestone");
+    let res = request!(
+        &app,
+        Method::PUT,
+        format!("/api/goals/{}/milestones/{}", goal.id.0, milestone.id.0),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // No query params: the defaults apply and the envelope is complete on
+    // both sides of the relation.
+    for uri in [
+        format!("/api/goals/{}/milestones", goal.id.0),
+        format!("/api/milestones/{}/goals", milestone.id.0),
+    ] {
+        let list = request!(
+            &app,
+            Method::GET,
+            uri,
+            Some(&token),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(list.status(), StatusCode::OK);
+        let json = json_of(list).await;
+        assert!(json["items"].is_array());
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["limit"], 50);
+        assert_eq!(json["offset"], 0);
+    }
+
+    goals.delete(goal.id).await.expect("cleanup goal");
+    milestones
+        .delete(milestone.id)
+        .await
+        .expect("cleanup milestone");
+    delete_user(&pool, user.id);
+}
+
+#[actix_web::test]
+async fn the_total_counts_only_linked_rows() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let app = test_app!(&url);
+
+    let (user, token) = staff(&pool).await;
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool.clone());
+    let goal = goals.create(test_goal(None)).await.expect("create goal");
+    // Two of three milestones are linked; the third must not count.
+    let linked_a = milestones
+        .create(test_milestone(None))
+        .await
+        .expect("create milestone");
+    let linked_b = milestones
+        .create(test_milestone(None))
+        .await
+        .expect("create milestone");
+    let unlinked = milestones
+        .create(test_milestone(None))
+        .await
+        .expect("create milestone");
+    for milestone in [&linked_a, &linked_b] {
+        let res = request!(
+            &app,
+            Method::PUT,
+            format!("/api/goals/{}/milestones/{}", goal.id.0, milestone.id.0),
+            Some(&token),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    }
+
+    let list = request!(
+        &app,
+        Method::GET,
+        format!("/api/goals/{}/milestones", goal.id.0),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(list.status(), StatusCode::OK);
+    let json = json_of(list).await;
+    assert_eq!(json["total"], 2);
+    let mut ids = listed_ids(&json);
+    ids.sort();
+    let mut expected = vec![linked_a.id.0, linked_b.id.0];
+    expected.sort();
+    assert_eq!(ids, expected);
+
+    // The mirror side counts only the goals linked to the milestone.
+    let goal_two = goals.create(test_goal(None)).await.expect("create goal");
+    let stray_goal = goals.create(test_goal(None)).await.expect("create goal");
+    let res = request!(
+        &app,
+        Method::PUT,
+        format!("/api/goals/{}/milestones/{}", goal_two.id.0, linked_a.id.0),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let list = request!(
+        &app,
+        Method::GET,
+        format!("/api/milestones/{}/goals", linked_a.id.0),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(list.status(), StatusCode::OK);
+    let json = json_of(list).await;
+    // goal and goal_two are linked, stray_goal is not: total is 2, not 3.
+    assert_eq!(json["total"], 2);
+
+    for goal in [goal, goal_two, stray_goal] {
+        goals.delete(goal.id).await.expect("cleanup goal");
+    }
+    for milestone in [linked_a, linked_b, unlinked] {
+        milestones
+            .delete(milestone.id)
+            .await
+            .expect("cleanup milestone");
+    }
+    delete_user(&pool, user.id);
+}
+
+#[actix_web::test]
+async fn paging_walks_the_linked_milestones_exactly_once_in_order() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let app = test_app!(&url);
+
+    let (user, token) = staff(&pool).await;
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool.clone());
+    let goal = goals.create(test_goal(None)).await.expect("create goal");
+    // Seven linked milestones: two share a target date, three have none. The
+    // dated ones come first in date order, the undated last; creation order
+    // breaks the ties inside each group.
+    let january_fifth = NaiveDate::from_ymd_opt(2026, 1, 5).expect("a valid date");
+    let february_tenth = NaiveDate::from_ymd_opt(2026, 2, 10).expect("a valid date");
+    let march_third = NaiveDate::from_ymd_opt(2026, 3, 3).expect("a valid date");
+    let target_dates = [
+        Some(january_fifth),
+        Some(january_fifth),
+        Some(february_tenth),
+        None,
+        None,
+        None,
+        Some(march_third),
+    ];
+    let mut linked = Vec::new();
+    for target_date in target_dates {
+        let milestone = milestones
+            .create(test_milestone(target_date))
+            .await
+            .expect("create milestone");
+        let res = request!(
+            &app,
+            Method::PUT,
+            format!("/api/goals/{}/milestones/{}", goal.id.0, milestone.id.0),
+            Some(&token),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        linked.push(milestone);
+    }
+
+    // The full list fixes the deterministic order; the pages must reassemble
+    // it. Dated first in date order, undated last.
+    let list = request!(
+        &app,
+        Method::GET,
+        format!("/api/goals/{}/milestones", goal.id.0),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(list.status(), StatusCode::OK);
+    let full = json_of(list).await;
+    let full_order = listed_ids(&full);
+    assert_eq!(full_order.len(), 7);
+    let dates: Vec<Option<&str>> = full["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["target_date"].as_str())
+        .collect();
+    assert_eq!(
+        dates,
+        vec![
+            Some("2026-01-05"),
+            Some("2026-01-05"),
+            Some("2026-02-10"),
+            Some("2026-03-03"),
+            None,
+            None,
+            None
+        ]
+    );
+
+    let mut walked = Vec::new();
+    for offset in [0u64, 3, 6] {
+        let list = request!(
+            &app,
+            Method::GET,
+            format!(
+                "/api/goals/{}/milestones?limit=3&offset={offset}",
+                goal.id.0
+            ),
+            Some(&token),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(list.status(), StatusCode::OK);
+        let json = json_of(list).await;
+        assert_eq!(json["total"], 7);
+        assert_eq!(json["limit"], 3);
+        assert_eq!(json["offset"], offset);
+        walked.extend(listed_ids(&json));
+    }
+    let mut unique = walked.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 7, "each milestone exactly once");
+    assert_eq!(walked, full_order, "pages reassemble the full order");
+
+    // An offset past the end is an empty page with the total intact.
+    let list = request!(
+        &app,
+        Method::GET,
+        format!("/api/goals/{}/milestones?limit=3&offset=9", goal.id.0),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(list.status(), StatusCode::OK);
+    let json = json_of(list).await;
+    assert!(json["items"].as_array().unwrap().is_empty());
+    assert_eq!(json["total"], 7);
+
+    for milestone in linked {
+        milestones
+            .delete(milestone.id)
+            .await
+            .expect("cleanup milestone");
+    }
+    goals.delete(goal.id).await.expect("cleanup goal");
+    delete_user(&pool, user.id);
+}
+
+#[actix_web::test]
+async fn invalid_query_values_are_400s_naming_the_parameter() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let app = test_app!(&url);
+
+    let (user, token) = staff(&pool).await;
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool.clone());
+    let goal = goals.create(test_goal(None)).await.expect("create goal");
+    let milestone = milestones
+        .create(test_milestone(None))
+        .await
+        .expect("create milestone");
+
+    let cases = [
+        ("?limit=0", "limit"),
+        (
+            &format!("?limit={}", PageRequest::MAX_PAGE_LIMIT + 1),
+            "limit",
+        ),
+        ("?limit=abc", "limit"),
+        ("?offset=-1", "offset"),
+        ("?offset=abc", "offset"),
+        // A duplicate parameter is unparseable by the extractor itself; the
+        // query error handler must still answer with the standard envelope.
+        ("?limit=1&limit=2", "limit"),
+    ];
+    for (query, param) in cases {
+        for path in [
+            format!("/api/goals/{}/milestones{query}", goal.id.0),
+            format!("/api/milestones/{}/goals{query}", milestone.id.0),
+        ] {
+            let res = request!(
+                &app,
+                Method::GET,
+                path,
+                Some(&token),
+                None::<&serde_json::Value>
+            );
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{query}");
+            let json = json_of(res).await;
+            assert_eq!(json["error"]["code"], "invalid_query", "{query}");
+            assert!(
+                json["error"]["message"]
+                    .as_str()
+                    .expect("a message")
+                    .contains(param),
+                "message names {param}: {}",
+                json["error"]["message"]
+            );
+        }
+    }
+
+    goals.delete(goal.id).await.expect("cleanup goal");
     milestones
         .delete(milestone.id)
         .await
