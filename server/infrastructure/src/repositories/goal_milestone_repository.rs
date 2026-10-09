@@ -1,5 +1,6 @@
 //! Postgres implementation of [`GoalMilestoneRepository`].
 
+use application::pagination::{Page, PageRequest};
 use application::ports::{GoalMilestoneRepository, RepositoryError};
 use diesel::prelude::*;
 use domain::{Goal, GoalId, GoalMilestone, Milestone, MilestoneId};
@@ -120,6 +121,128 @@ impl GoalMilestoneRepository for PostgresGoalMilestoneRepository {
                 .load(conn)
                 .map_err(map_diesel_error)?;
             rows.into_iter().map(goal_from_row).collect()
+        })
+        .await
+    }
+
+    async fn milestones_for_goal_page(
+        &self,
+        goal_id: GoalId,
+        page: &PageRequest,
+    ) -> Result<Page<Milestone>, RepositoryError> {
+        let pool = self.pool.clone();
+        let page = *page;
+        let limit = page.limit as i64;
+        let offset = page.offset as i64;
+        run_on_postgres(pool, move |conn| {
+            // The count and the page share one filtered base query (roadmap
+            // 3.10): total honours the link filter but ignores limit/offset.
+            // A boxed query is consumed by both `count` and `load`, so the
+            // builder runs twice.
+            let build_query = || {
+                goal_milestones::table
+                    .inner_join(
+                        milestones::table.on(goal_milestones::milestone_id.eq(milestones::id)),
+                    )
+                    .filter(goal_milestones::goal_id.eq(goal_id.0))
+                    .into_boxed()
+            };
+            let total: i64 = build_query()
+                .count()
+                .first(conn)
+                .map_err(map_diesel_error)?;
+            // The default order (roadmap 3.16): target date ascending with
+            // nulls last, then created_at, then id.
+            let rows: Vec<MilestoneRow> = build_query()
+                .order((
+                    milestones::target_date.asc().nulls_last(),
+                    milestones::created_at.asc(),
+                    milestones::id.asc(),
+                ))
+                .select((
+                    milestones::id,
+                    milestones::title,
+                    milestones::description,
+                    milestones::status,
+                    milestones::status_source,
+                    milestones::target_date,
+                    milestones::created_at,
+                    milestones::updated_at,
+                    milestones::status_override,
+                ))
+                .limit(limit)
+                .offset(offset)
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            Ok(Page {
+                items: rows
+                    .into_iter()
+                    .map(milestone_from_row)
+                    .collect::<Result<Vec<_>, _>>()?,
+                total: total as u64,
+                limit: page.limit,
+                offset: page.offset,
+            })
+        })
+        .await
+    }
+
+    async fn goals_for_milestone_page(
+        &self,
+        milestone_id: MilestoneId,
+        page: &PageRequest,
+    ) -> Result<Page<Goal>, RepositoryError> {
+        let pool = self.pool.clone();
+        let page = *page;
+        let limit = page.limit as i64;
+        let offset = page.offset as i64;
+        run_on_postgres(pool, move |conn| {
+            // The count and the page share one filtered base query (roadmap
+            // 3.10): total honours the link filter but ignores limit/offset.
+            // A boxed query is consumed by both `count` and `load`, so the
+            // builder runs twice.
+            let build_query = || {
+                goal_milestones::table
+                    .inner_join(goals::table.on(goal_milestones::goal_id.eq(goals::id)))
+                    .filter(goal_milestones::milestone_id.eq(milestone_id.0))
+                    .into_boxed()
+            };
+            let total: i64 = build_query()
+                .count()
+                .first(conn)
+                .map_err(map_diesel_error)?;
+            // The default order (roadmap 3.16): target date ascending with
+            // nulls last, then created_at, then id.
+            let rows: Vec<GoalRow> = build_query()
+                .order((
+                    goals::target_date.asc().nulls_last(),
+                    goals::created_at.asc(),
+                    goals::id.asc(),
+                ))
+                .select((
+                    goals::id,
+                    goals::title,
+                    goals::description,
+                    goals::status,
+                    goals::status_source,
+                    goals::target_date,
+                    goals::created_at,
+                    goals::updated_at,
+                    goals::status_override,
+                ))
+                .limit(limit)
+                .offset(offset)
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            Ok(Page {
+                items: rows
+                    .into_iter()
+                    .map(goal_from_row)
+                    .collect::<Result<Vec<_>, _>>()?,
+                total: total as u64,
+                limit: page.limit,
+                offset: page.offset,
+            })
         })
         .await
     }

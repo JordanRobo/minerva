@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use domain::{Goal, GoalId, GoalMilestone, Milestone, MilestoneId};
 
+use crate::pagination::{Page, PageRequest};
 use crate::ports::{GoalMilestoneRepository, GoalRepository, MilestoneRepository, RepositoryError};
 
 /// An error from linking or unlinking a goal and milestone.
@@ -108,6 +109,33 @@ impl GoalMilestoneLinkService {
         self.require_milestone(milestone_id).await?;
         self.links
             .goals_for_milestone(milestone_id)
+            .await
+            .map_err(GoalMilestoneLinkError::Repository)
+    }
+
+    /// One page of [`Self::milestones_for_goal`]: `total` counts only the
+    /// linked rows and ignores paging (roadmap 3.10).
+    pub async fn milestones_for_goal_page(
+        &self,
+        goal_id: GoalId,
+        page: &PageRequest,
+    ) -> Result<Page<Milestone>, GoalMilestoneLinkError> {
+        self.require_goal(goal_id).await?;
+        self.links
+            .milestones_for_goal_page(goal_id, page)
+            .await
+            .map_err(GoalMilestoneLinkError::Repository)
+    }
+
+    /// One page of [`Self::goals_for_milestone`], same rules.
+    pub async fn goals_for_milestone_page(
+        &self,
+        milestone_id: MilestoneId,
+        page: &PageRequest,
+    ) -> Result<Page<Goal>, GoalMilestoneLinkError> {
+        self.require_milestone(milestone_id).await?;
+        self.links
+            .goals_for_milestone_page(milestone_id, page)
             .await
             .map_err(GoalMilestoneLinkError::Repository)
     }
@@ -416,6 +444,44 @@ mod tests {
             });
             Ok(found)
         }
+
+        async fn milestones_for_goal_page(
+            &self,
+            goal_id: GoalId,
+            page: &PageRequest,
+        ) -> Result<Page<Milestone>, RepositoryError> {
+            let all = self.milestones.list().await.unwrap();
+            // The guard must not be held across the await above.
+            let pairs = self.pairs.lock().unwrap();
+            let mut found: Vec<Milestone> = all
+                .into_iter()
+                .filter(|m| pairs.contains(&(goal_id, m.id)))
+                .collect();
+            drop(pairs);
+            order_by_target_then_created_then_id(&mut found, |m| {
+                (m.target_date, m.created_at, m.id.0)
+            });
+            Ok(page_milestones(found, page))
+        }
+
+        async fn goals_for_milestone_page(
+            &self,
+            milestone_id: MilestoneId,
+            page: &PageRequest,
+        ) -> Result<Page<Goal>, RepositoryError> {
+            let all = self.goals.list().await.unwrap();
+            // The guard must not be held across the await above.
+            let pairs = self.pairs.lock().unwrap();
+            let mut found: Vec<Goal> = all
+                .into_iter()
+                .filter(|g| pairs.contains(&(g.id, milestone_id)))
+                .collect();
+            drop(pairs);
+            order_by_target_then_created_then_id(&mut found, |g| {
+                (g.target_date, g.created_at, g.id.0)
+            });
+            Ok(page_goals(found, page))
+        }
     }
 
     /// The listing order shared with the Postgres implementation: target
@@ -560,6 +626,18 @@ mod tests {
             service.goals_for_milestone(MilestoneId::new()).await,
             Err(GoalMilestoneLinkError::MilestoneNotFound)
         ));
+        // Paged listings.
+        let page = PageRequest::new(None, None).unwrap();
+        assert!(matches!(
+            service.milestones_for_goal_page(GoalId::new(), &page).await,
+            Err(GoalMilestoneLinkError::GoalNotFound)
+        ));
+        assert!(matches!(
+            service
+                .goals_for_milestone_page(MilestoneId::new(), &page)
+                .await,
+            Err(GoalMilestoneLinkError::MilestoneNotFound)
+        ));
     }
 
     #[tokio::test]
@@ -631,6 +709,64 @@ mod tests {
         assert_eq!(
             listed.iter().map(|g| g.id).collect::<Vec<_>>(),
             vec![g_early.id, g_late.id, g_undated.id]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_paged_listings_count_only_linked_rows_and_page_in_order() {
+        let (goals, milestones, service) = setup();
+        let goal = test_goal();
+        goals.create(goal.clone()).await.unwrap();
+        // Two of three milestones are linked; the third must not appear in
+        // total or items.
+        let m_first = milestone_with(Some(date(1, 5)), at(1, 3));
+        let m_second = milestone_with(None, at(1, 1));
+        let unlinked_milestone = milestone_with(None, at(1, 2));
+        for milestone in [&m_first, &m_second, &unlinked_milestone] {
+            milestones.create(milestone.clone()).await.unwrap();
+        }
+        service.link(goal.id, m_first.id).await.unwrap();
+        service.link(goal.id, m_second.id).await.unwrap();
+
+        let page = PageRequest::new(Some(1), Some(0)).unwrap();
+        let listed = service
+            .milestones_for_goal_page(goal.id, &page)
+            .await
+            .unwrap();
+        assert_eq!(listed.total, 2);
+        assert_eq!(
+            listed.items.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![m_first.id]
+        );
+
+        let page = PageRequest::new(Some(1), Some(1)).unwrap();
+        let listed = service
+            .milestones_for_goal_page(goal.id, &page)
+            .await
+            .unwrap();
+        assert_eq!(listed.total, 2);
+        assert_eq!(
+            listed.items.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![m_second.id]
+        );
+
+        // The mirror side counts only the goals linked to the milestone.
+        let other_goal = goal_with(None, at(1, 9));
+        goals.create(other_goal.clone()).await.unwrap();
+        let stray_goal = goal_with(None, at(1, 8));
+        goals.create(stray_goal.clone()).await.unwrap();
+        service.link(other_goal.id, m_first.id).await.unwrap();
+
+        let page = PageRequest::new(Some(10), Some(0)).unwrap();
+        let listed = service
+            .goals_for_milestone_page(m_first.id, &page)
+            .await
+            .unwrap();
+        assert_eq!(listed.total, 2);
+        // Both undated: created_at order puts January before the goal's now.
+        assert_eq!(
+            listed.items.iter().map(|g| g.id).collect::<Vec<_>>(),
+            vec![other_goal.id, goal.id]
         );
     }
 }

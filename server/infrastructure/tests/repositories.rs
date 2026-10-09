@@ -670,6 +670,146 @@ async fn goals_for_milestone_is_ordered_the_same_way() {
     milestones.delete(milestone.id).await.unwrap();
 }
 
+/// `total` on a goal's milestone page counts only the linked rows, and the
+/// pages walk the link order (target date nulls last, created_at, id)
+/// exactly once.
+#[tokio::test]
+async fn milestones_for_goal_page_counts_only_linked_rows_and_walks_in_order() {
+    let Some(pool) = pool() else { return };
+    let links = PostgresGoalMilestoneRepository::new(pool.clone());
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+
+    let goal = test_goal();
+    goals.create(goal.clone()).await.unwrap();
+    // Five linked milestones with identical and null target dates so the
+    // walk exercises the full ordering rule, plus one unlinked milestone
+    // that must not count. A random id base keeps these rows clear of the
+    // fixed ids the other link tests use (they run in parallel).
+    let base = Uuid::new_v4().as_u128();
+    let m_first = milestone_on(base + 1, Some(date(1, 5)), at(1, 3));
+    let m_second = milestone_on(base + 2, Some(date(1, 5)), at(1, 3));
+    let m_third = milestone_on(base + 3, Some(date(1, 10)), at(1, 1));
+    let m_fourth = milestone_on(base + 4, None, at(1, 1));
+    let m_fifth = milestone_on(base + 5, None, at(1, 9));
+    let unlinked = milestone_on(base + 6, Some(date(1, 1)), at(1, 2));
+    for milestone in [&m_first, &m_second, &m_third, &m_fourth, &m_fifth] {
+        milestones.create(milestone.clone()).await.unwrap();
+        links
+            .link(GoalMilestone::new(goal.id, milestone.id))
+            .await
+            .unwrap();
+    }
+    milestones.create(unlinked.clone()).await.unwrap();
+
+    // A deep page of one: the total still counts all five linked rows.
+    let deep = links
+        .milestones_for_goal_page(goal.id, &PageRequest::new(Some(1), Some(4)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(deep.total, 5);
+    assert_eq!(deep.items.len(), 1);
+    assert_eq!(deep.items[0].id, m_fifth.id);
+
+    let mut seen = Vec::new();
+    for offset in [0i64, 2, 4] {
+        let page = links
+            .milestones_for_goal_page(goal.id, &PageRequest::new(Some(2), Some(offset)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(page.total, 5);
+        seen.extend(page.items.iter().map(|m| m.id));
+    }
+    // The unlinked milestone never appears; every linked one exactly once,
+    // in the link order (the same-date tie breaks on id).
+    assert_eq!(
+        seen,
+        vec![m_first.id, m_second.id, m_third.id, m_fourth.id, m_fifth.id]
+    );
+
+    // An offset past the end is an empty page with the total intact.
+    let past_end = links
+        .milestones_for_goal_page(goal.id, &PageRequest::new(Some(2), Some(6)).unwrap())
+        .await
+        .unwrap();
+    assert!(past_end.items.is_empty());
+    assert_eq!(past_end.total, 5);
+
+    goals.delete(goal.id).await.unwrap();
+    for milestone in [
+        &m_first, &m_second, &m_third, &m_fourth, &m_fifth, &unlinked,
+    ] {
+        milestones.delete(milestone.id).await.unwrap();
+    }
+}
+
+/// The same rules on a milestone's goal page.
+#[tokio::test]
+async fn goals_for_milestone_page_counts_only_linked_rows_and_walks_in_order() {
+    let Some(pool) = pool() else { return };
+    let links = PostgresGoalMilestoneRepository::new(pool.clone());
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+
+    let milestone = test_milestone();
+    milestones.create(milestone.clone()).await.unwrap();
+    // Four linked goals with identical and null target dates, plus one
+    // unlinked goal that must not count. A random id base keeps these rows
+    // clear of the fixed ids the other link tests use (they run in parallel).
+    let base = Uuid::new_v4().as_u128();
+    let g_first = goal_on(base + 1, Some(date(1, 5)), at(1, 3));
+    let g_second = goal_on(base + 2, Some(date(1, 5)), at(1, 3));
+    let g_third = goal_on(base + 3, None, at(1, 1));
+    let g_fourth = goal_on(base + 4, None, at(1, 9));
+    let unlinked_goal = goal_on(base + 5, Some(date(1, 20)), at(1, 2));
+    for goal in [&g_first, &g_second, &g_third, &g_fourth] {
+        goals.create(goal.clone()).await.unwrap();
+        links
+            .link(GoalMilestone::new(goal.id, milestone.id))
+            .await
+            .unwrap();
+    }
+    goals.create(unlinked_goal.clone()).await.unwrap();
+
+    // A deep page of one: the total still counts all four linked rows.
+    let deep = links
+        .goals_for_milestone_page(milestone.id, &PageRequest::new(Some(1), Some(3)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(deep.total, 4);
+    assert_eq!(deep.items.len(), 1);
+    assert_eq!(deep.items[0].id, g_fourth.id);
+
+    let mut seen = Vec::new();
+    for offset in [0i64, 2] {
+        let page = links
+            .goals_for_milestone_page(
+                milestone.id,
+                &PageRequest::new(Some(2), Some(offset)).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total, 4);
+        seen.extend(page.items.iter().map(|g| g.id));
+    }
+    // The unlinked goal never appears; every linked one exactly once, in the
+    // link order (the same-date tie breaks on id).
+    assert_eq!(seen, vec![g_first.id, g_second.id, g_third.id, g_fourth.id]);
+
+    // An offset past the end is an empty page with the total intact.
+    let past_end = links
+        .goals_for_milestone_page(milestone.id, &PageRequest::new(Some(2), Some(5)).unwrap())
+        .await
+        .unwrap();
+    assert!(past_end.items.is_empty());
+    assert_eq!(past_end.total, 4);
+
+    for goal in [&g_first, &g_second, &g_third, &g_fourth, &unlinked_goal] {
+        goals.delete(goal.id).await.unwrap();
+    }
+    milestones.delete(milestone.id).await.unwrap();
+}
+
 #[tokio::test]
 async fn task_repository_round_trip() {
     let Some(pool) = pool() else { return };
