@@ -15,9 +15,9 @@ docker compose -f deploy/docker-compose.yml up --build   # start everything
 docker compose -f deploy/docker-compose.yml down         # stop
 ```
 
-Endpoints once running: web http://localhost:3000, API health http://localhost:3010/health, Postgres localhost:5432 (user/password/db all `minerva`), Redis localhost:6379, RustFS S3 API :9000 / dashboard :9001.
+Endpoints once running: the one public origin http://localhost:3000, where Caddy (roadmap 6.1, D7) routes `/api/*` and `/api-docs/*` to the API and everything else to the web app; the API direct on http://localhost:3010/health for debugging only (not the browser origin); Postgres localhost:5432 (user/password/db all `minerva`), Redis localhost:6379, RustFS S3 API :9000 / dashboard :9001.
 
-The repo-root `.env` (copy of `.env.example`) holds only the variables the compose file substitutes (`DATABASE_URL`, `PORT`, `REDIS_URL`); pass it explicitly with `docker compose --env-file .env -f deploy/docker-compose.yml up --build`, since compose resolves `.env` relative to `deploy/`. Every value is optional. The server's own settings (OIDC, cookies, migrations, first-admin bootstrap) come from `minerva.toml` (see `minerva.example.toml`) or `MINERVA_`-prefixed environment variables — see README.md, "Configuration".
+The repo-root `.env` (copy of `.env.example`, git-ignored) holds only the variables the compose file substitutes (`DATABASE_URL`, `PORT`, `REDIS_URL`, `APP_ORIGIN` — the public origin, default `http://localhost:3000`); pass it explicitly with `docker compose --env-file .env -f deploy/docker-compose.yml up --build`, since compose resolves `.env` relative to `deploy/`. Every value is optional. The server's own settings (OIDC, cookies, migrations, first-admin bootstrap) come from `minerva.toml` (see `minerva.example.toml`) or `MINERVA_`-prefixed environment variables — see README.md, "Configuration".
 
 ### Frontend (`apps/web`, SvelteKit + TypeScript)
 
@@ -29,7 +29,7 @@ bun run check    # svelte-check type checking
 
 The frontend uses **Bun** as its package manager (`bun install`; lockfile is `apps/web/bun.lock`).
 
-Design-system styles live in `apps/web/src/lib/styles/`; `tokens.css` there is generated from `docs/design/brand.json` (do not edit it by hand).
+Design-system styles live in `apps/web/src/lib/styles/`; `tokens.css` there is generated from `docs/design/brand.json` (do not edit it by hand). Signed-in routes live in the `(app)` route group — auth guard in `(app)/+layout.server.ts` (signed-out requests 303 to `/login?next=…`), the shell layout in `(app)/+layout.svelte` with its components under `src/lib/components/shell/` and nav items in `src/lib/nav.ts`; `/` 307s to `/goals`, admin pages are guarded by `(app)/admin/+layout.server.ts` (403 for non-admins, in-shell), unknown paths 404 in-shell via `(app)/[...unmatched]`, and both error boundaries render the shared `RouteError`. Shared page components live in `src/lib/components/ui/` (Button, PageHeader, Banner, Skeleton/PageSkeleton, Input, Field, PasswordInput, FormAlert) and `src/lib/components/states/` (EmptyState, ErrorState, AccessDenied), with the cosmetic `can(role, action)` helper in `src/lib/permissions.ts` (the server enforces every permission). Signed-out screens live in the `(auth)` route group under the shell-less `BareLayout` — `/login` (driven by `GET /api/auth/providers`: the email/password form only when a `credentials` provider exists, one full-width button per redirect provider, no public signup), `/accept-invite` and `/reset-password` (`?token` pages, `no-store` + `no-referrer`, a `tokens/inspect` on mount, invalid/retryable/form states); auth requests are same-origin browser fetches through `postJson` in `src/lib/api.ts` (not SvelteKit form actions, so the 2.8 rate limiters key on the real client IP and the web container never relays `Set-Cookie`), with redirect values validated by `safeNext` in `src/lib/safe-redirect.ts` and SSO/post failure wording in `src/lib/auth-errors.ts` (see `docs/architecture.md`, "Auth screens").
 
 No test framework is configured yet.
 
@@ -75,6 +75,7 @@ Rules to preserve when adding code:
 ## Environment notes
 
 - Host port **8080 on the dev machine is occupied by gluetun** (the user's always-on media stack: qbittorrent/sonarr/radarr/prowlarr also hold 6881, 7878, 8989, 9696). Compose therefore maps the API to host port **3010** (`3010:8080`; container-internal port stays 8080 via `PORT`). Don't bind new services to those ports.
+- The browser origin is **http://localhost:3000**, published by the Caddy container (`3000:80`, `deploy/Caddyfile`); the web container itself no longer publishes a host port. The API stays on **3010** for direct debugging.
 
 ## graphify
 

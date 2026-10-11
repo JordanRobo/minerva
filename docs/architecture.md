@@ -39,6 +39,167 @@ Rules:
   defaults provided in `deploy/docker-compose.yml` — never hardcoded in Rust
   source. The future `S3_*` settings will arrive through the same layering.
 
+## Same-origin deployment
+
+The browser sees exactly one public origin (roadmap 6.1, D7). A reverse
+proxy in front of the two services routes `/api/*` and `/api-docs/*` to the
+API and everything else to the web app, so the session cookie is
+same-origin and no CORS is needed. The dev compose stack does this with a
+minimal Caddy (`deploy/Caddyfile` — a small slice of 7.4 pulled forward);
+the production reference config starts from that file, and `bun run dev`
+replaces the proxy with a Vite proxy of the same two paths.
+
+Server-side web code (hooks and load functions) still talks to the API, but
+over the internal service URL, not the public origin: `apiFetch`
+(`apps/web/src/lib/server/api.ts`) calls that URL and forwards only the
+incoming request's `Cookie` header — SvelteKit's automatic cookie forwarding
+does not apply to a foreign URL — and its `Set-Cookie` is never copied back
+to the browser; sign-in and sign-out are the browser's job, calling
+`/api/*` through the proxy. `ORIGIN` tells the adapter-node server its
+public origin (without it SvelteKit rejects form-action POSTs as cross-site),
+and `server.web_base_url` is that same public origin, so absolute URLs
+(OIDC redirect, invite links) point at the proxy, not the API.
+`rate_limit.client_ip_header` is set to the proxy's `X-Forwarded-For`
+header, which the proxy sets itself, so rate limiting keys on the client's
+address rather than the proxy's.
+
+Because the proxy owns `/api/*` and `/api-docs/*` in both the dev server
+and the deployment, the web app must never define routes under those paths.
+
+## Web app structure
+
+The web app (roadmap 6.3a/6.3b/6.4) is a SvelteKit 2 / Svelte 5 (runes)
+application built with adapter-node. Signed-in routes live in the `(app)`
+route group; signed-out screens live in the `(auth)` route group
+(invisible in URLs): `/login`, `/accept-invite` and `/reset-password`
+(6.4, "Auth screens" below).
+
+- **Auth guard** — `(app)/+layout.server.ts` reads `url` (so the load
+  re-runs on every client navigation), resolves `locals.currentUser()`
+  (6.1) and, when there is no user, 303s to `/login?next=<path+query>`.
+  A 502 from an unreachable API propagates instead of looking signed out.
+  `(app)/+page.server.ts` 307s `/` to `/goals`.
+- **Shell** — `(app)/+layout.svelte` composes small components from
+  `apps/web/src/lib/components/shell/` (Sidebar, TopBar, TabBar, UserSheet,
+  Wordmark, NavLink) and a no-dependency `Icon` component keyed by name
+  (`$lib/components/icons/`). One breakpoint at 900px: at and above it a
+  two-column grid with a fixed sidebar (264px, collapsible to 72px in
+  memory only — a reload starts expanded) and only the content column
+  scrolling; below it a 56px top bar and a 64px (+ safe-area) bottom tab
+  bar. The desktop user menu is a disclosure; the mobile one is a native
+  `<dialog>` sheet. Sign out posts `/api/auth/logout`, then
+  `goto('/login', { invalidateAll: true })`; a failed sign-out stays put
+  with an inline error.
+- **Navigation** — `apps/web/src/lib/nav.ts` owns the primary and admin
+  item lists (href, label, icon), `roleLabel()` and `isActive()` (exact
+  match or `href + '/'` prefix, so `/my-tasks` never activates Tasks). The
+  Admin group is rendered via `{#if}` only for admins — it is absent from
+  the DOM for other roles.
+- **Components** — shared components in `apps/web/src/lib/components/`:
+  `ui/` (Button, PageHeader, Banner, Skeleton, PageSkeleton), `states/`
+  (StateCard, EmptyState, ErrorState, AccessDenied, RouteError) and
+  `shell/` (the 6.3a shell components plus BareLayout — a centred card and
+  the 28px wordmark, no navigation; the `(auth)` layout's frame). `Button`
+  renders an `<a>` when given an `href`, else a `<button type="button">`;
+  a disabled link is `aria-disabled` and does not navigate. `PageHeader`
+  owns a page's one `<h1>` and its document title; the state components
+  render beneath it as `h2`, while route errors render their card at `h1`.
+  Components never check roles themselves: pages pass an action only when
+  `can(role, action)` from `src/lib/permissions.ts` allows it. That helper
+  mirrors the server's `Role::allows` matrix and is **cosmetic only** —
+  the server enforces every permission, so the UI only hides controls a
+  role could not use.
+- **Pages** — every nav target has a `PageHeader` + `EmptyState`
+  placeholder (no actions). Unknown paths in the signed-in area 404 via
+  the `(app)/[...unmatched]` catchall, so the error renders inside the
+  shell rather than falling out to the bare frame. A dev-only component
+  gallery at `/dev/components` (a 404 outside dev, absent from production
+  builds) shows every shared component for visual checking.
+  `(app)/admin/+layout.server.ts` 403s non-admins before any admin page
+  renders.
+- **Error pages** — both error boundaries render the shared
+  `states/RouteError`, which reads `page.status` and `page.error` from
+  `$app/state`: 403 as AccessDenied (the page's own message), 404 with a
+  Back home link and no retry, 502 as "We couldn't reach the server", and
+  anything else a generic message — the latter two with a retry. In the
+  shell a retry `invalidateAll()`s; at the root it is a full reload,
+  because the page never loaded. `(app)/+error.svelte` renders inside the
+  shell and catches child-route and child-layout errors (the admin 403,
+  the catchall 404). The root `+error.svelte` renders inside `BareLayout`:
+  the `(app)` layout's own failure (API down → guard 502) falls through to
+  the root boundary, which is also why the root frame must not depend on
+  the user the failed load was supposed to fetch.
+
+### Auth screens
+
+Roadmap 6.4 adds the three signed-out screens. They live in the `(auth)`
+group under the shell-less `BareLayout` and share `src/lib/styles/auth.css`
+(a centred bare card, tokens only). None of them is a SvelteKit form
+action: every auth request is a same-origin `fetch` from the browser to
+`/api/auth/*` through `postJson` in `src/lib/api.ts`. That is deliberate —
+the 2.8 rate limiter keys login and token-link routes on the **client IP**,
+and a request relayed through the web container would pool every user
+behind one shared address; it also means the web server never reads or
+forwards the session `Set-Cookie` the API sets. `postJson` returns one
+result type (`{ ok, status, code, message, retryAfter? }`), parsing the
+`{"error":{"code","message"}}` envelope and `Retry-After`; a network
+failure or a non-JSON body becomes `code: "network"` and it never throws.
+
+- **Sign-in** — `(auth)/login/+page.server.ts` 303s a signed-in visitor to
+  a validated `next` and otherwise reads `GET /api/auth/providers`, the
+  validated `next` and the `error`/`notice` query values (notice accepts
+  only `password_reset`). The email/password form renders **only** when a
+  `credentials`-kind provider exists; each `redirect`-kind provider becomes
+  one full-width "Sign in with …" button carrying `data-sveltekit-reload`
+  (a `/api/*` URL is not a SvelteKit route) with the encoded `next` appended
+  to its `login_url`; the "or" divider shows only when both kinds exist, and
+  no providers at all renders a "Sign-in isn't set up yet" line. On
+  submit the page runs cheap client checks (email present + `@`, password
+  present), then POSTs `/api/auth/login`. Exactly one message is shown per
+  failed attempt — 401 "That email and password don't match.", 429 a
+  "Too many attempts. Please wait N minutes…" from `Retry-After`, network
+  "We couldn't reach the server…", everything else generic — never which
+  part of the server check failed; after a failure focus moves to the
+  `FormAlert`.
+- **Redirect safety** — `src/lib/safe-redirect.ts` `safeNext(raw, fallback)`
+  is the one validator for any `next`/redirect value: a single leading `/`,
+  never `//`, no backslash, no scheme, no control/whitespace character, at
+  most 512 chars, and never one of the other auth screens — anything else
+  returns the fallback. Both the `/login` load and the post-login `goto` go
+  through it.
+- **Accept-invite / reset-password** — `?token` pages. Their server loads
+  set `Referrer-Policy: no-referrer` and `Cache-Control: no-store` so the
+  one-time token never leaks into a referrer or is cached. On mount each
+  POSTs `/api/auth/tokens/inspect` behind a pulsing skeleton (motion-aware);
+  a missing, invalid, expired or wrong-purpose token renders "This link
+  isn't valid any more" directly in the card (not a nested `StateCard`) with
+  a "Go to sign in" ghost, while a network/429 failure gets a retryable
+  state. A valid invite shows the role, the read-only email, a visually
+  hidden `autocomplete="username"` anchor (so password managers fill the
+  right field without a visible username box), an optional "Your name"
+  (blank → the email's local part, matching the server's `Option<String>`
+  display name), and New/Confirm password against the real 8-character
+  minimum. Accepting returns 201 and signs the user in straight to `/`; a
+  reset returns 204 and lands on `/login?notice=password_reset`, because the
+  API revokes **every** session for that user (the previous one is dead).
+- **Error wording** — `src/lib/auth-errors.ts` maps SSO failure codes to
+  plain-language messages (the raw code is shown as small muted
+  "Reference: …" text, never HTML) and shapes the generic post failure
+  messages. There is no public signup screen (D1); "Forgot your password?"
+  on `/login` is a plain-text pointer to an administrator, since
+  self-service reset emails only arrive with 7.3 email delivery.
+- **Form components** — `ui/Input.svelte`, `ui/PasswordInput.svelte`
+  (Input plus a show/hide toggle with `aria-pressed` and a "Show
+  password"/"Hide password" label), `ui/Field.svelte` (label + hint/error,
+  wiring `aria-describedby`/`aria-invalid`), and `ui/FormAlert.svelte`
+  (`role="alert"`, `tabindex="-1"` so a failed submit can move focus
+  there). There is no error colour token, so an error is signalled by the
+  alert icon plus a 3 px accent left border and the field's accent outline —
+  never colour alone.
+
+Styling uses only the `--minerva-*` design tokens (6.2); the shell layout
+tokens are the `--minerva-shell-*` set.
+
 ## Database migrations
 
 Diesel migrations live in `server/migrations/` and are embedded in the

@@ -67,10 +67,19 @@ services:
             S3_BUCKET: minerva
             S3_ACCESS_KEY_ID: minerva
             S3_SECRET_ACCESS_KEY: minerva-dev-secret
+            # The public origin the browser sees (Caddy, below). The API's
+            # own 3010 host mapping is for direct debugging, not the browser.
+            # Used for absolute URLs: the OIDC redirect URL, invite and
+            # password-reset links. Override with APP_ORIGIN in .env.
+            MINERVA_SERVER__WEB_BASE_URL: ${APP_ORIGIN:-http://localhost:3000}
+            # Caddy sets X-Forwarded-For, replacing any client-supplied
+            # value. On Docker Desktop every dev client appears as the
+            # bridge gateway, so all dev clients share one rate-limit
+            # bucket (fine for dev; a production proxy sees real IPs).
+            MINERVA_RATE_LIMIT__CLIENT_IP_HEADER: X-Forwarded-For
             # Per-setting overrides (highest precedence). To enable OIDC
             # without a config file, set e.g. in .env:
             # MINERVA_OIDC__ISSUER_URL=https://auth.example.com/application/o/minerva/
-            # MINERVA_SERVER__WEB_BASE_URL=http://localhost:3010
             # First-admin bootstrap (only takes effect while no users exist):
             # MINERVA_BOOTSTRAP__ADMIN_EMAIL=admin@example.com
             # MINERVA_BOOTSTRAP__ADMIN_PASSWORD=<change-me, at least 8 characters>
@@ -97,8 +106,27 @@ services:
         container_name: minerva-web
         environment:
             PORT: "3000"
+            # Public origin, for adapter-node: without it SvelteKit rejects
+            # form-action POSTs as cross-site once the app sits behind Caddy.
+            ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+            # Internal URL of the API for server-side loads
+            # (apps/web/src/lib/server/api.ts), never the browser origin.
+            API_INTERNAL_URL: http://server:8080
+        # No host port: the browser reaches the web app through Caddy on 3000.
+
+    caddy:
+        # Same-origin reverse proxy (roadmap 6.1, D7; a small slice of 7.4
+        # pulled forward): /api/* and /api-docs/* go to the API, everything
+        # else to the web app. The session cookie is same-origin, so no CORS.
+        image: caddy:2-alpine
+        container_name: minerva-caddy
+        volumes:
+            - ./Caddyfile:/etc/caddy/Caddyfile:ro
         ports:
-            - "3000:3000"
+            - "3000:80"
+        depends_on:
+            - server
+            - web
 
 volumes:
     postgres-data:

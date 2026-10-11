@@ -49,20 +49,26 @@ Rust toolchain.
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
-This starts Postgres, Redis, RustFS (S3-compatible storage), the API server,
-and the web app:
+This starts Postgres, Redis, RustFS (S3-compatible storage), a Caddy
+reverse proxy, the API server, and the web app. The browser sees one origin
+only — http://localhost:3000 — where Caddy routes `/api/*` and
+`/api-docs/*` to the API and everything else to the web app, so the session
+cookie is same-origin and no CORS is needed (roadmap 6.1, D7). The API is
+also reachable directly on http://localhost:3010 for debugging; that is
+**not** the browser origin.
 
-| Service  | URL                          |
-|----------|------------------------------|
-| Web      | http://localhost:3000        |
-| API      | http://localhost:3010/health |
-| Postgres | localhost:5432 (user/password/db: `minerva`) |
-| Redis    | localhost:6379               |
-| RustFS   | S3 API http://localhost:9000, dashboard http://localhost:9001 |
+| Service                                  | URL                                                   |
+|------------------------------------------|-------------------------------------------------------|
+| Web + API (one origin, through Caddy)    | http://localhost:3000                                 |
+| API direct (debugging only)              | http://localhost:3010/health                          |
+| Postgres                                 | localhost:5432 (user/password/db: `minerva`)          |
+| Redis                                    | localhost:6379                                        |
+| RustFS                                   | S3 API http://localhost:9000, dashboard http://localhost:9001 |
 
 The compose stack reads a `.env` file at the **repo root** holding only the
 variables the compose file itself substitutes (`DATABASE_URL`, `PORT`,
-`REDIS_URL`). Copy [`.env.example`](.env.example) and pass it explicitly —
+`REDIS_URL`, `APP_ORIGIN`). Copy [`.env.example`](.env.example) and pass it
+explicitly —
 Compose resolves `.env` relative to the compose file's directory (`deploy/`),
 not the repo root:
 
@@ -84,6 +90,14 @@ bun run dev
 ```
 
 Dev server at http://localhost:5173.
+
+The dev server expects a reachable API: Vite proxies `/api/*` and
+`/api-docs/*` to it, taking the target from the `API_INTERNAL_URL`
+environment variable (default http://localhost:3010, where the compose
+stack publishes the API — host port 8080 is occupied on the maintainer's
+machine). Start the full stack, or the backend only, first. The web app
+must never define routes under `/api` or `/api-docs` — those paths are
+reserved for the proxy.
 
 ### Backend only
 
@@ -218,15 +232,19 @@ while `oidc.issuer_url` is blank; to enable it, set in `minerva.toml` (or via
   `/.well-known/openid-configuration`
 - `oidc.client_id` / `oidc.client_secret` — the application registered at
   your provider
-- `oidc.redirect_url` — must be exactly `<API base URL>/api/auth/oidc/callback`
-  and registered at the provider; for the dev compose stack that is
-  `http://localhost:3010/api/auth/oidc/callback`
+- `oidc.redirect_url` — must be exactly
+  `<public origin>/api/auth/oidc/callback` and registered at the provider;
+  for the dev compose stack that is
+  `http://localhost:3000/api/auth/oidc/callback` (with `bun run dev`,
+  `http://localhost:5173/api/auth/oidc/callback`)
 - `oidc.state_secret` — at least 32 bytes; generate with `openssl rand -hex 32`
 - `oidc.groups_claim` — name of the ID-token claim holding the user's
   groups (default "groups"); read at SSO login for the group-to-role rules
   (roadmap 2.7)
-- `server.web_base_url` — absolute public URL of the API origin, e.g.
-  `http://localhost:3010` for the dev stack
+- `server.web_base_url` — absolute public origin: the browser-facing URL
+  behind the reverse proxy, **not** the API's own address — e.g.
+  `http://localhost:3000` for the dev compose stack (the compose file sets
+  it from `APP_ORIGIN`)
 
 The server fails at startup, naming every problem it finds, if you set
 `oidc.issuer_url` but leave anything else required missing or invalid. It
@@ -272,7 +290,8 @@ than taking login down.
 - `rate_limit.client_ip_header` — default: none (the TCP peer address is
   used). Behind a reverse proxy, set it to the header carrying the real
   client address (e.g. `X-Forwarded-For`) or every user shares the proxy's
-  own address and one blocked IP locks everyone out
+  own address and one blocked IP locks everyone out. The dev compose stack
+  sets it to `X-Forwarded-For`, the header Caddy sends
 
 ## License
 

@@ -14,4 +14,7 @@ graphify-out/
 # Local server configuration (may contain secrets); see minerva.example.toml
 minerva.toml
 
+# Compose stack variables; may hold a production DATABASE_URL (credentials)
+.env
+
 *.log

@@ -70,3 +70,24 @@ input:focus-visible {
 .skip-link:focus {
 	top: var(--minerva-space-4);
 }
+
+/* Visually hidden but still readable by assistive tech (e.g. sidebar labels
+   in the collapsed state). Use the `hidden` attribute to remove from the
+   accessibility tree instead. */
+.vh {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+	border: 0;
+}
+
+/* Wide content (boards, tables) scrolls sideways inside its own box; the
+   page itself never grows sideways. */
+.h-scroll {
+	overflow-x: auto;
+}

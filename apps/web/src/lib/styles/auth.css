@@ -1,0 +1,65 @@
+/* Shared styles for the bare auth screens (login, accept-invite,
+   reset-password), imported by the (auth) layout — values from
+   docs/design/app-shell.html .auth-card, tokens only. Kept out of routes/
+   so it can't be served as a public asset. */
+
+h1 {
+	margin: 0;
+	font-size: 22px;
+	letter-spacing: -0.01em;
+}
+
+.lede {
+	margin: 6px 0 0;
+	font-size: 14px;
+	color: var(--minerva-fg-muted);
+}
+
+.options {
+	margin-top: var(--minerva-space-4);
+	display: grid;
+	gap: var(--minerva-space-4);
+	justify-items: stretch;
+}
+
+form {
+	display: grid;
+	gap: var(--minerva-space-3);
+}
+
+/* Every button in an auth card is full width. */
+.options .btn,
+form .btn {
+	width: 100%;
+}
+
+/* The password-manager username anchor on /accept-invite: in the document
+   for autocomplete only, never visible or keyboard-focusable. */
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
+/* The block pulses like PageSkeleton's card (1.5 s component-local constant,
+   not a token); base.css's global prefers-reduced-motion rule stops it. */
+.checking {
+	margin-top: var(--minerva-space-4);
+	display: grid;
+	gap: var(--minerva-space-3);
+	animation: skpulse 1.5s ease-in-out infinite;
+}
+
+@keyframes skpulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.45;
+	}
+}
