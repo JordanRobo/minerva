@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Icon from '$lib/components/icons/Icon.svelte';
-	import { adminNav, roleLabel } from '$lib/nav';
+	import { adminEntry, roleLabel } from '$lib/nav';
 	import type { CurrentUser } from '$lib/server/api';
 
 	let {
@@ -64,11 +64,9 @@
 
 	{#if user.role === 'admin'}
 		<p class="sheet-group-label">Admin</p>
-		{#each adminNav as item (item.href)}
-			<a class="um-item" href={item.href}>
-				<Icon name={item.icon} />{item.label}
-			</a>
-		{/each}
+		<a class="um-item" href={adminEntry.href}>
+			<Icon name={adminEntry.icon} />{adminEntry.label}
+		</a>
 		<hr class="rule" />
 	{/if}
 

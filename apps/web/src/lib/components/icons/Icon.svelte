@@ -18,6 +18,7 @@
 		| 'chevron'
 		| 'info'
 		| 'alert'
+		| 'shield'
 		| 'lock'
 		| 'inbox'
 		| 'eye'
@@ -39,6 +40,7 @@
 		chevron: '<path d="M14.5 6l-6 6 6 6"/>',
 		info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/>',
 		alert: '<path d="M12 4.5l9.5 15h-19z"/><path d="M12 10.5v4M12 17.5h.01"/>',
+		shield: '<path d="M12 3.5l7 2.7v5.3c0 4.4-2.9 7.4-7 9-4.1-1.6-7-4.6-7-9V6.2z"/>',
 		lock: '<rect x="5.5" y="10.5" width="13" height="9.5" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 017 0v2.5"/>',
 		inbox:
 			'<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>',

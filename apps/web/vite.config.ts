@@ -20,6 +20,7 @@ export default defineConfig(({ mode }) => {
 			})
 		],
 		server: {
+			allowedHosts: true,
 			proxy: {
 				// Regex key: only /api/... and /api-docs/... are forwarded,
 				// never a web route that merely starts with "/api" (e.g.

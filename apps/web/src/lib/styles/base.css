@@ -40,6 +40,10 @@ a {
 	text-decoration: none;
 }
 
+button {
+    all: unset;
+}
+
 a:focus-visible,
 button:focus-visible,
 input:focus-visible {

@@ -22,6 +22,64 @@ export interface CurrentUser {
 }
 
 /**
+ * One entry of `GET /api/users` and the user-admin mutation responses
+ * (server/interface/src/users.rs, `UserAdminResponse`). The password hash is
+ * never part of the wire format. `role_managed_by_sso` is the EFFECTIVE D15
+ * lock — the user's flag AND any group rule exists — not the raw flag.
+ */
+export interface AdminUser {
+	id: string;
+	email: string;
+	display_name: string;
+	role: Role;
+	active: boolean;
+	deactivated_at: string | null;
+	role_managed_by_sso: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+/** `POST /api/users/{id}/password-reset` (server/interface/src/users.rs). */
+export interface PasswordResetLink {
+	link: string;
+	expires_at: string;
+	emailed: boolean;
+}
+
+/** One entry of `GET /api/invites` (server/interface/src/invites.rs). The raw
+ *  token is never part of the wire format — it was shown exactly once, when
+ *  the invite was created or re-issued. */
+export interface Invite {
+	id: string;
+	email: string;
+	role: Role;
+	status: 'pending' | 'accepted' | 'revoked' | 'expired';
+	created_by: string | null;
+	created_at: string;
+	expires_at: string;
+	consumed_at: string | null;
+	revoked_at: string | null;
+}
+
+/** `POST /api/invites` and `POST /api/invites/{id}/reissue` (201). The link is
+ *  shown only in this response; a re-issue is a fresh token row, so the invite
+ *  id changes. */
+export interface InviteCreated {
+	invite: Invite;
+	link: string;
+	emailed: boolean;
+}
+
+/** One entry of `GET /api/sso/group-rules` (server/interface/src/sso_rules.rs). */
+export interface SsoGroupRule {
+	id: string;
+	group_name: string;
+	role: Role;
+	created_at: string;
+	updated_at: string;
+}
+
+/**
  * One entry of `GET /api/auth/providers` (server/interface/src/auth.rs):
  * `credentials` providers (the email/password form) versus `redirect`
  * providers (one "Sign in with …" button each, linking to `login_url`).

@@ -5,6 +5,7 @@
 	import TopBar from '$lib/components/shell/TopBar.svelte';
 	import TabBar from '$lib/components/shell/TabBar.svelte';
 	import UserSheet from '$lib/components/shell/UserSheet.svelte';
+	import { adminEntry, primaryNav } from '$lib/nav';
 	import type { LayoutProps } from './$types';
 
 	let { data, children } = $props();
@@ -12,6 +13,9 @@
 	// $derived, not const: `data` is replaced on revalidation (e.g. a role
 	// change made elsewhere) and the shell must follow it.
 	const user = $derived(data.user);
+
+	// The mobile tab bar gains an Admin entry for admins (5 → 6 tabs).
+	const tabs = $derived(user.role === 'admin' ? [...primaryNav, adminEntry] : primaryNav);
 
 	const initials = $derived.by(() => {
 		const src = user.display_name.trim() || user.email;
@@ -77,7 +81,7 @@
 		</div>
 	</main>
 
-	<TabBar pathname={page.url.pathname} />
+	<TabBar pathname={page.url.pathname} items={tabs} />
 
 	<UserSheet
 		user={user}

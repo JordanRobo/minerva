@@ -3,6 +3,8 @@
 	import Banner from '$lib/components/ui/Banner.svelte';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import LinkDialog from '$lib/components/ui/LinkDialog.svelte';
 	import EmptyState from '$lib/components/states/EmptyState.svelte';
 	import ErrorState from '$lib/components/states/ErrorState.svelte';
 	import AccessDenied from '$lib/components/states/AccessDenied.svelte';
@@ -13,6 +15,9 @@
 	// later demos reuse the title so the tab doesn't change mid-page.
 	let { data } = $props();
 	const canEdit = $derived(can(data.user.role, 'edit'));
+
+	let confirmOpen = $state(false);
+	let linkOpen = $state(false);
 </script>
 
 <PageHeader
@@ -91,6 +96,36 @@
 <section class="section">
 	<h2>AccessDenied</h2>
 	<AccessDenied message="This area is only for administrators." />
+</section>
+
+<section class="section">
+	<h2>ConfirmDialog</h2>
+	<Button variant="secondary" onclick={() => (confirmOpen = true)}>Open a confirm dialog</Button>
+	<ConfirmDialog
+		open={confirmOpen}
+		title="Delete this item?"
+		message="This can't be undone. The person or thing is gone for good."
+		confirmLabel="Delete"
+		onConfirm={() => (confirmOpen = false)}
+		onClose={() => (confirmOpen = false)}
+	/>
+</section>
+
+<section class="section">
+	<h2>LinkDialog</h2>
+	<Button variant="secondary" onclick={() => (linkOpen = true)}>Open a link dialog</Button>
+	<LinkDialog
+		open={linkOpen}
+		title="Invitation link"
+		link="/accept-invite?token=00000000-0000-4000-8000-000000000000"
+		finePrint="It stops working on 20 Oct 2026, 3:45 pm. It will not be shown again."
+		note="Email isn't set up on this server, so copy this link and send it to someone@example.com yourself."
+		emailedTo={null}
+		onClose={() => (linkOpen = false)}
+	>
+		Share this link with <strong>someone@example.com</strong>. When they open it, they set a password and are
+		signed in straight away.
+	</LinkDialog>
 </section>
 
 <section class="section">

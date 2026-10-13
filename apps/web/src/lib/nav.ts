@@ -15,9 +15,13 @@ export const primaryNav: NavItem[] = [
 	{ href: '/my-tasks', label: 'My tasks', icon: 'my' }
 ];
 
-export const adminNav: NavItem[] = [
-	{ href: '/admin/users', label: 'Users', icon: 'users' },
-	{ href: '/admin/invites', label: 'Invites', icon: 'invite' },
+/** The single Admin entry in the main navigation (admins only). */
+export const adminEntry: NavItem = { href: '/admin', label: 'Admin', icon: 'shield' };
+
+/** The sub-navigation inside the Admin area (`(app)/admin/+layout.svelte`). */
+export const adminSections: NavItem[] = [
+	{ href: '/admin/people', label: 'People', icon: 'users' },
+	{ href: '/admin/invitations', label: 'Invitations', icon: 'invite' },
 	{ href: '/admin/sso', label: 'Single sign-on', icon: 'sso' }
 ];
 

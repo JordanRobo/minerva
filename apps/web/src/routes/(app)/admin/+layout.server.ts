@@ -7,4 +7,5 @@ export const load: LayoutServerLoad = async ({ parent }) => {
 		// Renders in the (app) +error.svelte, so the shell stays up.
 		error(403, 'Only administrators can open this page.');
 	}
+	return { user };
 };

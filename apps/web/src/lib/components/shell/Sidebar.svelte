@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Icon from '$lib/components/icons/Icon.svelte';
-	import { adminNav, isActive, primaryNav, roleLabel } from '$lib/nav';
+	import { adminEntry, isActive, primaryNav, roleLabel } from '$lib/nav';
 	import type { CurrentUser } from '$lib/server/api';
 	import Wordmark from './Wordmark.svelte';
 	import NavLink from './NavLink.svelte';
@@ -91,13 +91,12 @@
 	</nav>
 
 	{#if isAdmin}
+		<!-- One entry; the sections live in the Admin area's own sub-nav. -->
 		<nav class="nav admin-group" aria-label="Admin">
 			{#if !collapsed}
 				<p class="nav-group-label">Admin</p>
 			{/if}
-			{#each adminNav as item (item.href)}
-				<NavLink item={item} active={isActive(item.href, pathname)} collapsed={collapsed} />
-			{/each}
+			<NavLink item={adminEntry} active={isActive('/admin', pathname)} collapsed={collapsed} />
 		</nav>
 	{/if}
 

@@ -1,12 +1,15 @@
 <script lang="ts">
 	import Icon from '$lib/components/icons/Icon.svelte';
-	import { isActive, primaryNav } from '$lib/nav';
+	import { isActive } from '$lib/nav';
+	import type { NavItem } from '$lib/nav';
 
-	let { pathname }: { pathname: string } = $props();
+	// The layout passes primaryNav plus the Admin entry for admins, so the
+	// column count follows the item count (5 or 6).
+	let { pathname, items }: { pathname: string; items: NavItem[] } = $props();
 </script>
 
-<nav class="tabbar" aria-label="Primary">
-	{#each primaryNav as item (item.href)}
+<nav class="tabbar" aria-label="Primary" style="--tabs: {items.length}">
+	{#each items as item (item.href)}
 		{@const active = isActive(item.href, pathname)}
 		<a
 			href={item.href}
@@ -26,7 +29,7 @@
 		background: var(--minerva-surface);
 		border-top: var(--minerva-border-w) solid var(--minerva-border);
 		display: grid;
-		grid-template-columns: repeat(5, 1fr);
+		grid-template-columns: repeat(var(--tabs), 1fr);
 		min-height: var(--minerva-shell-tabbar-h);
 		padding-bottom: env(safe-area-inset-bottom);
 	}

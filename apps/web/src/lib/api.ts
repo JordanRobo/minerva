@@ -1,8 +1,8 @@
-// Client-side API helper for the auth screens (roadmap 6.4). Auth POSTs go
-// through the browser instead of SvelteKit form actions on purpose: login and
-// token-link rate limits are keyed on the client IP, so a call made from the
-// web container would pool every user into one bucket. Same-origin only; the
-// response's Set-Cookie is handled by the browser and never forwarded.
+// Client-side API helper for browser-initiated requests (the 6.4 auth screens,
+// the 6.5 admin actions). These go through the browser instead of SvelteKit
+// form actions or server loads on purpose: rate limits keyed on the client IP
+// must see the real IP, and the response's Set-Cookie is handled by the
+// browser and never forwarded. Same-origin only.
 
 export type ApiOk<T> = { ok: true; status: number; data: T };
 export type ApiErr = {
@@ -15,13 +15,17 @@ export type ApiErr = {
 };
 export type ApiResult<T> = ApiOk<T> | ApiErr;
 
-export async function postJson<T>(path: string, body: unknown): Promise<ApiResult<T>> {
+export async function apiRequest<T>(
+	method: 'GET' | 'PUT' | 'POST' | 'DELETE',
+	path: string,
+	body?: unknown
+): Promise<ApiResult<T>> {
 	let res: Response;
 	try {
 		res = await fetch(path, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(body)
+			method,
+			headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+			body: body !== undefined ? JSON.stringify(body) : undefined
 		});
 	} catch {
 		return { ok: false, status: 0, code: 'network', message: 'network' };
@@ -47,6 +51,10 @@ export async function postJson<T>(path: string, body: unknown): Promise<ApiResul
 	}
 
 	return { ok: true, status: res.status, data: json as T };
+}
+
+export function postJson<T>(path: string, body: unknown): Promise<ApiResult<T>> {
+	return apiRequest<T>('POST', path, body);
 }
 
 function safeParse(text: string): unknown {

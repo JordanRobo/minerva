@@ -119,9 +119,9 @@ Verify with `curl http://localhost:8080/health`.
 > UPDATE users SET role = 'admin' WHERE email = 'you@example.com';
 > ```
 >
-> Once an admin exists, roles and active state are managed through the
-> `/api/users` endpoints (documented in Swagger UI at `/api-docs`) — no SQL
-> needed.
+> Once an admin exists, roles and active state are managed in the web UI
+> (Admin → People) or through the `/api/users` endpoints (documented in
+> Swagger UI at `/api-docs`) — no SQL needed.
 
 To run the compiled binary directly instead, build it and point it at a
 config file:
@@ -214,13 +214,14 @@ bootstrapped before that column existed, set the flag once by hand:
 
 ### Inviting people
 
-There is no public signup: an administrator creates an invite through the API
-(`POST /api/invites`) and shares the returned link with the invited email —
-copied manually while SMTP delivery (roadmap 7.3) is not configured. The
-invitee follows the link, sets a password and is signed in. The link's origin
-comes from `server.web_base_url`; without it the link is a site-relative path.
-The same API lists, revokes and re-issues invites, and an admin can issue a
-password-reset link for an existing user (`POST /api/users/{id}/password-reset`).
+There is no public signup: an administrator creates an invite in the web UI
+(Admin → Invitations) or through the API (`POST /api/invites`) and shares the
+returned link with the invited email — copied manually while SMTP delivery
+(roadmap 7.3) is not configured. The invitee follows the link, sets a password
+and is signed in. The link's origin comes from `server.web_base_url`; without
+it the link is a site-relative path. The same screen (or API) lists, revokes
+and re-issues invites, and an admin can issue a password-reset link for an
+existing user (Admin → People, or `POST /api/users/{id}/password-reset`).
 
 ### Enabling OIDC sign-in
 
@@ -260,10 +261,10 @@ warning per login and proceeds with no groups.
 
 ### SSO group-to-role mapping
 
-With OIDC enabled, administrators map IdP groups to Minerva roles through
-the API: `POST /api/sso/group-rules` with `{"group_name": "teachers",
-"role": "staff"}` (the same base lists rules and updates or deletes one by
-id; all of it is admin-only). While at least one rule exists, every SSO
+With OIDC enabled, administrators map IdP groups to Minerva roles in the web
+UI (Admin → Single sign-on) or through the API: `POST /api/sso/group-rules`
+with `{"group_name": "teachers", "role": "staff"}` (the same base lists rules
+and updates or deletes one by id; all of it is admin-only). While at least one rule exists, every SSO
 sign-in re-resolves the user's role from their groups: exact group-name
 match, the least permissive matched role wins, and no match — or a missing
 groups claim — gives Read-only. New SSO accounts are created with that role;
