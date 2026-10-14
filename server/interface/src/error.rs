@@ -8,6 +8,7 @@
 
 use actix_web::{HttpResponse, ResponseError, http};
 use application::account_links::AccountLinkError;
+use application::assignment::AssignmentError;
 use application::goal_milestone_links::GoalMilestoneLinkError;
 use application::ports::RepositoryError;
 use application::status_override::StatusOverrideError;
@@ -133,6 +134,26 @@ impl ApiError {
         }
     }
 
+    /// 404 — no user with the referenced id exists (the assignee and owner
+    /// routes answer with this rather than the generic `not_found`, so a
+    /// client can tell which of the two ids it sent was the bad one).
+    pub fn user_not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: "user_not_found".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    /// 409 — the referenced user exists but is deactivated.
+    pub fn user_deactivated(message: impl Into<String>) -> Self {
+        Self {
+            code: "user_deactivated".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
     /// 409 — the operation conflicts with the current state (e.g. a duplicate).
     pub fn conflict(message: impl Into<String>) -> Self {
         Self {
@@ -246,16 +267,19 @@ impl ResponseError for ApiError {
         match self.code.as_str() {
             "unauthorized" => http::StatusCode::UNAUTHORIZED,
             "forbidden" => http::StatusCode::FORBIDDEN,
-            "not_found" | "goal_not_found" | "milestone_not_found" | "relation_not_found" => {
-                http::StatusCode::NOT_FOUND
-            }
+            "not_found"
+            | "goal_not_found"
+            | "milestone_not_found"
+            | "relation_not_found"
+            | "user_not_found" => http::StatusCode::NOT_FOUND,
             "rate_limited" => http::StatusCode::TOO_MANY_REQUESTS,
             "conflict"
             | "account_exists"
             | "group_rule_exists"
             | "role_managed_by_sso"
             | "relation_exists"
-            | "reverse_relation_exists" => http::StatusCode::CONFLICT,
+            | "reverse_relation_exists"
+            | "user_deactivated" => http::StatusCode::CONFLICT,
             "internal_error" => http::StatusCode::INTERNAL_SERVER_ERROR,
             // bad_request, invalid_query, invalid_reference, invalid_token, and any unknown code
             _ => http::StatusCode::BAD_REQUEST,
@@ -343,6 +367,20 @@ pub fn goal_milestone_link_error_response(error: GoalMilestoneLinkError) -> ApiE
             ApiError::milestone_not_found(error.to_string())
         }
         GoalMilestoneLinkError::Repository(err) => repo_error_response(err),
+    }
+}
+
+/// Translate an [`AssignmentError`] into the [`ApiError`] it renders as:
+/// a missing task, goal or milestone -> 404 (the generic `not_found` code
+/// the other routes answer with), an unknown user -> 404 `user_not_found`,
+/// a deactivated user -> 409 `user_deactivated`, repository failures map
+/// like any other.
+pub fn assignment_error_response(error: AssignmentError) -> ApiError {
+    match error {
+        AssignmentError::NotFound => ApiError::not_found(),
+        AssignmentError::UserNotFound => ApiError::user_not_found(error.to_string()),
+        AssignmentError::UserDeactivated => ApiError::user_deactivated(error.to_string()),
+        AssignmentError::Repository(err) => repo_error_response(err),
     }
 }
 

@@ -15,6 +15,7 @@ use actix_web::http::{Method, StatusCode, header};
 use actix_web::test::{TestRequest, init_service, read_body};
 use actix_web::web;
 use application::account_links::AccountLinkService;
+use application::assignment::AssignmentService;
 use application::auth::SessionService;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::AuthProviders;
@@ -142,7 +143,7 @@ macro_rules! test_app {
                     PostgresSsoGroupRuleRepository::new(pool.clone()),
                 ))))
                 .app_data(web::Data::new(UserAdminService::new(
-                    users,
+                    users.clone(),
                     Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone())),
                     session_service,
                 )))
@@ -163,6 +164,12 @@ macro_rules! test_app {
                 .app_data(web::Data::new(TaskStatusService::new(Arc::new(
                     PostgresTaskRepository::new(pool.clone()),
                 ))))
+                .app_data(web::Data::new(AssignmentService::new(
+                    Arc::new(PostgresTaskRepository::new(pool.clone())),
+                    Arc::new(PostgresGoalRepository::new(pool.clone())),
+                    Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+                    users,
+                )))
                 .app_data(web::Data::new(TaskListService::new(Arc::new(
                     PostgresTaskRepository::new(pool.clone()),
                 ))))
@@ -355,6 +362,19 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Permission::EditContent,
             None,
         ),
+        // Goal owners (roadmap 3.11, D17).
+        (
+            Method::PUT,
+            format!("/api/goals/{goal}/owner"),
+            Permission::EditContent,
+            Some(serde_json::json!({ "owner_id": Uuid::new_v4().to_string() })),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/goals/{goal}/owner"),
+            Permission::EditContent,
+            None,
+        ),
         // The goal–milestone linkage routes (roadmap 3.4).
         (
             Method::GET,
@@ -416,6 +436,19 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Permission::EditContent,
             None,
         ),
+        // Milestone owners (roadmap 3.11, D17).
+        (
+            Method::PUT,
+            format!("/api/milestones/{milestone}/owner"),
+            Permission::EditContent,
+            Some(serde_json::json!({ "owner_id": Uuid::new_v4().to_string() })),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/milestones/{milestone}/owner"),
+            Permission::EditContent,
+            None,
+        ),
         (
             Method::GET,
             format!("/api/milestones/{milestone}/goals"),
@@ -460,6 +493,19 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Permission::EditContent,
             Some(serde_json::json!({ "status": "in_progress" })),
         ),
+        // Task assignees (roadmap 3.11, D17).
+        (
+            Method::PUT,
+            format!("/api/tasks/{task}/assignee"),
+            Permission::EditContent,
+            Some(serde_json::json!({ "assignee_id": Uuid::new_v4().to_string() })),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/tasks/{task}/assignee"),
+            Permission::EditContent,
+            None,
+        ),
         // The task-relation routes (roadmap 3.6).
         (
             Method::POST,
@@ -480,6 +526,13 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
             Method::DELETE,
             format!("/api/tasks/{task}/relations/{debug_id}"),
             Permission::EditContent,
+            None,
+        ),
+        // The people picker (roadmap 3.11): any signed-in role may read it.
+        (
+            Method::GET,
+            "/api/people".into(),
+            Permission::ViewContent,
             None,
         ),
         // The admin-only user management routes.

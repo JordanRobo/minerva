@@ -5,21 +5,26 @@
 //! independently of the domain model.
 
 use actix_web::{HttpResponse, web};
+use application::assignment::AssignmentService;
 use application::pagination::{PageRequest, PageRequestError};
-use application::ports::{TaskListFilter, TaskRepository};
+use application::ports::{TaskListFilter, TaskRepository, UserRepository};
 use application::task_list::TaskListService;
 use application::task_status::TaskStatusService;
 use chrono::{DateTime, NaiveDate, Utc};
-use domain::{MilestoneId, Task, TaskId, TaskStatus};
+use domain::{MilestoneId, Task, TaskId, TaskStatus, UserId};
 use infrastructure::repositories::PostgresTaskRepository;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::access::{EditAccess, ViewAccess};
-use crate::error::{ApiError, repo_error_response, task_status_error_response};
+use crate::error::{
+    ApiError, assignment_error_response, repo_error_response, task_status_error_response,
+};
 use crate::openapi::TaskStatusDoc;
+use crate::people::{PersonSummary, resolve_summaries};
 
 /// JSON shape of a task in responses.
 #[derive(Serialize, ToSchema)]
@@ -31,28 +36,38 @@ pub struct TaskResponse {
     #[schema(value_type = TaskStatusDoc)]
     pub status: TaskStatus,
     pub target_date: Option<NaiveDate>,
+    /// The person the task is assigned to, or null when unassigned (D17). A
+    /// deactivated assignee still appears, with `active` false.
+    pub assignee: Option<PersonSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<&Task> for TaskResponse {
-    fn from(task: &Task) -> Self {
-        Self {
-            id: task.id.0,
-            milestone_id: task.milestone_id.map(|id| id.0),
-            title: task.title.clone(),
-            description: task.description.clone(),
-            status: task.status,
-            target_date: task.target_date,
-            created_at: task.created_at,
-            updated_at: task.updated_at,
-        }
+/// Build the response for one task, looking its assignee up in the batch
+/// resolved by [`resolve_summaries`] — one user query per response or page,
+/// never one per row (D17).
+fn task_response(task: &Task, people: &HashMap<Uuid, PersonSummary>) -> TaskResponse {
+    let mut response = TaskResponse {
+        id: task.id.0,
+        milestone_id: task.milestone_id.map(|id| id.0),
+        title: task.title.clone(),
+        description: task.description.clone(),
+        status: task.status,
+        target_date: task.target_date,
+        assignee: None,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+    };
+    if let Some(assignee_id) = task.assignee_id {
+        response.assignee = people.get(&assignee_id.0).cloned();
     }
+    response
 }
 
-/// Body for `POST /api/tasks` and `PUT /api/tasks/{id}`. The id and
-/// timestamps are server-managed and never accepted from the client; a
-/// missing or null `milestone_id` leaves the task unassigned.
+/// Body for `PUT /api/tasks/{id}`. The id and timestamps are server-managed
+/// and never accepted from the client; a missing or null `milestone_id`
+/// leaves the task unassigned. The assignee is not part of an ordinary
+/// update — only creation and the dedicated assignee routes set it (D17).
 #[derive(Deserialize, ToSchema)]
 pub struct TaskRequest {
     #[serde(default)]
@@ -64,6 +79,31 @@ pub struct TaskRequest {
     pub status: TaskStatus,
     #[serde(default)]
     pub target_date: Option<NaiveDate>,
+}
+
+/// Body for `POST /api/tasks`: the update fields plus the optional assignee.
+#[derive(Deserialize, ToSchema)]
+pub struct CreateTaskRequest {
+    #[serde(default)]
+    pub milestone_id: Option<Uuid>,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[schema(value_type = TaskStatusDoc)]
+    pub status: TaskStatus,
+    #[serde(default)]
+    pub target_date: Option<NaiveDate>,
+    /// The user to assign the task to; must be an existing active account.
+    /// Omitted or null leaves the task unassigned.
+    #[serde(default)]
+    pub assignee_id: Option<Uuid>,
+}
+
+/// Body for `PUT /api/tasks/{id}/assignee`.
+#[derive(Deserialize, ToSchema)]
+pub struct TaskAssigneeRequest {
+    /// The user to assign the task to; must be an existing active account.
+    pub assignee_id: Uuid,
 }
 
 /// One page of tasks plus the pagination metadata (roadmap 3.10, D16):
@@ -97,6 +137,9 @@ pub struct TaskListQuery {
     pub target_after: Option<String>,
     /// Only tasks whose target date is on or before this date (`YYYY-MM-DD`).
     pub target_before: Option<String>,
+    /// Only the tasks assigned to this person (a UUID); an id no task is
+    /// assigned to answers an empty page, not an error.
+    pub assignee_id: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for TaskListQuery {
@@ -120,18 +163,21 @@ impl<'de> Deserialize<'de> for TaskListQuery {
             q: None,
             target_after: None,
             target_before: None,
+            assignee_id: None,
         };
         for (key, value) in pairs {
             match key.as_str() {
                 "status" => query.status.push(value),
-                "limit" | "offset" | "milestone_id" | "q" | "target_after" | "target_before" => {
+                "limit" | "offset" | "milestone_id" | "q" | "target_after" | "target_before"
+                | "assignee_id" => {
                     let slot: &mut Option<String> = match key.as_str() {
                         "limit" => &mut query.limit,
                         "offset" => &mut query.offset,
                         "milestone_id" => &mut query.milestone_id,
                         "q" => &mut query.q,
                         "target_after" => &mut query.target_after,
-                        _ => &mut query.target_before,
+                        "target_before" => &mut query.target_before,
+                        _ => &mut query.assignee_id,
                     };
                     if slot.is_some() {
                         return Err(serde::de::Error::custom(format!(
@@ -221,6 +267,14 @@ fn parse_task_list_query(
     let target_after = parse_target_date(params.target_after.as_deref(), "target_after")?;
     let target_before = parse_target_date(params.target_before.as_deref(), "target_before")?;
 
+    // A malformed UUID is a 400 naming the parameter; a well-formed one no
+    // user has is still valid — an empty page (D16).
+    let assignee_id = params.assignee_id.as_deref().map(|raw| {
+        Uuid::parse_str(raw).map(UserId).map_err(|_| {
+            ApiError::invalid_query(format!("assignee_id must be a UUID, got {raw:?}"))
+        })
+    });
+
     Ok((
         TaskListFilter {
             statuses,
@@ -228,6 +282,7 @@ fn parse_task_list_query(
             q,
             target_after,
             target_before,
+            assignee_id: assignee_id.transpose()?,
         },
         page_request,
     ))
@@ -248,33 +303,49 @@ fn parse_target_date(raw: Option<&str>, param: &str) -> Result<Option<NaiveDate>
 
 /// Create Task
 ///
-/// Create a new task, optionally assigning it to a milestone.
+/// Create a new task, optionally assigning it to a milestone and a person.
 /// Requires the Staff or Admin role.
 #[utoipa::path(
     post,
     path = "/api/tasks",
     tags = ["tasks"],
     security(("session_cookie" = [])),
-    request_body = TaskRequest,
+    request_body = CreateTaskRequest,
     responses(
         (status = 201, description = "Task created", body = TaskResponse),
         (
             status = 400,
-            description = "Title is missing or blank, or milestone_id does not reference an existing milestone",
+            description = "Title is missing or blank, milestone_id does not reference an existing milestone, or assignee_id is not a UUID",
             body = ApiError
         ),
         (status = 401, description = "Missing or invalid session", body = ApiError),
-        (status = 403, description = "Requires the Staff or Admin role", body = ApiError)
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
+        (status = 404, description = "No user with the given assignee_id", body = ApiError),
+        (status = 409, description = "The user is deactivated", body = ApiError)
     )
 )]
 pub async fn create_task(
     tasks: web::Data<PostgresTaskRepository>,
+    assignment: web::Data<AssignmentService>,
+    users: web::Data<dyn UserRepository>,
     _access: EditAccess,
-    body: web::Json<TaskRequest>,
+    body: web::Json<CreateTaskRequest>,
 ) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
         return Err(ApiError::bad_request("title must not be empty"));
     }
+    // Validated exactly like the set endpoint (D17): an unknown user 404s,
+    // a deactivated one 409s, before anything is written.
+    let assignee_id = match body.assignee_id {
+        Some(id) => {
+            assignment
+                .ensure_active_user(UserId(id))
+                .await
+                .map_err(assignment_error_response)?;
+            Some(UserId(id))
+        }
+        None => None,
+    };
     let now = Utc::now();
     let task = Task {
         id: TaskId::new(),
@@ -283,11 +354,17 @@ pub async fn create_task(
         description: body.description.clone(),
         status: body.status,
         target_date: body.target_date,
+        assignee_id,
         created_at: now,
         updated_at: now,
     };
     match tasks.create(task).await {
-        Ok(task) => Ok(HttpResponse::Created().json(TaskResponse::from(&task))),
+        Ok(task) => {
+            let people = resolve_summaries(users.as_ref(), [task.assignee_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Created().json(task_response(&task, &people)))
+        }
         Err(err) => Err(repo_error_response(err)),
     }
 }
@@ -318,16 +395,30 @@ pub async fn create_task(
 pub async fn list_tasks(
     query: web::Query<TaskListQuery>,
     service: web::Data<TaskListService>,
+    users: web::Data<dyn UserRepository>,
     _access: ViewAccess,
 ) -> Result<HttpResponse, ApiError> {
     let (filter, page_request) = parse_task_list_query(&query.0)?;
     match service.list_page(&filter, &page_request).await {
-        Ok(page) => Ok(HttpResponse::Ok().json(TaskPage {
-            items: page.items.iter().map(TaskResponse::from).collect(),
-            total: page.total,
-            limit: page.limit,
-            offset: page.offset,
-        })),
+        Ok(page) => {
+            // One user query for the whole page's assignees (D17).
+            let people = resolve_summaries(
+                users.as_ref(),
+                page.items.iter().map(|task| task.assignee_id),
+            )
+            .await
+            .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(TaskPage {
+                items: page
+                    .items
+                    .iter()
+                    .map(|task| task_response(task, &people))
+                    .collect(),
+                total: page.total,
+                limit: page.limit,
+                offset: page.offset,
+            }))
+        }
         Err(err) => Err(repo_error_response(err)),
     }
 }
@@ -349,11 +440,17 @@ pub async fn list_tasks(
 )]
 pub async fn get_task(
     tasks: web::Data<PostgresTaskRepository>,
+    users: web::Data<dyn UserRepository>,
     _access: ViewAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match tasks.find_by_id(TaskId(*path)).await {
-        Ok(Some(task)) => Ok(HttpResponse::Ok().json(TaskResponse::from(&task))),
+        Ok(Some(task)) => {
+            let people = resolve_summaries(users.as_ref(), [task.assignee_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(task_response(&task, &people)))
+        }
         Ok(None) => Err(ApiError::not_found()),
         Err(err) => Err(repo_error_response(err)),
     }
@@ -384,6 +481,7 @@ pub async fn get_task(
 )]
 pub async fn update_task(
     tasks: web::Data<PostgresTaskRepository>,
+    users: web::Data<dyn UserRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<TaskRequest>,
@@ -394,6 +492,8 @@ pub async fn update_task(
     let id = TaskId(*path);
     match tasks.find_by_id(id).await {
         Ok(Some(existing)) => {
+            // The spread carries the assignee through untouched: an ordinary
+            // update neither sets nor clears it (D17).
             let updated = Task {
                 milestone_id: body.milestone_id.map(MilestoneId),
                 title: body.title.clone(),
@@ -405,7 +505,12 @@ pub async fn update_task(
                 ..existing
             };
             match tasks.update(updated).await {
-                Ok(task) => Ok(HttpResponse::Ok().json(TaskResponse::from(&task))),
+                Ok(task) => {
+                    let people = resolve_summaries(users.as_ref(), [task.assignee_id])
+                        .await
+                        .map_err(repo_error_response)?;
+                    Ok(HttpResponse::Ok().json(task_response(&task, &people)))
+                }
                 Err(err) => Err(repo_error_response(err)),
             }
         }
@@ -445,13 +550,98 @@ pub struct TaskStatusRequest {
 )]
 pub async fn set_task_status(
     status: web::Data<TaskStatusService>,
+    users: web::Data<dyn UserRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<TaskStatusRequest>,
 ) -> Result<HttpResponse, ApiError> {
     match status.set_status(TaskId(*path), body.status).await {
-        Ok(task) => Ok(HttpResponse::Ok().json(TaskResponse::from(&task))),
+        Ok(task) => {
+            let people = resolve_summaries(users.as_ref(), [task.assignee_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(task_response(&task, &people)))
+        }
         Err(err) => Err(task_status_error_response(err)),
+    }
+}
+
+/// Assign a Task
+///
+/// Assign the task to a person. Setting the person it is already assigned to
+/// is harmless and leaves `updated_at` alone. Requires the Staff or Admin role.
+#[utoipa::path(
+    put,
+    path = "/api/tasks/{id}/assignee",
+    tags = ["tasks"],
+    security(("session_cookie" = [])),
+    params(("id" = Uuid, Path, description = "Task identifier")),
+    request_body = TaskAssigneeRequest,
+    responses(
+        (status = 200, description = "The updated task", body = TaskResponse),
+        (status = 400, description = "Malformed body or assignee_id is not a UUID", body = ApiError),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
+        (
+            status = 404,
+            description = "No task with this id, or no user with the given assignee_id",
+            body = ApiError
+        ),
+        (status = 409, description = "The user is deactivated", body = ApiError)
+    )
+)]
+pub async fn set_task_assignee(
+    assignment: web::Data<AssignmentService>,
+    users: web::Data<dyn UserRepository>,
+    _access: EditAccess,
+    path: web::Path<Uuid>,
+    body: web::Json<TaskAssigneeRequest>,
+) -> Result<HttpResponse, ApiError> {
+    match assignment
+        .set_task_assignee(TaskId(*path), UserId(body.assignee_id))
+        .await
+    {
+        Ok(task) => {
+            let people = resolve_summaries(users.as_ref(), [task.assignee_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(task_response(&task, &people)))
+        }
+        Err(err) => Err(assignment_error_response(err)),
+    }
+}
+
+/// Clear a Task's Assignee
+///
+/// Remove the task's assignee. Works even when the current assignee has since
+/// been deactivated, and clearing an unassigned task is harmless. Requires the Staff or Admin role.
+#[utoipa::path(
+    delete,
+    path = "/api/tasks/{id}/assignee",
+    tags = ["tasks"],
+    security(("session_cookie" = [])),
+    params(("id" = Uuid, Path, description = "Task identifier")),
+    responses(
+        (status = 200, description = "The updated task", body = TaskResponse),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
+        (status = 404, description = "No task with this id", body = ApiError)
+    )
+)]
+pub async fn clear_task_assignee(
+    assignment: web::Data<AssignmentService>,
+    users: web::Data<dyn UserRepository>,
+    _access: EditAccess,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    match assignment.clear_task_assignee(TaskId(*path)).await {
+        Ok(task) => {
+            let people = resolve_summaries(users.as_ref(), [task.assignee_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(task_response(&task, &people)))
+        }
+        Err(err) => Err(assignment_error_response(err)),
     }
 }
 
@@ -509,6 +699,26 @@ mod tests {
         assert_eq!(body.target_date, None);
     }
 
+    #[test]
+    fn create_task_request_defaults_the_assignee_to_none_and_reads_it_when_given() {
+        let body: CreateTaskRequest =
+            serde_json::from_str(r#"{"title": "t", "status": "backlog"}"#).unwrap();
+        assert_eq!(body.assignee_id, None);
+
+        let id = Uuid::new_v4();
+        let with_assignee: CreateTaskRequest = serde_json::from_str(&format!(
+            r#"{{"title": "t", "status": "backlog", "assignee_id": "{id}"}}"#
+        ))
+        .unwrap();
+        assert_eq!(with_assignee.assignee_id, Some(id));
+
+        // An explicit null also means unassigned.
+        let nulled: CreateTaskRequest =
+            serde_json::from_str(r#"{"title": "t", "status": "backlog", "assignee_id": null}"#)
+                .unwrap();
+        assert_eq!(nulled.assignee_id, None);
+    }
+
     fn list_query(
         limit: Option<&str>,
         offset: Option<&str>,
@@ -526,6 +736,7 @@ mod tests {
             q: q.map(str::to_owned),
             target_after: target_after.map(str::to_owned),
             target_before: target_before.map(str::to_owned),
+            assignee_id: None,
         }
     }
 
@@ -540,6 +751,7 @@ mod tests {
         assert_eq!(filter.q, None);
         assert_eq!(filter.target_after, None);
         assert_eq!(filter.target_before, None);
+        assert_eq!(filter.assignee_id, None);
     }
 
     #[test]
@@ -650,5 +862,33 @@ mod tests {
         .unwrap();
         assert!(filter.statuses.is_empty());
         assert_eq!(filter.q, None);
+    }
+
+    #[test]
+    fn the_assignee_filter_parses_a_uuid_and_rejects_other_values_naming_the_parameter() {
+        let id = Uuid::new_v4();
+        let query = TaskListQuery {
+            limit: None,
+            offset: None,
+            status: Vec::new(),
+            milestone_id: None,
+            q: None,
+            target_after: None,
+            target_before: None,
+            assignee_id: Some(id.to_string()),
+        };
+
+        // A well-formed UUID lands in the filter...
+        let (filter, _page) = parse_task_list_query(&query).unwrap();
+        assert_eq!(filter.assignee_id, Some(UserId(id)));
+
+        // ...and anything else is a 400 naming the parameter.
+        let query = TaskListQuery {
+            assignee_id: Some("not-a-uuid".to_owned()),
+            ..query
+        };
+        let err = parse_task_list_query(&query).expect_err("must reject");
+        assert_eq!(err.code, "invalid_query");
+        assert!(err.message.contains("assignee_id"), "{}", err.message);
     }
 }

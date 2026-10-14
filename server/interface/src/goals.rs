@@ -5,21 +5,26 @@
 //! independently of the domain model.
 
 use actix_web::{HttpResponse, web};
+use application::assignment::AssignmentService;
 use application::goal_list::GoalListService;
 use application::pagination::{PageRequest, PageRequestError};
-use application::ports::{GoalListFilter, GoalRepository};
+use application::ports::{GoalListFilter, GoalRepository, UserRepository};
 use application::status_override::StatusOverrideService;
 use chrono::{DateTime, NaiveDate, Utc};
-use domain::{Goal, GoalId, Status, StatusSource};
+use domain::{Goal, GoalId, Status, StatusSource, UserId};
 use infrastructure::repositories::PostgresGoalRepository;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::access::{EditAccess, ViewAccess};
-use crate::error::{ApiError, repo_error_response, status_override_error_response};
+use crate::error::{
+    ApiError, assignment_error_response, repo_error_response, status_override_error_response,
+};
 use crate::openapi::{StatusDoc, StatusSourceDoc};
+use crate::people::{OwnerRequest, PersonSummary, resolve_summaries};
 
 /// JSON shape of a goal in responses.
 #[derive(Serialize, ToSchema)]
@@ -36,29 +41,41 @@ pub struct GoalResponse {
     #[schema(value_type = StatusSourceDoc)]
     pub status_source: StatusSource,
     pub target_date: Option<NaiveDate>,
+    /// The person the goal is owned by, or null when unowned (D17). A
+    /// deactivated owner still appears, with `active` false.
+    pub owner: Option<PersonSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<&Goal> for GoalResponse {
-    fn from(goal: &Goal) -> Self {
-        // The wire shape reports the effective status and where it came
-        // from; the raw automatic value and override are domain-side.
-        Self {
-            id: goal.id.0,
-            title: goal.title.clone(),
-            description: goal.description.clone(),
-            status: goal.effective_status(),
-            status_source: goal.status_source(),
-            target_date: goal.target_date,
-            created_at: goal.created_at,
-            updated_at: goal.updated_at,
-        }
+/// Build the response for one goal, looking its owner up in the batch
+/// resolved by [`resolve_summaries`] — one user query per response or page,
+/// never one per row (D17). `pub(crate)` so the goal–milestone link lists
+/// reuse it.
+pub(crate) fn goal_response(goal: &Goal, people: &HashMap<Uuid, PersonSummary>) -> GoalResponse {
+    // The wire shape reports the effective status and where it came
+    // from; the raw automatic value and override are domain-side.
+    let mut response = GoalResponse {
+        id: goal.id.0,
+        title: goal.title.clone(),
+        description: goal.description.clone(),
+        status: goal.effective_status(),
+        status_source: goal.status_source(),
+        target_date: goal.target_date,
+        owner: None,
+        created_at: goal.created_at,
+        updated_at: goal.updated_at,
+    };
+    if let Some(owner_id) = goal.owner_id {
+        response.owner = people.get(&owner_id.0).cloned();
     }
+    response
 }
 
-/// Body for `POST /api/goals` and `PUT /api/goals/{id}`. The id, status, and
-/// timestamps are server-managed and never accepted from the client.
+/// Body for `PUT /api/goals/{id}`. The id, status, and timestamps are
+/// server-managed and never accepted from the client; the owner is not part
+/// of an ordinary update — only creation and the dedicated owner routes set
+/// it (D17).
 #[derive(Deserialize, ToSchema)]
 pub struct GoalRequest {
     pub title: String,
@@ -66,6 +83,20 @@ pub struct GoalRequest {
     pub description: Option<String>,
     #[serde(default)]
     pub target_date: Option<NaiveDate>,
+}
+
+/// Body for `POST /api/goals`: the update fields plus the optional owner.
+#[derive(Deserialize, ToSchema)]
+pub struct CreateGoalRequest {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub target_date: Option<NaiveDate>,
+    /// The user to make the owner; must be an existing active account.
+    /// Omitted or null leaves the goal unowned.
+    #[serde(default)]
+    pub owner_id: Option<Uuid>,
 }
 
 /// Body for `PUT /api/goals/{id}/status-override` and
@@ -287,29 +318,45 @@ fn parse_goal_list_query(
 
 /// Create Goal
 ///
-/// Create a new goal - a strategic outcome the school is working toward.
-/// Requires the Staff or Admin role.
+/// Create a new goal - a strategic outcome the school is working toward,
+/// optionally naming an owner. Requires the Staff or Admin role.
 #[utoipa::path(
     post,
     path = "/api/goals",
     tags = ["goals"],
     security(("session_cookie" = [])),
-    request_body = GoalRequest,
+    request_body = CreateGoalRequest,
     responses(
         (status = 201, description = "Goal created", body = GoalResponse),
         (status = 400, description = "Title is missing or blank", body = ApiError),
         (status = 401, description = "Missing or invalid session", body = ApiError),
-        (status = 403, description = "Requires the Staff or Admin role", body = ApiError)
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
+        (status = 404, description = "No user with the given owner_id", body = ApiError),
+        (status = 409, description = "The user is deactivated", body = ApiError)
     )
 )]
 pub async fn create_goal(
     goals: web::Data<PostgresGoalRepository>,
+    assignment: web::Data<AssignmentService>,
+    users: web::Data<dyn UserRepository>,
     _access: EditAccess,
-    body: web::Json<GoalRequest>,
+    body: web::Json<CreateGoalRequest>,
 ) -> Result<HttpResponse, ApiError> {
     if body.title.trim().is_empty() {
         return Err(ApiError::bad_request("title must not be empty"));
     }
+    // Validated exactly like the set endpoint (D17): an unknown user 404s,
+    // a deactivated one 409s, before anything is written.
+    let owner_id = match body.owner_id {
+        Some(id) => {
+            assignment
+                .ensure_active_user(UserId(id))
+                .await
+                .map_err(assignment_error_response)?;
+            Some(UserId(id))
+        }
+        None => None,
+    };
     let now = Utc::now();
     let goal = Goal {
         id: GoalId::new(),
@@ -319,11 +366,17 @@ pub async fn create_goal(
         status: Status::OnTrack,
         status_override: None,
         target_date: body.target_date,
+        owner_id,
         created_at: now,
         updated_at: now,
     };
     match goals.create(goal).await {
-        Ok(goal) => Ok(HttpResponse::Created().json(GoalResponse::from(&goal))),
+        Ok(goal) => {
+            let people = resolve_summaries(users.as_ref(), [goal.owner_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Created().json(goal_response(&goal, &people)))
+        }
         Err(err) => Err(repo_error_response(err)),
     }
 }
@@ -356,16 +409,28 @@ pub async fn create_goal(
 pub async fn list_goals(
     query: web::Query<GoalListQuery>,
     service: web::Data<GoalListService>,
+    users: web::Data<dyn UserRepository>,
     _access: ViewAccess,
 ) -> Result<HttpResponse, ApiError> {
     let (filter, page_request) = parse_goal_list_query(&query.0)?;
     match service.list_page(&filter, &page_request).await {
-        Ok(page) => Ok(HttpResponse::Ok().json(GoalPage {
-            items: page.items.iter().map(GoalResponse::from).collect(),
-            total: page.total,
-            limit: page.limit,
-            offset: page.offset,
-        })),
+        Ok(page) => {
+            // One user query for the whole page's owners (D17).
+            let people =
+                resolve_summaries(users.as_ref(), page.items.iter().map(|goal| goal.owner_id))
+                    .await
+                    .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(GoalPage {
+                items: page
+                    .items
+                    .iter()
+                    .map(|goal| goal_response(goal, &people))
+                    .collect(),
+                total: page.total,
+                limit: page.limit,
+                offset: page.offset,
+            }))
+        }
         Err(err) => Err(repo_error_response(err)),
     }
 }
@@ -387,11 +452,17 @@ pub async fn list_goals(
 )]
 pub async fn get_goal(
     goals: web::Data<PostgresGoalRepository>,
+    users: web::Data<dyn UserRepository>,
     _access: ViewAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match goals.find_by_id(GoalId(*path)).await {
-        Ok(Some(goal)) => Ok(HttpResponse::Ok().json(GoalResponse::from(&goal))),
+        Ok(Some(goal)) => {
+            let people = resolve_summaries(users.as_ref(), [goal.owner_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(goal_response(&goal, &people)))
+        }
         Ok(None) => Err(ApiError::not_found()),
         Err(err) => Err(repo_error_response(err)),
     }
@@ -418,6 +489,7 @@ pub async fn get_goal(
 )]
 pub async fn update_goal(
     goals: web::Data<PostgresGoalRepository>,
+    users: web::Data<dyn UserRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<GoalRequest>,
@@ -428,6 +500,8 @@ pub async fn update_goal(
     let id = GoalId(*path);
     match goals.find_by_id(id).await {
         Ok(Some(existing)) => {
+            // The spread carries the owner through untouched: an ordinary
+            // update neither sets nor clears it (D17).
             let updated = Goal {
                 title: body.title.clone(),
                 description: body.description.clone(),
@@ -438,7 +512,12 @@ pub async fn update_goal(
                 ..existing
             };
             match goals.update(updated).await {
-                Ok(goal) => Ok(HttpResponse::Ok().json(GoalResponse::from(&goal))),
+                Ok(goal) => {
+                    let people = resolve_summaries(users.as_ref(), [goal.owner_id])
+                        .await
+                        .map_err(repo_error_response)?;
+                    Ok(HttpResponse::Ok().json(goal_response(&goal, &people)))
+                }
                 Err(err) => Err(repo_error_response(err)),
             }
         }
@@ -497,6 +576,7 @@ pub async fn delete_goal(
 )]
 pub async fn set_goal_status_override(
     overrides: web::Data<StatusOverrideService>,
+    users: web::Data<dyn UserRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<StatusOverrideRequest>,
@@ -505,7 +585,12 @@ pub async fn set_goal_status_override(
         .set_goal_override(GoalId(*path), body.status)
         .await
     {
-        Ok(goal) => Ok(HttpResponse::Ok().json(GoalResponse::from(&goal))),
+        Ok(goal) => {
+            let people = resolve_summaries(users.as_ref(), [goal.owner_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(goal_response(&goal, &people)))
+        }
         Err(err) => Err(status_override_error_response(err)),
     }
 }
@@ -530,11 +615,96 @@ pub async fn set_goal_status_override(
 )]
 pub async fn clear_goal_status_override(
     overrides: web::Data<StatusOverrideService>,
+    users: web::Data<dyn UserRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
     match overrides.clear_goal_override(GoalId(*path)).await {
-        Ok(goal) => Ok(HttpResponse::Ok().json(GoalResponse::from(&goal))),
+        Ok(goal) => {
+            let people = resolve_summaries(users.as_ref(), [goal.owner_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(goal_response(&goal, &people)))
+        }
         Err(err) => Err(status_override_error_response(err)),
+    }
+}
+
+/// Set Goal Owner
+///
+/// Name the person who owns the goal. Setting the person it is already owned
+/// by is harmless and leaves `updated_at` alone. Requires the Staff or Admin role.
+#[utoipa::path(
+    put,
+    path = "/api/goals/{id}/owner",
+    tags = ["goals"],
+    security(("session_cookie" = [])),
+    params(("id" = Uuid, Path, description = "Goal identifier")),
+    request_body = OwnerRequest,
+    responses(
+        (status = 200, description = "The updated goal", body = GoalResponse),
+        (status = 400, description = "Malformed body or owner_id is not a UUID", body = ApiError),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
+        (
+            status = 404,
+            description = "No goal with this id, or no user with the given owner_id",
+            body = ApiError
+        ),
+        (status = 409, description = "The user is deactivated", body = ApiError)
+    )
+)]
+pub async fn set_goal_owner(
+    assignment: web::Data<AssignmentService>,
+    users: web::Data<dyn UserRepository>,
+    _access: EditAccess,
+    path: web::Path<Uuid>,
+    body: web::Json<OwnerRequest>,
+) -> Result<HttpResponse, ApiError> {
+    match assignment
+        .set_goal_owner(GoalId(*path), UserId(body.owner_id))
+        .await
+    {
+        Ok(goal) => {
+            let people = resolve_summaries(users.as_ref(), [goal.owner_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(goal_response(&goal, &people)))
+        }
+        Err(err) => Err(assignment_error_response(err)),
+    }
+}
+
+/// Clear Goal Owner
+///
+/// Remove the goal's owner. Works even when the current owner has since been
+/// deactivated, and clearing an unowned goal is harmless. Requires the Staff or Admin role.
+#[utoipa::path(
+    delete,
+    path = "/api/goals/{id}/owner",
+    tags = ["goals"],
+    security(("session_cookie" = [])),
+    params(("id" = Uuid, Path, description = "Goal identifier")),
+    responses(
+        (status = 200, description = "The updated goal", body = GoalResponse),
+        (status = 401, description = "Missing or invalid session", body = ApiError),
+        (status = 403, description = "Requires the Staff or Admin role", body = ApiError),
+        (status = 404, description = "No goal with this id", body = ApiError)
+    )
+)]
+pub async fn clear_goal_owner(
+    assignment: web::Data<AssignmentService>,
+    users: web::Data<dyn UserRepository>,
+    _access: EditAccess,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    match assignment.clear_goal_owner(GoalId(*path)).await {
+        Ok(goal) => {
+            let people = resolve_summaries(users.as_ref(), [goal.owner_id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(goal_response(&goal, &people)))
+        }
+        Err(err) => Err(assignment_error_response(err)),
     }
 }

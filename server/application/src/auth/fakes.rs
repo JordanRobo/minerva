@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::{DateTime, Utc};
 use domain::{
     AccountToken, AccountTokenId, AccountTokenKind, Role, Session, SessionId, SsoGroupRule,
-    SsoGroupRuleId, User, UserId, UserIdentity,
+    SsoGroupRuleId, User, UserId, UserIdentity, UserSummary,
 };
 
 use crate::ports::{
@@ -208,6 +208,35 @@ impl UserRepository for InMemoryUserRepository {
 
     async fn list(&self) -> Result<Vec<User>, RepositoryError> {
         Ok(self.locked().values().cloned().collect())
+    }
+
+    async fn summaries_by_ids(&self, ids: &[UserId]) -> Result<Vec<UserSummary>, RepositoryError> {
+        let users = self.locked();
+        Ok(ids
+            .iter()
+            .filter_map(|id| users.get(id))
+            .map(|user| {
+                UserSummary::new(user.id, &user.display_name, &user.email, user.is_active())
+            })
+            .collect())
+    }
+
+    async fn list_active_summaries(&self) -> Result<Vec<UserSummary>, RepositoryError> {
+        let mut summaries: Vec<UserSummary> = self
+            .locked()
+            .values()
+            .filter(|user| user.is_active())
+            .map(|user| UserSummary::new(user.id, &user.display_name, &user.email, true))
+            .collect();
+        // Effective display name case-insensitive, then id, like the real
+        // query.
+        summaries.sort_by(|a, b| {
+            a.display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase())
+                .then_with(|| a.id.0.cmp(&b.id.0))
+        });
+        Ok(summaries)
     }
 
     async fn update(&self, user: User) -> Result<User, RepositoryError> {
@@ -423,6 +452,18 @@ impl UserRepository for FailingUserRepository {
     }
 
     async fn list(&self) -> Result<Vec<User>, RepositoryError> {
+        Err(RepositoryError::Unexpected(
+            "faking a repository failure".to_owned(),
+        ))
+    }
+
+    async fn summaries_by_ids(&self, _ids: &[UserId]) -> Result<Vec<UserSummary>, RepositoryError> {
+        Err(RepositoryError::Unexpected(
+            "faking a repository failure".to_owned(),
+        ))
+    }
+
+    async fn list_active_summaries(&self) -> Result<Vec<UserSummary>, RepositoryError> {
         Err(RepositoryError::Unexpected(
             "faking a repository failure".to_owned(),
         ))

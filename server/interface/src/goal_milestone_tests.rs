@@ -194,6 +194,7 @@ fn test_goal(target_date: Option<NaiveDate>) -> Goal {
         status: Status::OnTrack,
         status_override: None,
         target_date,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     }
@@ -209,6 +210,7 @@ fn test_milestone(target_date: Option<NaiveDate>) -> Milestone {
         status: Status::OnTrack,
         status_override: None,
         target_date,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     }

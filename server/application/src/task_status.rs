@@ -84,6 +84,7 @@ mod tests {
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use chrono::Utc;
+    use domain::UserId;
 
     use super::*;
 
@@ -96,6 +97,7 @@ mod tests {
             description: None,
             status,
             target_date: None,
+            assignee_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -177,6 +179,20 @@ mod tests {
             task.status = status;
             task.updated_at = Utc::now();
             self.set_status_writes.fetch_add(1, Ordering::Relaxed);
+            Ok(task.clone())
+        }
+
+        async fn set_assignee(
+            &self,
+            id: TaskId,
+            assignee_id: Option<UserId>,
+        ) -> Result<Task, RepositoryError> {
+            let mut tasks = self.locked();
+            let Some(task) = tasks.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            task.assignee_id = assignee_id;
+            task.updated_at = Utc::now();
             Ok(task.clone())
         }
 

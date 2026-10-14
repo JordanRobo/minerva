@@ -167,6 +167,7 @@ fn test_task(title: &str) -> Task {
         description: Some("Some details".to_owned()),
         status: TaskStatus::Backlog,
         target_date: Some(NaiveDate::from_ymd_opt(2026, 6, 1).expect("valid date")),
+        assignee_id: None,
         created_at: now,
         updated_at: now,
     }
@@ -268,6 +269,7 @@ async fn the_response_keeps_the_standard_task_shape() {
     assert_eq!(
         keys,
         [
+            "assignee",
             "created_at",
             "description",
             "id",
@@ -473,6 +475,7 @@ async fn the_other_fields_are_untouched_by_a_column_move() {
         status: domain::Status::OnTrack,
         status_override: None,
         target_date: Some(NaiveDate::from_ymd_opt(2026, 9, 1).expect("valid date")),
+        owner_id: None,
         created_at: at(1, 1),
         updated_at: at(1, 1),
     };

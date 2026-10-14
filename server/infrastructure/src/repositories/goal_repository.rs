@@ -2,9 +2,10 @@
 
 use application::pagination::{Page, PageRequest};
 use application::ports::{GoalListFilter, GoalRepository, RepositoryError};
+use chrono::Utc;
 use diesel::prelude::*;
 use diesel::sql_types::{Nullable, Text};
-use domain::{Goal, GoalId, Status, StatusSource};
+use domain::{Goal, GoalId, Status, StatusSource, UserId};
 
 use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
@@ -43,6 +44,7 @@ impl GoalRepository for PostgresGoalRepository {
                     goals::status.eq(status_to_db(goal.status)),
                     goals::status_source.eq(status_source_to_db(goal.status_source())),
                     goals::target_date.eq(goal.target_date),
+                    goals::owner_id.eq(goal.owner_id.map(|u| u.0)),
                     goals::created_at.eq(&goal.created_at),
                     goals::updated_at.eq(&goal.updated_at),
                     goals::status_override.eq(goal.status_override.map(status_to_db)),
@@ -91,9 +93,9 @@ impl GoalRepository for PostgresGoalRepository {
                 .execute(conn)
                 .map_err(map_diesel_error)?;
             // A goal that vanished between read and write is a conflict the
-            // caller needs to see, not a silent no-op. The override column is
-            // deliberately absent: an ordinary update must never clear or
-            // change it (roadmap 3.2).
+            // caller needs to see, not a silent no-op. The override and owner
+            // columns are deliberately absent: an ordinary update must never
+            // clear or change them (roadmap 3.2, D17).
             if updated == 0 {
                 return Err(RepositoryError::NotFound);
             }
@@ -126,6 +128,29 @@ impl GoalRepository for PostgresGoalRepository {
                 return Err(RepositoryError::NotFound);
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn set_owner(
+        &self,
+        id: GoalId,
+        owner_id: Option<UserId>,
+    ) -> Result<Goal, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            // One UPDATE ... RETURNING that writes only the owner column and
+            // updated_at, so a concurrent edit of any other field survives it
+            // (D17). A goal that does not exist matches no row.
+            let row: GoalRow = diesel::update(goals::table.find(id.0))
+                .set((
+                    goals::owner_id.eq(owner_id.map(|u| u.0)),
+                    goals::updated_at.eq(Utc::now()),
+                ))
+                .returning(goals::all_columns)
+                .get_result(conn)
+                .map_err(map_diesel_error)?;
+            goal_from_row(row)
         })
         .await
     }

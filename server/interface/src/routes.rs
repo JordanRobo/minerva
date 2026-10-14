@@ -11,8 +11,8 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::error::ApiError;
 use crate::openapi::ApiDoc;
 use crate::{
-    account_links, auth, debug, goal_milestones, goals, invites, milestones, redirect, sso_rules,
-    task_relations, tasks, users,
+    account_links, auth, debug, goal_milestones, goals, invites, milestones, people, redirect,
+    sso_rules, task_relations, tasks, users,
 };
 
 async fn health() -> HttpResponse {
@@ -48,6 +48,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     "/goals/{id}/status-override",
                     web::delete().to(goals::clear_goal_status_override),
                 )
+                // Goal owners (roadmap 3.11, D17): the dedicated
+                // single-column writers; an ordinary PUT never touches them.
+                .route("/goals/{id}/owner", web::put().to(goals::set_goal_owner))
+                .route(
+                    "/goals/{id}/owner",
+                    web::delete().to(goals::clear_goal_owner),
+                )
                 .route("/milestones", web::post().to(milestones::create_milestone))
                 .route("/milestones", web::get().to(milestones::list_milestones))
                 .route("/milestones/{id}", web::get().to(milestones::get_milestone))
@@ -66,6 +73,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/milestones/{id}/status-override",
                     web::delete().to(milestones::clear_milestone_status_override),
+                )
+                // Milestone owners (roadmap 3.11, D17): the dedicated
+                // single-column writers; an ordinary PUT never touches them.
+                .route(
+                    "/milestones/{id}/owner",
+                    web::put().to(milestones::set_milestone_owner),
+                )
+                .route(
+                    "/milestones/{id}/owner",
+                    web::delete().to(milestones::clear_milestone_owner),
                 )
                 // Goal–milestone linkage (roadmap 3.4): one module owns both
                 // sides of the relation.
@@ -96,6 +113,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     "/tasks/{id}/status",
                     web::patch().to(tasks::set_task_status),
                 )
+                // Task assignees (roadmap 3.11, D17): the dedicated
+                // single-column writers; an ordinary PUT never touches them.
+                .route(
+                    "/tasks/{id}/assignee",
+                    web::put().to(tasks::set_task_assignee),
+                )
+                .route(
+                    "/tasks/{id}/assignee",
+                    web::delete().to(tasks::clear_task_assignee),
+                )
                 // Task relations (roadmap 3.6): one module owns the relation
                 // endpoints.
                 .route(
@@ -111,6 +138,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     web::delete().to(task_relations::delete_task_relation),
                 )
                 .route("/users", web::get().to(users::list_users))
+                // The people picker (roadmap 3.11, D17): active accounts any
+                // signed-in role may read.
+                .route("/people", web::get().to(people::list_people))
                 .route("/users/{id}/role", web::put().to(users::change_user_role))
                 .route(
                     "/users/{id}/deactivate",

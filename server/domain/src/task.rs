@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::milestone::MilestoneId;
+use crate::user::UserId;
 
 /// Identifier for a [`Task`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -55,6 +56,10 @@ pub struct Task {
     pub status: TaskStatus,
     /// The date this task is expected to be finished by, if one was set.
     pub target_date: Option<NaiveDate>,
+    /// The user this task is assigned to, if anyone has been assigned (D17).
+    /// A task may exist before anyone is assigned to it; the domain does not
+    /// check that the user exists — that is an application concern.
+    pub assignee_id: Option<UserId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -98,6 +103,7 @@ mod tests {
             description: None,
             status: TaskStatus::ToDo,
             target_date: None,
+            assignee_id: None,
             created_at: now,
             updated_at: now,
         }

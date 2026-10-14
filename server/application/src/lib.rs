@@ -5,6 +5,7 @@
 //! hashing the session tokens use) — no other non-domain dependency.
 
 pub mod account_links;
+pub mod assignment;
 pub mod auth;
 pub mod authz;
 pub mod bootstrap;

@@ -272,6 +272,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::{DateTime, NaiveDate};
+    use domain::UserId;
 
     use super::*;
     use crate::ports::task_relation_repository::fakes::InMemoryTaskRelationRepository;
@@ -294,6 +295,7 @@ mod tests {
             description: None,
             status: TaskStatus::ToDo,
             target_date: None,
+            assignee_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -349,6 +351,20 @@ mod tests {
                 return Err(RepositoryError::NotFound);
             };
             task.status = status;
+            Ok(task.clone())
+        }
+
+        async fn set_assignee(
+            &self,
+            id: TaskId,
+            assignee_id: Option<UserId>,
+        ) -> Result<Task, RepositoryError> {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            task.assignee_id = assignee_id;
+            task.updated_at = Utc::now();
             Ok(task.clone())
         }
 

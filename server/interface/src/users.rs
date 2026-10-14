@@ -285,6 +285,7 @@ mod tests {
     use actix_web::http::{Method, StatusCode, header};
     use actix_web::test::{TestRequest, init_service, read_body};
     use application::account_links::AccountLinkService;
+    use application::assignment::AssignmentService;
     use application::auth::SessionService;
     use application::auth::password::PasswordAuthProvider;
     use application::auth::provider::AuthProviders;
@@ -405,6 +406,15 @@ mod tests {
                     .app_data(web::Data::new(MilestoneListService::new(Arc::new(
                         PostgresMilestoneRepository::new(pool.clone()),
                     ))))
+                    // The create-goal route validates an optional owner
+                    // through the assignment service (roadmap 3.11), like
+                    // `main.rs`.
+                    .app_data(web::Data::new(AssignmentService::new(
+                        Arc::new(PostgresTaskRepository::new(pool.clone())),
+                        Arc::new(PostgresGoalRepository::new(pool.clone())),
+                        Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+                        users.clone(),
+                    )))
                     .app_data(web::Data::new(UserAdminService::new(
                         users,
                         Arc::new(PostgresSsoGroupRuleRepository::new(pool.clone())),

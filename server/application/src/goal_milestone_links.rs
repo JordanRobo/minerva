@@ -183,7 +183,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-    use domain::Status;
+    use domain::{Status, UserId};
 
     use crate::pagination::{Page, PageRequest};
     use crate::ports::goal_repository::fakes::{apply_goal_list_filter, page_goals};
@@ -210,6 +210,7 @@ mod tests {
             status: Status::OnTrack,
             status_override: None,
             target_date: None,
+            owner_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -232,6 +233,7 @@ mod tests {
             status: Status::OnTrack,
             status_override: None,
             target_date: None,
+            owner_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -285,6 +287,20 @@ mod tests {
             };
             goal.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_owner(
+            &self,
+            id: GoalId,
+            owner_id: Option<UserId>,
+        ) -> Result<Goal, RepositoryError> {
+            let mut goals = self.goals.lock().unwrap();
+            let Some(goal) = goals.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            goal.owner_id = owner_id;
+            goal.updated_at = Utc::now();
+            Ok(goal.clone())
         }
 
         async fn delete(&self, id: GoalId) -> Result<(), RepositoryError> {
@@ -348,6 +364,20 @@ mod tests {
             };
             milestone.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_owner(
+            &self,
+            id: MilestoneId,
+            owner_id: Option<UserId>,
+        ) -> Result<Milestone, RepositoryError> {
+            let mut milestones = self.milestones.lock().unwrap();
+            let Some(milestone) = milestones.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            milestone.owner_id = owner_id;
+            milestone.updated_at = Utc::now();
+            Ok(milestone.clone())
         }
 
         async fn delete(&self, id: MilestoneId) -> Result<(), RepositoryError> {

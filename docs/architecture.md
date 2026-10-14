@@ -398,8 +398,8 @@ extractor and asking `authz` for its permission:
 
 | Extractor | Permission | Used by |
 |---|---|---|
-| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones`, `GET /api/milestones/{id}/goals` and `GET /api/tasks/{id}/relations` |
-| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}`, plus `POST /api/tasks/{id}/relations` and `DELETE /api/tasks/{id}/relations/{relation_id}`, plus `PATCH /api/tasks/{id}/status` |
+| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones`, `GET /api/milestones/{id}/goals`, `GET /api/tasks/{id}/relations` and `GET /api/people` |
+| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}`, plus `POST /api/tasks/{id}/relations` and `DELETE /api/tasks/{id}/relations/{relation_id}`, plus `PATCH /api/tasks/{id}/status`, plus `PUT`/`DELETE /api/tasks/{id}/assignee`, `PUT`/`DELETE /api/goals/{id}/owner` and `PUT`/`DELETE /api/milestones/{id}/owner` |
 | `AdminAccess` | `ManageUsers` | the `/api/users` routes, the invite and password-reset routes (`/api/invites`, `/api/users/{id}/password-reset`) and the temporary `/debug/*` routes (until their roadmap items replace them) |
 
 A missing or invalid session is a 401; a valid session whose role lacks the
@@ -647,18 +647,20 @@ touch a repository.
 
 Each endpoint's filters:
 
-- Tasks: `status` (comma-separated and/or repeated), `milestone_id`, `q`
-  (case-insensitive literal substring on the title, trimmed, at most 100
-  characters; `%`, `_` and `\` match literally) and inclusive
-  `target_after`/`target_before` (`YYYY-MM-DD`) that never match undated tasks.
+- Tasks: `status` (comma-separated and/or repeated), `milestone_id`,
+  `assignee_id` (a UUID, roadmap 3.11), `q` (case-insensitive literal
+  substring on the title, trimmed, at most 100 characters; `%`, `_` and `\`
+  match literally) and inclusive `target_after`/`target_before`
+  (`YYYY-MM-DD`) that never match undated tasks.
 - Goals and milestones: the same minus `milestone_id`, with one difference —
   `status` matches the **effective** status (the manual override when set, else
   the automatic value; roadmap 3.2), which in Postgres is
   `COALESCE(status_override, status)`.
 - The link lists take only `limit` and `offset`: the path id is the filter.
 
-No filter can 404: an unmatched filter — including an unknown `milestone_id` —
-is a 200 empty page. (An unknown *path* id on the link lists still 404s.)
+No filter can 404: an unmatched filter — including an unknown `milestone_id`
+or `assignee_id` — is a 200 empty page. (An unknown *path* id on the link
+lists still 404s.)
 
 Ordering is one shared default for every list, not client-selectable (roadmap
 3.16): target date ascending with undated rows last, then `created_at`, then
@@ -668,13 +670,70 @@ parameter in v1; manual card ordering would be the reason to add one.
 
 Migration 20261008000001 adds `idx_tasks_status` and
 `idx_tasks_list_order (target_date NULLS LAST, created_at, id)` for the task
-list; goals and milestones have no indexes yet — school-scale row counts do
-not justify one, and the effective-status filter is an expression over two
-columns that a plain b-tree cannot serve.
+list; migration 20261013000001 adds `idx_tasks_assignee_id` for the assignee
+filter (roadmap 3.11); goals and milestones have no indexes yet — school-scale
+row counts do not justify one, and the effective-status filter is an expression
+over two columns that a plain b-tree cannot serve.
 
 Deliberately **not** paginated: `GET /api/users`, `GET /api/invites`,
-`GET /api/sso/group-rules` and `GET /api/tasks/{id}/relations` — each is small
-and bounded, so a bare array stays the simpler contract.
+`GET /api/sso/group-rules`, `GET /api/people` and
+`GET /api/tasks/{id}/relations` — each is small and bounded, so a bare array
+stays the simpler contract.
+
+### Assignees and owners
+
+Tasks have one optional **assignee**; goals and milestones each have one
+optional **owner** (roadmap 3.11, D17). Storage is a nullable user reference
+on each table (`tasks.assignee_id`, `goals.owner_id`, `milestones.owner_id`,
+migration 20261013000001) with `ON DELETE SET NULL`: deleting a user leaves
+their assignments in place as unassigned rather than failing or cascading.
+
+A person is rendered everywhere as a **person summary** — `{id, display_name,
+active}`, never the email (D17). Task responses embed it under `assignee`,
+goal and milestone responses under `owner` (`null` while unset); a deactivated
+person still renders, flagged by `active: false`. Summaries are filled in
+batch: one `UserRepository::summaries_by_ids` call per response or page
+(`resolve_summaries` in `interface/src/people.rs`), not one query per row.
+
+The dedicated endpoints are Staff or Admin (`EditAccess`) and answer 200 with
+the updated entity in its standard shape:
+
+- `PUT /api/tasks/{id}/assignee` (body `{assignee_id}`) and
+  `DELETE /api/tasks/{id}/assignee`,
+- `PUT /api/goals/{id}/owner` and `PUT /api/milestones/{id}/owner` (body
+  `{owner_id}`), each with a `DELETE` equivalent.
+
+Creating a task, goal or milestone accepts the same optional id and validates
+it with the same check. The rules live in
+`application::assignment::AssignmentService`, not in the handlers:
+
+- The target entity is checked before the user: an unknown task, goal or
+  milestone is a 404 even when the user id is also unknown; an unknown user is
+  a 404 `user_not_found`, a deactivated one a 409 `user_deactivated`.
+- Setting the value already set, or clearing one that is not set, is an
+  idempotent no-op that returns the entity without writing, so `updated_at` is
+  untouched.
+- Clearing never looks the user up: it works even when the current assignee
+  or owner has since been deactivated.
+
+The writes are single-column — `TaskRepository::set_assignee` and the
+goal/milestone `set_owner` ports issue one `UPDATE … RETURNING` of only the
+reference and `updated_at`, so a concurrent edit of any other field cannot be
+clobbered; an ordinary update never changes or clears the reference (the
+repository's `update` omits the column). Like board moves, no snapshot trigger
+fires and nothing is audited (D5, D9).
+
+`GET /api/people` (any signed-in role, `ViewAccess`) lists every **active**
+user as a person summary, ordered by display name then id — the data for the
+UI's pickers. Deactivated accounts are excluded there but still render on the
+entities they were assigned to. It sits beside the admin-only
+`GET /api/users` deliberately: the picker needs names for every signed-in
+role, while `/api/users` is the management surface (full user rows, role and
+active-state changes) and exposes no person summary at all.
+
+The task list filters on `assignee_id` (above); there is deliberately no owner
+filter and no "my tasks"/"unassigned" shortcut in v1 — roadmap 4.5 builds
+"My tasks" on `assignee_id` plus the caller's own id.
 
 ## API documentation
 
@@ -686,8 +745,8 @@ The `interface` crate generates an OpenAPI 3 document from code annotations
 
 Under Docker compose the API is mapped to host port 3010, so use
 http://localhost:3010/api-docs/swagger-ui/ there. All `/api/*` endpoints
-(auth, goals, goal–milestone links, milestones, tasks, task relations, users,
-invites and SSO group rules) are documented; the temporary
+(auth, goals, goal–milestone links, milestones, tasks, task relations, people,
+users, invites and SSO group rules) are documented; the temporary
 `/debug/*` routes are not. Protected endpoints declare the `session_cookie` security
 scheme (the session cookie as an API key, registered by a `utoipa::Modify`
 addon in `interface/src/openapi.rs`) so Swagger UI's Authorize button can

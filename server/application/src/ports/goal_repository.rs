@@ -1,7 +1,7 @@
 //! Persistence port for [`Goal`]s.
 
 use chrono::NaiveDate;
-use domain::{Goal, GoalId, Status};
+use domain::{Goal, GoalId, Status, UserId};
 
 use crate::pagination::{Page, PageRequest};
 use crate::ports::RepositoryError;
@@ -44,6 +44,16 @@ pub trait GoalRepository: Send + Sync {
         status_override: Option<Status>,
     ) -> Result<(), RepositoryError>;
 
+    /// Set or clear the goal's owner; `None` clears it (D17). One single-column
+    /// write of the owner and `updated_at` that cannot clobber a concurrent
+    /// edit of any other field; returns the updated goal. An unknown id is a
+    /// `NotFound`.
+    async fn set_owner(
+        &self,
+        id: GoalId,
+        owner_id: Option<UserId>,
+    ) -> Result<Goal, RepositoryError>;
+
     async fn delete(&self, id: GoalId) -> Result<(), RepositoryError>;
 
     /// One page of the goals matching `filter` (roadmap 3.10), in the default
@@ -65,7 +75,7 @@ pub mod fakes {
     use std::sync::Mutex;
 
     use chrono::{DateTime, NaiveDate, Utc};
-    use domain::{Goal, GoalId, Status};
+    use domain::{Goal, GoalId, Status, UserId};
 
     use super::{GoalListFilter, GoalRepository};
     use crate::pagination::{Page, PageRequest};
@@ -194,6 +204,22 @@ pub mod fakes {
             Ok(())
         }
 
+        async fn set_owner(
+            &self,
+            id: GoalId,
+            owner_id: Option<UserId>,
+        ) -> Result<Goal, RepositoryError> {
+            let mut goals = self.goals.lock().unwrap();
+            let Some(goal) = goals.iter_mut().find(|existing| existing.id == id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the column and the
+            // updated_at timestamp.
+            goal.owner_id = owner_id;
+            goal.updated_at = Utc::now();
+            Ok(goal.clone())
+        }
+
         async fn delete(&self, id: GoalId) -> Result<(), RepositoryError> {
             let mut goals = self.goals.lock().unwrap();
             let before = goals.len();
@@ -247,6 +273,7 @@ pub mod fakes {
                 status,
                 status_override,
                 target_date,
+                owner_id: None,
                 created_at,
                 updated_at: created_at,
             }

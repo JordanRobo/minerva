@@ -1,7 +1,7 @@
 //! Persistence port for [`Task`]s.
 
 use chrono::NaiveDate;
-use domain::{MilestoneId, Task, TaskId, TaskStatus};
+use domain::{MilestoneId, Task, TaskId, TaskStatus, UserId};
 
 use crate::pagination::{Page, PageRequest};
 use crate::ports::RepositoryError;
@@ -25,6 +25,10 @@ pub struct TaskListFilter {
     pub target_after: Option<NaiveDate>,
     /// Inclusive upper bound on `target_date` (see [`Self::target_after`]).
     pub target_before: Option<NaiveDate>,
+    /// Restrict to the tasks assigned to this person; `None` means any,
+    /// including unassigned ones. An id no user or task has simply yields an
+    /// empty page (D16).
+    pub assignee_id: Option<UserId>,
 }
 
 #[async_trait::async_trait]
@@ -44,6 +48,16 @@ pub trait TaskRepository: Send + Sync {
     /// write that cannot clobber fields another writer changed in between;
     /// returns the updated task. An unknown id is a `NotFound`.
     async fn set_status(&self, id: TaskId, status: TaskStatus) -> Result<Task, RepositoryError>;
+
+    /// Set or clear the task's assignee; `None` clears it (D17). One single-column
+    /// write of the assignee and `updated_at` that cannot clobber a concurrent
+    /// edit of any other field; returns the updated task. An unknown id is a
+    /// `NotFound`.
+    async fn set_assignee(
+        &self,
+        id: TaskId,
+        assignee_id: Option<UserId>,
+    ) -> Result<Task, RepositoryError>;
 
     async fn delete(&self, id: TaskId) -> Result<(), RepositoryError>;
 
@@ -65,7 +79,7 @@ pub mod fakes {
     use std::sync::Mutex;
 
     use chrono::{DateTime, NaiveDate, Utc};
-    use domain::{MilestoneId, Task, TaskId, TaskStatus};
+    use domain::{MilestoneId, Task, TaskId, TaskStatus, UserId};
 
     use super::{TaskListFilter, TaskRepository};
     use crate::pagination::{Page, PageRequest};
@@ -98,6 +112,10 @@ pub mod fakes {
                     }
                     && match filter.target_before {
                         Some(before) => task.target_date.is_some_and(|date| date <= before),
+                        None => true,
+                    }
+                    && match filter.assignee_id {
+                        Some(assignee_id) => task.assignee_id == Some(assignee_id),
                         None => true,
                     }
             })
@@ -206,6 +224,22 @@ pub mod fakes {
             Ok(task.clone())
         }
 
+        async fn set_assignee(
+            &self,
+            id: TaskId,
+            assignee_id: Option<UserId>,
+        ) -> Result<Task, RepositoryError> {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.iter_mut().find(|existing| existing.id == id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the column and the
+            // updated_at timestamp.
+            task.assignee_id = assignee_id;
+            task.updated_at = Utc::now();
+            Ok(task.clone())
+        }
+
         async fn delete(&self, id: TaskId) -> Result<(), RepositoryError> {
             let mut tasks = self.tasks.lock().unwrap();
             let before = tasks.len();
@@ -259,6 +293,7 @@ pub mod fakes {
                 description: None,
                 status,
                 target_date,
+                assignee_id: None,
                 created_at,
                 updated_at: created_at,
             }
@@ -526,6 +561,174 @@ pub mod fakes {
             .await;
             assert!(page.items.is_empty());
             assert_eq!(page.total, 0);
+        }
+
+        #[tokio::test]
+        async fn the_assignee_filter_matches_only_that_persons_tasks() {
+            let user_a = UserId::new();
+            let user_b = UserId::new();
+            let mut tasks = vec![
+                task(
+                    1,
+                    "Alpha",
+                    TaskStatus::Backlog,
+                    None,
+                    Some(date(1, 5)),
+                    at(1),
+                ),
+                task(2, "Beta", TaskStatus::ToDo, None, Some(date(1, 10)), at(2)),
+                task(3, "Gamma", TaskStatus::Done, None, None, at(3)),
+            ];
+            tasks[0].assignee_id = Some(user_a);
+            tasks[1].assignee_id = Some(user_a);
+            tasks[2].assignee_id = Some(user_b);
+
+            let page = list(
+                &tasks,
+                &TaskListFilter {
+                    assignee_id: Some(user_a),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert_eq!(ids(&page), vec![1, 2]);
+            assert_eq!(page.total, 2);
+        }
+
+        #[tokio::test]
+        async fn an_unknown_assignee_matches_nothing() {
+            let (_milestone, tasks) = fixtures();
+            // The fixture tasks are all unassigned, so any id — known or not —
+            // matches nothing (D16: a filter never 404s).
+            let page = list(
+                &tasks,
+                &TaskListFilter {
+                    assignee_id: Some(UserId::new()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(page.items.is_empty());
+            assert_eq!(page.total, 0);
+        }
+
+        #[tokio::test]
+        async fn the_assignee_filter_combines_with_the_others_and_keeps_the_default_order() {
+            let user_a = UserId::new();
+            let mut tasks = vec![
+                task(
+                    1,
+                    "Alpha",
+                    TaskStatus::Backlog,
+                    None,
+                    Some(date(1, 5)),
+                    at(1),
+                ),
+                task(2, "Beta", TaskStatus::ToDo, None, Some(date(1, 10)), at(2)),
+                task(
+                    3,
+                    "Gamma",
+                    TaskStatus::InProgress,
+                    None,
+                    Some(date(1, 1)),
+                    at(3),
+                ),
+            ];
+            for task in &mut tasks {
+                task.assignee_id = Some(user_a);
+            }
+
+            // Alone: all three, still in the default order (dates 1, 5, 10).
+            let page = list(
+                &tasks,
+                &TaskListFilter {
+                    assignee_id: Some(user_a),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert_eq!(ids(&page), vec![3, 1, 2]);
+
+            // Combined with columns and a date range: only task 1 (the ToDo
+            // task sits on Jan 10, outside the range).
+            let page = list(
+                &tasks,
+                &TaskListFilter {
+                    assignee_id: Some(user_a),
+                    statuses: vec![TaskStatus::Backlog, TaskStatus::ToDo],
+                    target_after: Some(date(1, 5)),
+                    target_before: Some(date(1, 5)),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert_eq!(ids(&page), vec![1]);
+            assert_eq!(page.total, 1);
+
+            // Combined with a search that matches nothing: empty page.
+            let page = list(
+                &tasks,
+                &TaskListFilter {
+                    assignee_id: Some(user_a),
+                    q: Some("no such title".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(page.items.is_empty());
+            assert_eq!(page.total, 0);
+        }
+
+        #[tokio::test]
+        async fn the_assignee_total_honours_the_filter_but_ignores_paging() {
+            let user_a = UserId::new();
+            let mut tasks: Vec<Task> = (1..=7)
+                .map(|id| {
+                    task(
+                        id,
+                        &format!("t{id}"),
+                        TaskStatus::Backlog,
+                        None,
+                        Some(date(1, 5)),
+                        at(1),
+                    )
+                })
+                .collect();
+            for task in &mut tasks {
+                task.assignee_id = Some(user_a);
+            }
+            let repo = InMemoryTaskRepository::new();
+            for task in &tasks {
+                repo.create(task.clone()).await.unwrap();
+            }
+
+            // A deep page of one: the total still counts all seven matches.
+            let page = repo
+                .list_page(
+                    &TaskListFilter {
+                        assignee_id: Some(user_a),
+                        ..Default::default()
+                    },
+                    &PageRequest::new(Some(1), Some(6)).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.total, 7);
+            assert_eq!(page.items.len(), 1);
+
+            // An offset past the end is an empty page with the right total.
+            let page = repo
+                .list_page(
+                    &TaskListFilter {
+                        assignee_id: Some(user_a),
+                        ..Default::default()
+                    },
+                    &PageRequest::new(None, Some(100)).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(page.items.is_empty());
+            assert_eq!(page.total, 7);
         }
 
         #[tokio::test]

@@ -33,5 +33,5 @@ pub use sso_group_rule::{SsoGroupRule, SsoGroupRuleId, resolve_role};
 pub use status::{Status, StatusSource};
 pub use task::{Task, TaskId, TaskStatus};
 pub use task_relation::{TaskRelation, TaskRelationId, TaskRelationType};
-pub use user::{User, UserId};
+pub use user::{User, UserId, UserSummary};
 pub use user_identity::{UserIdentity, UserIdentityId};

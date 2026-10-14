@@ -3,8 +3,9 @@
 //! `{items, total, limit, offset}` envelope whose items are the standard task
 //! shape, pages in the fixed order (target date ascending with undated tasks
 //! last, then created_at, then id), walks every match exactly once, defaults
-//! to 50 per page, honours the status/milestone/search/date filters (an
-//! unknown milestone is an empty page, not an error), and answers a 400
+//! to 50 per page, honours the status/milestone/assignee/search/date filters
+//! (an unknown milestone or assignee is an empty page, not an error), and
+//! answers a 400
 //! `invalid_query` naming the offending parameter for any malformed query
 //! value — including one the extractor itself cannot parse.
 
@@ -197,6 +198,7 @@ fn list_task(
         description: None,
         status,
         target_date,
+        assignee_id: None,
         created_at,
         updated_at: created_at,
     }
@@ -269,6 +271,7 @@ async fn the_list_answers_with_the_page_envelope_and_standard_task_items() {
     assert_eq!(
         keys(item),
         [
+            "assignee",
             "created_at",
             "description",
             "id",
@@ -595,6 +598,7 @@ async fn the_status_milestone_and_search_filters_narrow_the_page() {
         status: domain::Status::OnTrack,
         status_override: None,
         target_date: Some(date(9, 1)),
+        owner_id: None,
         created_at: at(1, 1),
         updated_at: at(1, 1),
     };
@@ -810,6 +814,7 @@ async fn invalid_query_values_are_400s_naming_the_parameter() {
         ("?offset=abc", "offset"),
         ("?status=bogus", "status"),
         ("?milestone_id=not-a-uuid", "milestone_id"),
+        ("?assignee_id=not-a-uuid", "assignee_id"),
         ("?target_after=banana", "target_after"),
         ("?target_before=2026-13-40", "target_before"),
         (&format!("?q={}", "x".repeat(101)), "q"),
@@ -848,5 +853,184 @@ async fn invalid_query_values_are_400s_naming_the_parameter() {
     );
     assert_eq!(res.status(), StatusCode::OK);
 
+    delete_user(&pool, user.id);
+}
+
+#[actix_web::test]
+async fn the_assignee_filter_returns_only_that_persons_tasks() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let app = test_app!(&url);
+
+    let (user, token) = staff(&pool).await;
+    // The FK means the assignees must be real user rows.
+    let person_a = create_user(&pool, unique_email("assignee-a"), Role::Staff).await;
+    let person_b = create_user(&pool, unique_email("assignee-b"), Role::Staff).await;
+    let tasks = PostgresTaskRepository::new(pool.clone());
+    let prefix = format!("asg-{}", Uuid::new_v4().simple());
+
+    let mut a1 = list_task(&prefix, 1, TaskStatus::Backlog, Some(date(6, 5)), at(1, 1));
+    a1.assignee_id = Some(person_a.id);
+    let a1 = tasks.create(a1).await.expect("create task");
+    let mut a2 = list_task(&prefix, 2, TaskStatus::ToDo, Some(date(6, 10)), at(1, 2));
+    a2.assignee_id = Some(person_a.id);
+    let a2 = tasks.create(a2).await.expect("create task");
+    let mut b1 = list_task(
+        &prefix,
+        3,
+        TaskStatus::InProgress,
+        Some(date(6, 1)),
+        at(1, 3),
+    );
+    b1.assignee_id = Some(person_b.id);
+    let b1 = tasks.create(b1).await.expect("create task");
+    let unassigned = tasks
+        .create(list_task(
+            &prefix,
+            4,
+            TaskStatus::Backlog,
+            Some(date(6, 7)),
+            at(1, 4),
+        ))
+        .await
+        .expect("create task");
+
+    let app_ref = &app;
+    let token_ref: &str = &token;
+    let get = |uri: String| async move {
+        let res = request!(
+            app_ref,
+            Method::GET,
+            uri,
+            Some(token_ref),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(res.status(), StatusCode::OK);
+        json_of(res).await
+    };
+
+    // The filter alone: only person A's tasks, in the shared default order.
+    let json = get(format!(
+        "/api/tasks?q={prefix}&assignee_id={}",
+        person_a.id.0
+    ))
+    .await;
+    assert_eq!(item_ids(&json), vec![a1.id.0, a2.id.0]);
+    assert_eq!(json["total"], 2);
+
+    // The envelope and the item's assignee summary keep their shapes.
+    assert_eq!(
+        keys(&json),
+        ["items", "limit", "offset", "total"].into_iter().collect()
+    );
+    let item = &json["items"][0];
+    assert_eq!(item["assignee"]["id"], person_a.id.0.to_string());
+    assert_eq!(
+        keys(&item["assignee"]),
+        ["active", "display_name", "id"].into_iter().collect()
+    );
+
+    // It combines with the other filters: only A's ToDo task is on/after 6/10.
+    let json = get(format!(
+        "/api/tasks?q={prefix}&assignee_id={}&status=to_do&target_after=2026-06-10",
+        person_a.id.0
+    ))
+    .await;
+    assert_eq!(item_ids(&json), vec![a2.id.0]);
+    assert_eq!(json["total"], 1);
+
+    // Without the filter, unassigned tasks are in the page...
+    let json = get(format!("/api/tasks?q={prefix}")).await;
+    assert_eq!(json["total"], 4);
+    assert!(item_ids(&json).contains(&unassigned.id.0));
+
+    // ...and an id no task is assigned to answers an empty page, not an error.
+    let json = get(format!(
+        "/api/tasks?q={prefix}&assignee_id={}",
+        Uuid::new_v4()
+    ))
+    .await;
+    assert!(item_ids(&json).is_empty());
+    assert_eq!(json["total"], 0);
+
+    for task in [a1, a2, b1, unassigned] {
+        tasks.delete(task.id).await.expect("cleanup task");
+    }
+    delete_user(&pool, person_a.id);
+    delete_user(&pool, person_b.id);
+    delete_user(&pool, user.id);
+}
+
+#[actix_web::test]
+async fn assignee_paging_walks_tasks_sharing_a_target_date_exactly_once() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let app = test_app!(&url);
+
+    let (user, token) = staff(&pool).await;
+    let person_a = create_user(&pool, unique_email("assignee-page"), Role::Staff).await;
+    let tasks = PostgresTaskRepository::new(pool.clone());
+    let prefix = format!("asg-{}", Uuid::new_v4().simple());
+    // Five rows that all tie on date and created_at under one assignee: the id
+    // is the only thing keeping the pages stable.
+    let mut created = Vec::new();
+    for n in 1..=5u32 {
+        let mut task = list_task(&prefix, n, TaskStatus::Backlog, Some(date(6, 1)), at(1, 1));
+        task.assignee_id = Some(person_a.id);
+        created.push(tasks.create(task).await.expect("create task"));
+    }
+
+    let mut seen = Vec::new();
+    for offset in [0i64, 2, 4] {
+        let res = request!(
+            &app,
+            Method::GET,
+            format!(
+                "/api/tasks?q={prefix}&assignee_id={}&limit=2&offset={offset}",
+                person_a.id.0
+            ),
+            Some(&token),
+            None::<&serde_json::Value>
+        );
+        assert_eq!(res.status(), StatusCode::OK);
+        let json = json_of(res).await;
+        // The total honours the filter but ignores paging...
+        assert_eq!(json["total"], 5);
+        // ...and the pages do not overlap.
+        seen.extend(item_ids(&json));
+    }
+
+    let mut expected: Vec<Uuid> = created.iter().map(|task| task.id.0).collect();
+    expected.sort();
+    let mut walked = seen.clone();
+    walked.sort();
+    assert_eq!(walked, expected, "every match exactly once");
+
+    // An offset past the end is an empty page with the right total.
+    let res = request!(
+        &app,
+        Method::GET,
+        format!(
+            "/api/tasks?q={prefix}&assignee_id={}&limit=2&offset=9",
+            person_a.id.0
+        ),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(res.status(), StatusCode::OK);
+    let json = json_of(res).await;
+    assert!(json["items"].as_array().expect("an items array").is_empty());
+    assert_eq!(json["total"], 5);
+
+    for task in created {
+        tasks.delete(task.id).await.expect("cleanup task");
+    }
+    delete_user(&pool, person_a.id);
     delete_user(&pool, user.id);
 }

@@ -85,6 +85,7 @@ impl GoalMilestoneRepository for PostgresGoalMilestoneRepository {
                     milestones::created_at,
                     milestones::updated_at,
                     milestones::status_override,
+                    milestones::owner_id,
                 ))
                 .load(conn)
                 .map_err(map_diesel_error)?;
@@ -117,6 +118,7 @@ impl GoalMilestoneRepository for PostgresGoalMilestoneRepository {
                     goals::created_at,
                     goals::updated_at,
                     goals::status_override,
+                    goals::owner_id,
                 ))
                 .load(conn)
                 .map_err(map_diesel_error)?;
@@ -169,6 +171,7 @@ impl GoalMilestoneRepository for PostgresGoalMilestoneRepository {
                     milestones::created_at,
                     milestones::updated_at,
                     milestones::status_override,
+                    milestones::owner_id,
                 ))
                 .limit(limit)
                 .offset(offset)
@@ -229,6 +232,7 @@ impl GoalMilestoneRepository for PostgresGoalMilestoneRepository {
                     goals::created_at,
                     goals::updated_at,
                     goals::status_override,
+                    goals::owner_id,
                 ))
                 .limit(limit)
                 .offset(offset)

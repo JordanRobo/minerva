@@ -188,6 +188,7 @@ fn test_goal(status: Status) -> Goal {
         status,
         status_override: None,
         target_date: None,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     }
@@ -203,6 +204,7 @@ fn test_milestone(status: Status) -> Milestone {
         status,
         status_override: None,
         target_date: None,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     }

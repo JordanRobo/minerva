@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::milestone::Milestone;
 use crate::status::{Status, StatusSource};
+use crate::user::UserId;
 
 /// Identifier for a [`Goal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -38,6 +39,10 @@ pub struct Goal {
     pub status_override: Option<Status>,
     /// The date this goal is expected to be finished by, if one was set.
     pub target_date: Option<NaiveDate>,
+    /// The user responsible for this goal, if one has been chosen (D17). A
+    /// goal may exist before anyone owns it; the domain does not check that
+    /// the user exists — that is an application concern.
+    pub owner_id: Option<UserId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -146,6 +151,7 @@ mod tests {
             status,
             status_override: None,
             target_date: None,
+            owner_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -160,6 +166,7 @@ mod tests {
             status: Status::OnTrack,
             status_override: None,
             target_date: None,
+            owner_id: None,
             created_at: now,
             updated_at: now,
         }

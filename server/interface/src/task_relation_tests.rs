@@ -175,6 +175,7 @@ fn test_task(title: &str) -> Task {
         description: None,
         status: TaskStatus::ToDo,
         target_date: None,
+        assignee_id: None,
         created_at: now,
         updated_at: now,
     }

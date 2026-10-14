@@ -4,7 +4,7 @@ use application::pagination::{Page, PageRequest};
 use application::ports::{RepositoryError, TaskListFilter, TaskRepository};
 use chrono::Utc;
 use diesel::prelude::*;
-use domain::{Task, TaskId, TaskStatus};
+use domain::{Task, TaskId, TaskStatus, UserId};
 use uuid::Uuid;
 
 use crate::db::{PgPool, run_on_postgres};
@@ -37,6 +37,7 @@ impl TaskRepository for PostgresTaskRepository {
                     tasks::description.eq(task.description.as_deref()),
                     tasks::status.eq(task_status_to_db(task.status)),
                     tasks::target_date.eq(task.target_date),
+                    tasks::assignee_id.eq(task.assignee_id.map(|u| u.0)),
                     tasks::created_at.eq(&task.created_at),
                     tasks::updated_at.eq(&task.updated_at),
                 ))
@@ -89,7 +90,9 @@ impl TaskRepository for PostgresTaskRepository {
                 .execute(conn)
                 .map_err(map_diesel_error)?;
             // A task that vanished between read and write is a conflict the
-            // caller needs to see, not a silent no-op.
+            // caller needs to see, not a silent no-op. The assignee column is
+            // deliberately absent: an ordinary update must never change or
+            // clear it (D17).
             if updated == 0 {
                 return Err(RepositoryError::NotFound);
             }
@@ -107,6 +110,29 @@ impl TaskRepository for PostgresTaskRepository {
             let row: TaskRow = diesel::update(tasks::table.find(id.0))
                 .set((
                     tasks::status.eq(task_status_to_db(status)),
+                    tasks::updated_at.eq(Utc::now()),
+                ))
+                .returning(tasks::all_columns)
+                .get_result(conn)
+                .map_err(map_diesel_error)?;
+            task_from_row(row)
+        })
+        .await
+    }
+
+    async fn set_assignee(
+        &self,
+        id: TaskId,
+        assignee_id: Option<UserId>,
+    ) -> Result<Task, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            // One UPDATE ... RETURNING that writes only the assignee column
+            // and updated_at, so a concurrent edit of any other field survives
+            // it (D17). A task that does not exist matches no row.
+            let row: TaskRow = diesel::update(tasks::table.find(id.0))
+                .set((
+                    tasks::assignee_id.eq(assignee_id.map(|u| u.0)),
                     tasks::updated_at.eq(Utc::now()),
                 ))
                 .returning(tasks::all_columns)
@@ -159,6 +185,11 @@ impl TaskRepository for PostgresTaskRepository {
                 }
                 if let Some(milestone_id) = filter.milestone_id {
                     query = query.filter(tasks::milestone_id.eq(milestone_id.0));
+                }
+                // Served by idx_tasks_assignee_id (roadmap 3.11): one index
+                // scan, then the remaining filters and the shared order.
+                if let Some(assignee_id) = filter.assignee_id {
+                    query = query.filter(tasks::assignee_id.eq(assignee_id.0));
                 }
                 if let Some(needle) = &filter.q {
                     query = query.filter(tasks::title.ilike(escape_like_pattern(needle)));

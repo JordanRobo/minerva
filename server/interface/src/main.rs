@@ -11,6 +11,7 @@ mod invites;
 mod maintenance;
 mod milestones;
 mod openapi;
+mod people;
 mod redirect;
 mod routes;
 mod sso_rules;
@@ -31,6 +32,9 @@ mod goal_milestone_tests;
 mod milestone_list_tests;
 
 #[cfg(test)]
+mod owner_tests;
+
+#[cfg(test)]
 mod public_routes;
 
 #[cfg(test)]
@@ -38,6 +42,9 @@ mod rate_limit_tests;
 
 #[cfg(test)]
 mod status_override_tests;
+
+#[cfg(test)]
+mod task_assignee_tests;
 
 #[cfg(test)]
 mod task_list_tests;
@@ -51,6 +58,7 @@ mod task_status_tests;
 use actix_web::cookie::Key;
 use actix_web::{App, HttpServer, web};
 use application::account_links::AccountLinkService;
+use application::assignment::AssignmentService;
 use application::auth::SessionService;
 use application::auth::oidc::OidcAuthProvider;
 use application::auth::password::PasswordAuthProvider;
@@ -206,6 +214,17 @@ async fn main() -> std::io::Result<()> {
     // registered as trait objects (the same way sessions below are).
     let users: Arc<dyn UserRepository> = Arc::new(PostgresUserRepository::new(pool.clone()));
     let users_data: web::Data<dyn UserRepository> = users.clone().into();
+    // Assignees and owners (roadmap 3.11, D17): set/clear go through the
+    // service so the user-existence and no-op rules live in one place; like
+    // the status-override service it takes ports, over its own repository
+    // instances on the shared pool. No handlers yet: the endpoints land with
+    // the people picker (roadmap 3.11).
+    let assignment_service = web::Data::new(AssignmentService::new(
+        Arc::new(PostgresTaskRepository::new(pool.clone())),
+        Arc::new(PostgresGoalRepository::new(pool.clone())),
+        Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+        users.clone(),
+    ));
     // The token store behind invites and password resets (roadmap 2.6); the
     // account-link service below and the OIDC provider (when enabled) both
     // take it — the latter to consume a pending invite when an invited email
@@ -437,6 +456,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(goal_milestone_link_service.clone())
             .app_data(task_relation_service.clone())
             .app_data(task_status_service.clone())
+            .app_data(assignment_service.clone())
             .app_data(task_list_service.clone())
             .app_data(goal_list_service.clone())
             .app_data(milestone_list_service.clone())

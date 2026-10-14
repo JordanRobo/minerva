@@ -3,7 +3,8 @@
 use application::ports::{AccessChange, AccessChangeError, RepositoryError, UserRepository};
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
-use domain::{Role, User, UserId};
+use domain::{Role, User, UserId, UserSummary};
+use uuid::Uuid;
 
 use crate::db::{PgPool, run_on_postgres, run_on_postgres_with};
 use crate::error::map_diesel_error;
@@ -175,6 +176,67 @@ impl UserRepository for PostgresUserRepository {
                 .load(conn)
                 .map_err(map_diesel_error)?;
             rows.into_iter().map(user_from_row).collect()
+        })
+        .await
+    }
+
+    async fn summaries_by_ids(&self, ids: &[UserId]) -> Result<Vec<UserSummary>, RepositoryError> {
+        // Owned before the closure: the query runs on a worker thread and
+        // cannot borrow the caller's slice.
+        let id_set: Vec<Uuid> = ids.iter().map(|id| id.0).collect();
+        if id_set.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            // The email is read only to feed the blank-display-name fallback;
+            // it never leaves the repository (D17).
+            let rows: Vec<(Uuid, String, String, Option<DateTime<Utc>>)> = users::table
+                .filter(users::id.eq_any(id_set))
+                .select((
+                    users::id,
+                    users::display_name,
+                    users::email,
+                    users::deactivated_at,
+                ))
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            Ok(rows
+                .into_iter()
+                .map(|(id, display_name, email, deactivated_at)| {
+                    UserSummary::new(UserId(id), &display_name, &email, deactivated_at.is_none())
+                })
+                .collect())
+        })
+        .await
+    }
+
+    async fn list_active_summaries(&self) -> Result<Vec<UserSummary>, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, |conn| {
+            let rows: Vec<(Uuid, String, String)> = users::table
+                .filter(users::deactivated_at.is_null())
+                .select((users::id, users::display_name, users::email))
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            // Ordered by the *effective* display name (the value
+            // [`UserSummary::new`] falls back to), so the list reads in the
+            // order it displays. The user table is small (a school's staff),
+            // so sorting in Rust is cheaper than a SQL expression the fake
+            // would have to re-derive.
+            let mut summaries = rows
+                .into_iter()
+                .map(|(id, display_name, email)| {
+                    UserSummary::new(UserId(id), &display_name, &email, true)
+                })
+                .collect::<Vec<_>>();
+            summaries.sort_by(|a, b| {
+                a.display_name
+                    .to_lowercase()
+                    .cmp(&b.display_name.to_lowercase())
+                    .then_with(|| a.id.0.cmp(&b.id.0))
+            });
+            Ok(summaries)
         })
         .await
     }

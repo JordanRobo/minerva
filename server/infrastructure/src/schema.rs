@@ -34,6 +34,7 @@ diesel::table! {
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
         status_override -> Nullable<Text>,
+        owner_id -> Nullable<Uuid>,
     }
 }
 
@@ -48,6 +49,7 @@ diesel::table! {
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
         status_override -> Nullable<Text>,
+        owner_id -> Nullable<Uuid>,
     }
 }
 
@@ -112,6 +114,7 @@ diesel::table! {
         target_date -> Nullable<Date>,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
+        assignee_id -> Nullable<Uuid>,
     }
 }
 
@@ -147,10 +150,13 @@ diesel::table! {
 diesel::joinable!(account_tokens -> users (user_id));
 diesel::joinable!(goal_milestones -> goals (goal_id));
 diesel::joinable!(goal_milestones -> milestones (milestone_id));
+diesel::joinable!(goals -> users (owner_id));
+diesel::joinable!(milestones -> users (owner_id));
 diesel::joinable!(progress_snapshots -> goals (goal_id));
 diesel::joinable!(progress_snapshots -> milestones (milestone_id));
 diesel::joinable!(sessions -> users (user_id));
 diesel::joinable!(tasks -> milestones (milestone_id));
+diesel::joinable!(tasks -> users (assignee_id));
 diesel::joinable!(user_identities -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(

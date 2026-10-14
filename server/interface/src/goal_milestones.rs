@@ -5,6 +5,7 @@
 
 use actix_web::{HttpResponse, web};
 use application::goal_milestone_links::GoalMilestoneLinkService;
+use application::ports::UserRepository;
 use domain::{GoalId, MilestoneId};
 use serde::Deserialize;
 use serde::de::Deserializer;
@@ -12,9 +13,10 @@ use utoipa::IntoParams;
 use uuid::Uuid;
 
 use crate::access::{EditAccess, ViewAccess};
-use crate::error::{ApiError, goal_milestone_link_error_response};
-use crate::goals::{GoalPage, GoalResponse, collect_list_query, parse_page_request};
-use crate::milestones::{MilestonePage, MilestoneResponse};
+use crate::error::{ApiError, goal_milestone_link_error_response, repo_error_response};
+use crate::goals::{GoalPage, collect_list_query, goal_response, parse_page_request};
+use crate::milestones::{MilestonePage, milestone_response};
+use crate::people::resolve_summaries;
 
 /// Link Goal to Milestone
 ///
@@ -139,6 +141,7 @@ impl<'de> Deserialize<'de> for LinkListQuery {
 )]
 pub async fn list_goal_milestones(
     links: web::Data<GoalMilestoneLinkService>,
+    users: web::Data<dyn UserRepository>,
     _access: ViewAccess,
     path: web::Path<Uuid>,
     query: web::Query<LinkListQuery>,
@@ -148,12 +151,25 @@ pub async fn list_goal_milestones(
         .milestones_for_goal_page(GoalId(*path), &page_request)
         .await
     {
-        Ok(page) => Ok(HttpResponse::Ok().json(MilestonePage {
-            items: page.items.iter().map(MilestoneResponse::from).collect(),
-            total: page.total,
-            limit: page.limit,
-            offset: page.offset,
-        })),
+        Ok(page) => {
+            // One user query for the whole page's owners (D17).
+            let people = resolve_summaries(
+                users.as_ref(),
+                page.items.iter().map(|milestone| milestone.owner_id),
+            )
+            .await
+            .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(MilestonePage {
+                items: page
+                    .items
+                    .iter()
+                    .map(|milestone| milestone_response(milestone, &people))
+                    .collect(),
+                total: page.total,
+                limit: page.limit,
+                offset: page.offset,
+            }))
+        }
         Err(err) => Err(goal_milestone_link_error_response(err)),
     }
 }
@@ -185,6 +201,7 @@ pub async fn list_goal_milestones(
 )]
 pub async fn list_milestone_goals(
     links: web::Data<GoalMilestoneLinkService>,
+    users: web::Data<dyn UserRepository>,
     _access: ViewAccess,
     path: web::Path<Uuid>,
     query: web::Query<LinkListQuery>,
@@ -194,12 +211,23 @@ pub async fn list_milestone_goals(
         .goals_for_milestone_page(MilestoneId(*path), &page_request)
         .await
     {
-        Ok(page) => Ok(HttpResponse::Ok().json(GoalPage {
-            items: page.items.iter().map(GoalResponse::from).collect(),
-            total: page.total,
-            limit: page.limit,
-            offset: page.offset,
-        })),
+        Ok(page) => {
+            // One user query for the whole page's owners (D17).
+            let people =
+                resolve_summaries(users.as_ref(), page.items.iter().map(|goal| goal.owner_id))
+                    .await
+                    .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(GoalPage {
+                items: page
+                    .items
+                    .iter()
+                    .map(|goal| goal_response(goal, &people))
+                    .collect(),
+                total: page.total,
+                limit: page.limit,
+                offset: page.offset,
+            }))
+        }
         Err(err) => Err(goal_milestone_link_error_response(err)),
     }
 }

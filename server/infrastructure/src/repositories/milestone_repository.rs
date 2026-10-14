@@ -2,9 +2,10 @@
 
 use application::pagination::{Page, PageRequest};
 use application::ports::{MilestoneListFilter, MilestoneRepository, RepositoryError};
+use chrono::Utc;
 use diesel::prelude::*;
 use diesel::sql_types::{Nullable, Text};
-use domain::{Milestone, MilestoneId, Status, StatusSource};
+use domain::{Milestone, MilestoneId, Status, StatusSource, UserId};
 
 use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
@@ -45,6 +46,7 @@ impl MilestoneRepository for PostgresMilestoneRepository {
                     milestones::status.eq(status_to_db(milestone.status)),
                     milestones::status_source.eq(status_source_to_db(milestone.status_source())),
                     milestones::target_date.eq(milestone.target_date),
+                    milestones::owner_id.eq(milestone.owner_id.map(|u| u.0)),
                     milestones::created_at.eq(&milestone.created_at),
                     milestones::updated_at.eq(&milestone.updated_at),
                     milestones::status_override.eq(milestone.status_override.map(status_to_db)),
@@ -93,9 +95,9 @@ impl MilestoneRepository for PostgresMilestoneRepository {
                 .execute(conn)
                 .map_err(map_diesel_error)?;
             // A milestone that vanished between read and write is a conflict
-            // the caller needs to see, not a silent no-op. The override
-            // column is deliberately absent: an ordinary update must never
-            // clear or change it (roadmap 3.2).
+            // the caller needs to see, not a silent no-op. The override and
+            // owner columns are deliberately absent: an ordinary update must
+            // never clear or change them (roadmap 3.2, D17).
             if updated == 0 {
                 return Err(RepositoryError::NotFound);
             }
@@ -128,6 +130,29 @@ impl MilestoneRepository for PostgresMilestoneRepository {
                 return Err(RepositoryError::NotFound);
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn set_owner(
+        &self,
+        id: MilestoneId,
+        owner_id: Option<UserId>,
+    ) -> Result<Milestone, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            // One UPDATE ... RETURNING that writes only the owner column and
+            // updated_at, so a concurrent edit of any other field survives it
+            // (D17). A milestone that does not exist matches no row.
+            let row: MilestoneRow = diesel::update(milestones::table.find(id.0))
+                .set((
+                    milestones::owner_id.eq(owner_id.map(|u| u.0)),
+                    milestones::updated_at.eq(Utc::now()),
+                ))
+                .returning(milestones::all_columns)
+                .get_result(conn)
+                .map_err(map_diesel_error)?;
+            milestone_from_row(row)
         })
         .await
     }

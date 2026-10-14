@@ -13,10 +13,12 @@ use application::ports::{
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
+use std::collections::HashMap;
+
 use domain::{
     Goal, GoalId, GoalMilestone, Milestone, MilestoneId, ProgressSnapshot, ProgressTarget, Role,
     Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId, TaskRelationType, TaskStatus,
-    User, UserId, UserIdentity,
+    User, UserId, UserIdentity, UserSummary,
 };
 
 /// `Utc::now()` has nanosecond precision but Postgres `timestamptz` only
@@ -71,6 +73,7 @@ fn test_goal() -> Goal {
         status: Status::OnTrack,
         status_override: None,
         target_date: None,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     }
@@ -85,6 +88,7 @@ fn test_milestone() -> Milestone {
         status: Status::OnTrack,
         status_override: None,
         target_date: None,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     }
@@ -170,6 +174,7 @@ fn test_task(milestone_id: Option<MilestoneId>) -> Task {
         description: None,
         status: TaskStatus::Backlog,
         target_date: None,
+        assignee_id: None,
         created_at: now,
         updated_at: now,
     }
@@ -207,6 +212,7 @@ async fn goal_repository_round_trip() {
         status: Status::OnTrack,
         status_override: None,
         target_date: None,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -244,6 +250,7 @@ async fn milestone_repository_round_trip() {
         status: Status::OnTrack,
         status_override: None,
         target_date: None,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -289,6 +296,7 @@ async fn goal_status_override_round_trip() {
         status: Status::OnTrack,
         status_override: None,
         target_date: None,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -350,6 +358,7 @@ async fn milestone_status_override_round_trip() {
         status: Status::OnTrack,
         status_override: None,
         target_date: None,
+        owner_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -397,6 +406,324 @@ async fn milestone_status_override_round_trip() {
     assert_eq!(cleared.status_source(), StatusSource::Computed);
 
     repo.delete(milestone.id).await.unwrap();
+}
+
+/// D17: the owner column round-trips — create persists it, an ordinary update
+/// leaves it alone, set/clear are the only writers, and deleting the user
+/// NULLs the reference.
+#[tokio::test]
+async fn goal_owner_round_trip() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresGoalRepository::new(pool.clone());
+    let users = PostgresUserRepository::new(pool.clone());
+
+    // Any user may be an owner; the repository only stores the reference.
+    let now = now();
+    let user = User {
+        id: UserId::new(),
+        email: format!("owner-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: "Owner test user".into(),
+        role: Role::Staff,
+        deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
+        created_at: now,
+        updated_at: now,
+    };
+    users.create(user.clone()).await.unwrap();
+
+    // create persists the field.
+    let mut goal = test_goal();
+    goal.description = Some("Details".into());
+    goal.target_date = Some(date(3, 1));
+    goal.owner_id = Some(user.id);
+    goal.created_at = at(1, 1);
+    goal.updated_at = at(1, 1);
+    repo.create(goal.clone()).await.unwrap();
+    assert_eq!(repo.find_by_id(goal.id).await.unwrap().unwrap(), goal);
+
+    // An ordinary update neither changes nor clears it (D17): the submitted
+    // entity carries a different owner, the stored column keeps its own.
+    let mut edited = goal.clone();
+    edited.title = "Edited title".into();
+    edited.owner_id = None;
+    repo.update(edited).await.unwrap();
+    let after_update = repo.find_by_id(goal.id).await.unwrap().unwrap();
+    assert_eq!(after_update.title, "Edited title");
+    assert_eq!(after_update.owner_id, Some(user.id));
+
+    // Clearing writes only the column and updated_at...
+    let cleared = repo.set_owner(goal.id, None).await.unwrap();
+    assert_eq!(cleared.owner_id, None);
+    assert_eq!(cleared.title, "Edited title");
+    assert_eq!(cleared.description, Some("Details".into()));
+    assert_eq!(cleared.status, Status::OnTrack);
+    assert_eq!(cleared.status_override, None);
+    assert_eq!(cleared.target_date, Some(date(3, 1)));
+    assert_eq!(cleared.created_at, at(1, 1));
+    assert!(cleared.updated_at > at(1, 1));
+    // ...and the stored row agrees with what the setter returned.
+    assert_eq!(repo.find_by_id(goal.id).await.unwrap().unwrap(), cleared);
+
+    // An unknown id is a typed NotFound.
+    assert!(matches!(
+        repo.set_owner(GoalId::new(), Some(user.id)).await,
+        Err(RepositoryError::NotFound)
+    ));
+
+    // Setting persists and reloads; deleting the user NULLs the reference
+    // (ON DELETE SET NULL, D17).
+    repo.set_owner(goal.id, Some(user.id)).await.unwrap();
+    assert_eq!(
+        repo.find_by_id(goal.id).await.unwrap().unwrap().owner_id,
+        Some(user.id)
+    );
+    {
+        let mut conn = pool.get().expect("pool connection");
+        diesel::sql_query(format!("DELETE FROM users WHERE id = '{}'", user.id.0))
+            .execute(&mut conn)
+            .unwrap();
+    }
+    assert_eq!(
+        repo.find_by_id(goal.id).await.unwrap().unwrap().owner_id,
+        None
+    );
+
+    repo.delete(goal.id).await.unwrap();
+}
+
+/// D17: the milestone owner column round-trips the same way as the goal one.
+#[tokio::test]
+async fn milestone_owner_round_trip() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool.clone());
+    let users = PostgresUserRepository::new(pool.clone());
+
+    // Any user may be an owner; the repository only stores the reference.
+    let now = now();
+    let user = User {
+        id: UserId::new(),
+        email: format!("owner-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: "Owner test user".into(),
+        role: Role::Staff,
+        deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
+        created_at: now,
+        updated_at: now,
+    };
+    users.create(user.clone()).await.unwrap();
+
+    // create persists the field.
+    let mut milestone = test_milestone();
+    milestone.description = Some("Details".into());
+    milestone.target_date = Some(date(3, 1));
+    milestone.owner_id = Some(user.id);
+    milestone.created_at = at(1, 1);
+    milestone.updated_at = at(1, 1);
+    repo.create(milestone.clone()).await.unwrap();
+    assert_eq!(
+        repo.find_by_id(milestone.id).await.unwrap().unwrap(),
+        milestone
+    );
+
+    // An ordinary update neither changes nor clears it (D17): the submitted
+    // entity carries a different owner, the stored column keeps its own.
+    let mut edited = milestone.clone();
+    edited.title = "Edited title".into();
+    edited.owner_id = None;
+    repo.update(edited).await.unwrap();
+    let after_update = repo.find_by_id(milestone.id).await.unwrap().unwrap();
+    assert_eq!(after_update.title, "Edited title");
+    assert_eq!(after_update.owner_id, Some(user.id));
+
+    // Clearing writes only the column and updated_at...
+    let cleared = repo.set_owner(milestone.id, None).await.unwrap();
+    assert_eq!(cleared.owner_id, None);
+    assert_eq!(cleared.title, "Edited title");
+    assert_eq!(cleared.description, Some("Details".into()));
+    assert_eq!(cleared.status, Status::OnTrack);
+    assert_eq!(cleared.status_override, None);
+    assert_eq!(cleared.target_date, Some(date(3, 1)));
+    assert_eq!(cleared.created_at, at(1, 1));
+    assert!(cleared.updated_at > at(1, 1));
+    // ...and the stored row agrees with what the setter returned.
+    assert_eq!(
+        repo.find_by_id(milestone.id).await.unwrap().unwrap(),
+        cleared
+    );
+
+    // An unknown id is a typed NotFound.
+    assert!(matches!(
+        repo.set_owner(MilestoneId::new(), Some(user.id)).await,
+        Err(RepositoryError::NotFound)
+    ));
+
+    // Setting persists and reloads; deleting the user NULLs the reference
+    // (ON DELETE SET NULL, D17).
+    repo.set_owner(milestone.id, Some(user.id)).await.unwrap();
+    assert_eq!(
+        repo.find_by_id(milestone.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        Some(user.id)
+    );
+    {
+        let mut conn = pool.get().expect("pool connection");
+        diesel::sql_query(format!("DELETE FROM users WHERE id = '{}'", user.id.0))
+            .execute(&mut conn)
+            .unwrap();
+    }
+    assert_eq!(
+        repo.find_by_id(milestone.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_id,
+        None
+    );
+
+    repo.delete(milestone.id).await.unwrap();
+}
+
+/// D17: `summaries_by_ids` answers one query for any number of ids, omits
+/// unknown ids, falls back to the email local part for a blank display name,
+/// flags deactivated users instead of omitting them, and never carries the
+/// email or password hash on the summary.
+#[tokio::test]
+async fn user_summaries_by_ids_omits_unknown_ids_and_falls_back_to_the_email() {
+    let Some(pool) = pool() else { return };
+    let users = PostgresUserRepository::new(pool.clone());
+
+    let now = now();
+    let make_user = |display_name: &str, deactivated_at: Option<DateTime<Utc>>| User {
+        id: UserId::new(),
+        email: format!("summary-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: display_name.into(),
+        role: Role::Staff,
+        deactivated_at,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let named = make_user("Named person", None);
+    let blank = make_user("", None);
+    let departed = make_user("Departed person", Some(now));
+    for user in [&named, &blank, &departed] {
+        users.create(user.clone()).await.unwrap();
+    }
+
+    let unknown = UserId::new();
+    let summaries = users
+        .summaries_by_ids(&[named.id, blank.id, departed.id, unknown])
+        .await
+        .unwrap();
+    assert_eq!(summaries.len(), 3, "the unknown id is omitted");
+
+    let by_id: HashMap<UserId, UserSummary> = summaries
+        .into_iter()
+        .map(|summary| (summary.id, summary))
+        .collect();
+    assert_eq!(by_id[&named.id].display_name, "Named person");
+    assert!(by_id[&named.id].active);
+    // A blank display name falls back to the local part of the email.
+    let blank_local = blank.email.split('@').next().unwrap().to_owned();
+    assert_eq!(by_id[&blank.id].display_name, blank_local);
+    assert!(by_id[&blank.id].active);
+    // Deactivated users are flagged, not omitted.
+    assert!(!by_id[&departed.id].active);
+
+    // The summary type carries no email or password hash: rendered in full,
+    // it names neither (a Uuid and a display name contain no '@').
+    for summary in by_id.values() {
+        assert!(!format!("{summary:?}").contains('@'));
+    }
+
+    // An empty id list is an empty result, not an error.
+    assert!(users.summaries_by_ids(&[]).await.unwrap().is_empty());
+
+    {
+        let mut conn = pool.get().expect("pool connection");
+        for user in [named.id, blank.id, departed.id] {
+            diesel::sql_query(format!("DELETE FROM users WHERE id = '{}'", user.0))
+                .execute(&mut conn)
+                .unwrap();
+        }
+    }
+}
+
+/// D17: `list_active_summaries` excludes deactivated users and orders by
+/// display name (case-insensitive) then id. The order is asserted as a
+/// subsequence, because other tests may hold their own rows in the shared
+/// database while this one runs.
+#[tokio::test]
+async fn list_active_summaries_excludes_deactivated_and_orders_by_name_then_id() {
+    let Some(pool) = pool() else { return };
+    let users = PostgresUserRepository::new(pool.clone());
+
+    let now = now();
+    let make_user = |display_name: &str, deactivated_at: Option<DateTime<Utc>>| User {
+        id: UserId::new(),
+        email: format!("list-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: display_name.into(),
+        role: Role::Staff,
+        deactivated_at,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
+        created_at: now,
+        updated_at: now,
+    };
+    // "Zed" sorts before "Alpha" case-sensitively but after it
+    // case-insensitively, so the pair proves the comparison ignores case.
+    // The two "Twin" rows tie on name; the id breaks the tie.
+    let alpha = make_user("Alpha", None);
+    let zed = make_user("Zed", None);
+    let twin_a = make_user("Twin", None);
+    let twin_b = make_user("Twin", None);
+    let departed = make_user("Departed", Some(now));
+    for user in [&alpha, &zed, &twin_a, &twin_b, &departed] {
+        users.create(user.clone()).await.unwrap();
+    }
+
+    let listed = users.list_active_summaries().await.unwrap();
+    assert!(listed.iter().all(|summary| summary.active));
+    assert!(
+        !listed.iter().any(|summary| summary.id == departed.id),
+        "deactivated users are excluded"
+    );
+
+    let mut twins = [twin_a.id, twin_b.id];
+    twins.sort_by_key(|id| id.0);
+    let expected_order = [alpha.id, twins[0], twins[1], zed.id];
+    let positions: HashMap<UserId, usize> = listed
+        .iter()
+        .enumerate()
+        .map(|(position, summary)| (summary.id, position))
+        .collect();
+    for pair in expected_order.windows(2) {
+        assert!(
+            positions[&pair[0]] < positions[&pair[1]],
+            "expected {:?} before {:?} in the listed order",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    {
+        let mut conn = pool.get().expect("pool connection");
+        for user in [alpha.id, zed.id, twin_a.id, twin_b.id, departed.id] {
+            diesel::sql_query(format!("DELETE FROM users WHERE id = '{}'", user.0))
+                .execute(&mut conn)
+                .unwrap();
+        }
+    }
 }
 
 #[tokio::test]
@@ -917,6 +1244,91 @@ async fn task_set_status_does_not_clobber_a_concurrent_update() {
     repo.delete(task.id).await.unwrap();
 }
 
+/// D17: the assignee column round-trips — create persists it, an ordinary
+/// update leaves it alone, set/clear are the only writers, and deleting the
+/// user NULLs the reference.
+#[tokio::test]
+async fn task_assignee_round_trip() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRepository::new(pool.clone());
+    let users = PostgresUserRepository::new(pool.clone());
+
+    // Any user may be an assignee; the repository only stores the reference.
+    let now = now();
+    let user = User {
+        id: UserId::new(),
+        email: format!("assignee-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: "Assignee test user".into(),
+        role: Role::Staff,
+        deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
+        created_at: now,
+        updated_at: now,
+    };
+    users.create(user.clone()).await.unwrap();
+
+    // create persists the field.
+    let mut task = test_task(None);
+    task.description = Some("Details".into());
+    task.target_date = Some(date(3, 1));
+    task.assignee_id = Some(user.id);
+    task.created_at = at(1, 1);
+    task.updated_at = at(1, 1);
+    repo.create(task.clone()).await.unwrap();
+    assert_eq!(repo.find_by_id(task.id).await.unwrap().unwrap(), task);
+
+    // An ordinary update neither changes nor clears it (D17): the submitted
+    // entity carries a different assignee, the stored column keeps its own.
+    let mut edited = task.clone();
+    edited.title = "Edited title".into();
+    edited.assignee_id = None;
+    repo.update(edited).await.unwrap();
+    let after_update = repo.find_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(after_update.title, "Edited title");
+    assert_eq!(after_update.assignee_id, Some(user.id));
+
+    // Clearing writes only the column and updated_at...
+    let cleared = repo.set_assignee(task.id, None).await.unwrap();
+    assert_eq!(cleared.assignee_id, None);
+    assert_eq!(cleared.milestone_id, None);
+    assert_eq!(cleared.title, "Edited title");
+    assert_eq!(cleared.description, Some("Details".into()));
+    assert_eq!(cleared.status, TaskStatus::Backlog);
+    assert_eq!(cleared.target_date, Some(date(3, 1)));
+    assert_eq!(cleared.created_at, at(1, 1));
+    assert!(cleared.updated_at > at(1, 1));
+    // ...and the stored row agrees with what the setter returned.
+    assert_eq!(repo.find_by_id(task.id).await.unwrap().unwrap(), cleared);
+
+    // An unknown id is a typed NotFound.
+    assert!(matches!(
+        repo.set_assignee(TaskId::new(), Some(user.id)).await,
+        Err(RepositoryError::NotFound)
+    ));
+
+    // Setting persists and reloads; deleting the user NULLs the reference
+    // (ON DELETE SET NULL, D17).
+    repo.set_assignee(task.id, Some(user.id)).await.unwrap();
+    assert_eq!(
+        repo.find_by_id(task.id).await.unwrap().unwrap().assignee_id,
+        Some(user.id)
+    );
+    {
+        let mut conn = pool.get().expect("pool connection");
+        diesel::sql_query(format!("DELETE FROM users WHERE id = '{}'", user.id.0))
+            .execute(&mut conn)
+            .unwrap();
+    }
+    assert_eq!(
+        repo.find_by_id(task.id).await.unwrap().unwrap().assignee_id,
+        None
+    );
+
+    repo.delete(task.id).await.unwrap();
+}
+
 /// The default order (roadmap 3.16): target date ascending with undated tasks
 /// last, then created_at, then id.
 #[tokio::test]
@@ -1187,6 +1599,7 @@ async fn task_list_filters_combine_and_date_bounds_are_inclusive() {
         milestone_id: Some(milestone.id),
         target_after: Some(date(6, 1)),
         target_before: Some(date(6, 30)),
+        ..Default::default()
     };
     let page = repo
         .list_page(&filter, &PageRequest::new(None, None).unwrap())
@@ -1280,6 +1693,215 @@ async fn task_list_q_matches_wildcard_characters_literally() {
 
     for task in [&percent, &underscore, &sibling] {
         repo.delete(task.id).await.unwrap();
+    }
+}
+
+/// D17/3.11: the assignee filter — alone, combined with every other filter,
+/// honoured by the total, empty (never an error) for an id no task carries,
+/// and the shared default order kept. Served by idx_tasks_assignee_id.
+#[tokio::test]
+async fn task_list_page_filters_by_assignee() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskRepository::new(pool.clone());
+    let users = PostgresUserRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool.clone());
+
+    // The FK needs real user rows; two people with distinct assignments.
+    let now = now();
+    let person_a = User {
+        id: UserId::new(),
+        email: format!("assignee-filter-a-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: "Assignee filter A".into(),
+        role: Role::Staff,
+        deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
+        created_at: now,
+        updated_at: now,
+    };
+    let person_b = User {
+        id: UserId::new(),
+        email: format!("assignee-filter-b-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: "Assignee filter B".into(),
+        role: Role::Staff,
+        deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
+        created_at: now,
+        updated_at: now,
+    };
+    users.create(person_a.clone()).await.unwrap();
+    users.create(person_b.clone()).await.unwrap();
+
+    let milestone = Milestone {
+        id: MilestoneId::new(),
+        title: format!("assignee-filter-{}", Uuid::new_v4()),
+        description: None,
+        status: Status::OnTrack,
+        status_override: None,
+        target_date: None,
+        owner_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    milestones.create(milestone.clone()).await.unwrap();
+
+    // A unique title prefix keeps the test independent of other rows.
+    let prefix = format!("asgn-filter-{}", Uuid::new_v4());
+    let base = Uuid::new_v4().as_u128();
+    let a1 = task_on(
+        base,
+        Some(milestone.id),
+        TaskStatus::Backlog,
+        &format!("{prefix}-a1"),
+        Some(date(6, 5)),
+        at(1, 1),
+    );
+    let a2 = task_on(
+        base + 1,
+        Some(milestone.id),
+        TaskStatus::ToDo,
+        &format!("{prefix}-a2"),
+        Some(date(6, 10)),
+        at(1, 2),
+    );
+    let b3 = task_on(
+        base + 2,
+        None,
+        TaskStatus::InProgress,
+        &format!("{prefix}-b3"),
+        Some(date(5, 1)),
+        at(1, 3),
+    );
+    let b4 = task_on(
+        base + 3,
+        Some(milestone.id),
+        TaskStatus::Done,
+        &format!("{prefix}-b4"),
+        Some(date(6, 20)),
+        at(1, 4),
+    );
+    let unassigned = task_on(
+        base + 4,
+        None,
+        TaskStatus::Backlog,
+        &format!("{prefix}-un"),
+        Some(date(6, 15)),
+        at(1, 5),
+    );
+    for (task, assignee) in [
+        (&a1, Some(person_a.id)),
+        (&a2, Some(person_a.id)),
+        (&b3, Some(person_b.id)),
+        (&b4, Some(person_b.id)),
+        (&unassigned, None),
+    ] {
+        let mut task = task.clone();
+        task.assignee_id = assignee;
+        repo.create(task).await.unwrap();
+    }
+
+    // Alone: only A's tasks, in the default order (6/5 before 6/10)...
+    let page = repo
+        .list_page(
+            &TaskListFilter {
+                q: Some(prefix.clone()),
+                assignee_id: Some(person_a.id),
+                ..Default::default()
+            },
+            &PageRequest::new(None, None).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|t| t.id.0).collect::<Vec<_>>(),
+        vec![a1.id.0, a2.id.0]
+    );
+    // ...and the total honours the filter (not the whole prefix's five).
+    assert_eq!(page.total, 2);
+
+    // Combined with every other filter at once: still A's two tasks...
+    let page = repo
+        .list_page(
+            &TaskListFilter {
+                q: Some(prefix.clone()),
+                statuses: vec![TaskStatus::Backlog, TaskStatus::ToDo],
+                milestone_id: Some(milestone.id),
+                target_after: Some(date(6, 1)),
+                target_before: Some(date(6, 30)),
+                assignee_id: Some(person_a.id),
+            },
+            &PageRequest::new(None, None).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|t| t.id.0).collect::<Vec<_>>(),
+        vec![a1.id.0, a2.id.0]
+    );
+    // ...and tightening the date bound narrows it further.
+    let page = repo
+        .list_page(
+            &TaskListFilter {
+                q: Some(prefix.clone()),
+                target_after: Some(date(6, 10)),
+                assignee_id: Some(person_a.id),
+                ..Default::default()
+            },
+            &PageRequest::new(None, None).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|t| t.id.0).collect::<Vec<_>>(),
+        vec![a2.id.0]
+    );
+
+    // The filter keeps the shared default order: B's undated-by-comparison
+    // 5/1 task comes before the 6/20 one.
+    let page = repo
+        .list_page(
+            &TaskListFilter {
+                q: Some(prefix.clone()),
+                assignee_id: Some(person_b.id),
+                ..Default::default()
+            },
+            &PageRequest::new(None, None).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|t| t.id.0).collect::<Vec<_>>(),
+        vec![b3.id.0, b4.id.0]
+    );
+
+    // An id no task is assigned to is an empty page, not an error (D16).
+    let page = repo
+        .list_page(
+            &TaskListFilter {
+                q: Some(prefix.clone()),
+                assignee_id: Some(UserId::new()),
+                ..Default::default()
+            },
+            &PageRequest::new(None, None).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(page.total, 0);
+
+    for task in [&a1, &a2, &b3, &b4, &unassigned] {
+        repo.delete(task.id).await.unwrap();
+    }
+    milestones.delete(milestone.id).await.unwrap();
+    // The repository has no user delete; the rows are test-only.
+    for person in [&person_a, &person_b] {
+        let mut conn = pool.get().expect("pool connection");
+        diesel::sql_query(format!("DELETE FROM users WHERE id = '{}'", person.id.0))
+            .execute(&mut conn)
+            .unwrap();
     }
 }
 

@@ -21,8 +21,9 @@ use domain::{
 };
 
 /// A row of the `goals` table: id, title, description, status,
-/// status_source, target_date, created_at, updated_at, status_override — in
-/// that order. `status_override` is `None` while no manual override is set.
+/// status_source, target_date, created_at, updated_at, status_override,
+/// owner_id — in that order. `status_override` is `None` while no manual
+/// override is set; `owner_id` is `None` while the goal has no owner (D17).
 pub type GoalRow = (
     Uuid,
     String,
@@ -33,6 +34,7 @@ pub type GoalRow = (
     DateTime<Utc>,
     DateTime<Utc>,
     Option<String>,
+    Option<Uuid>,
 );
 
 /// A row of the `milestones` table, which has the same columns as `goals`.
@@ -86,6 +88,7 @@ pub fn goal_from_row(row: GoalRow) -> Result<Goal, RepositoryError> {
         created_at,
         updated_at,
         status_override,
+        owner_id,
     ) = row;
     Ok(Goal {
         id: GoalId(id),
@@ -94,6 +97,7 @@ pub fn goal_from_row(row: GoalRow) -> Result<Goal, RepositoryError> {
         status: status_from_db(&status)?,
         status_override: status_override.as_deref().map(status_from_db).transpose()?,
         target_date,
+        owner_id: owner_id.map(UserId),
         created_at,
         updated_at,
     })
@@ -112,6 +116,7 @@ pub fn milestone_from_row(row: MilestoneRow) -> Result<Milestone, RepositoryErro
         created_at,
         updated_at,
         status_override,
+        owner_id,
     ) = row;
     Ok(Milestone {
         id: MilestoneId(id),
@@ -120,13 +125,15 @@ pub fn milestone_from_row(row: MilestoneRow) -> Result<Milestone, RepositoryErro
         status: status_from_db(&status)?,
         status_override: status_override.as_deref().map(status_from_db).transpose()?,
         target_date,
+        owner_id: owner_id.map(UserId),
         created_at,
         updated_at,
     })
 }
 
 /// A row of the `tasks` table: id, milestone_id, title, description,
-/// status, target_date, created_at, updated_at — in that order.
+/// status, target_date, created_at, updated_at, assignee_id — in that order.
+/// `assignee_id` is `None` while the task has no assignee (D17).
 pub type TaskRow = (
     Uuid,
     Option<Uuid>,
@@ -136,6 +143,7 @@ pub type TaskRow = (
     Option<NaiveDate>,
     DateTime<Utc>,
     DateTime<Utc>,
+    Option<Uuid>,
 );
 
 /// The value stored in a `tasks.status` column for [`TaskStatus`].
@@ -163,7 +171,17 @@ pub fn task_status_from_db(status: &str) -> Result<TaskStatus, RepositoryError> 
 
 /// Build a [`Task`] from a `tasks` row.
 pub fn task_from_row(row: TaskRow) -> Result<Task, RepositoryError> {
-    let (id, milestone_id, title, description, status, target_date, created_at, updated_at) = row;
+    let (
+        id,
+        milestone_id,
+        title,
+        description,
+        status,
+        target_date,
+        created_at,
+        updated_at,
+        assignee_id,
+    ) = row;
     Ok(Task {
         id: TaskId(id),
         milestone_id: milestone_id.map(MilestoneId),
@@ -171,6 +189,7 @@ pub fn task_from_row(row: TaskRow) -> Result<Task, RepositoryError> {
         description,
         status: task_status_from_db(&status)?,
         target_date,
+        assignee_id: assignee_id.map(UserId),
         created_at,
         updated_at,
     })

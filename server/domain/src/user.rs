@@ -55,3 +55,31 @@ impl User {
         self.deactivated_at.is_none()
     }
 }
+
+/// A short, safe view of a [`User`] for pickers and lists (D17): who they are
+/// and whether the account can still sign in. Never carries the email or the
+/// password hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UserSummary {
+    pub id: UserId,
+    pub display_name: String,
+    pub active: bool,
+}
+
+impl UserSummary {
+    /// Build a summary from the stored values. A blank display name falls back
+    /// to the local part of `email` (D17); `email` is used for that fallback
+    /// only and is never kept on the summary.
+    pub fn new(id: UserId, display_name: &str, email: &str, active: bool) -> Self {
+        let display_name = if display_name.trim().is_empty() {
+            email.split('@').next().unwrap_or("").to_owned()
+        } else {
+            display_name.to_owned()
+        };
+        Self {
+            id,
+            display_name,
+            active,
+        }
+    }
+}

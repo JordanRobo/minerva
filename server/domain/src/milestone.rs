@@ -5,6 +5,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::status::{Status, StatusSource};
+use crate::user::UserId;
 
 /// Identifier for a [`Milestone`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -38,6 +39,10 @@ pub struct Milestone {
     pub status_override: Option<Status>,
     /// The date this milestone is expected to be finished by, if one was set.
     pub target_date: Option<NaiveDate>,
+    /// The user responsible for this milestone, if one has been chosen (D17).
+    /// A milestone may exist before anyone owns it; the domain does not check
+    /// that the user exists — that is an application concern.
+    pub owner_id: Option<UserId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -99,6 +104,7 @@ mod tests {
             status: Status::OnTrack,
             status_override: None,
             target_date: None,
+            owner_id: None,
             created_at: now,
             updated_at: now,
         }

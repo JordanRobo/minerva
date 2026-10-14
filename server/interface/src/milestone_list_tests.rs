@@ -200,6 +200,7 @@ fn list_milestone(
         status,
         status_override: None,
         target_date,
+        owner_id: None,
         created_at,
         updated_at: created_at,
     }
@@ -291,6 +292,7 @@ async fn the_list_answers_with_the_page_envelope_and_standard_milestone_items() 
             "created_at",
             "description",
             "id",
+            "owner",
             "status",
             "status_source",
             "target_date",

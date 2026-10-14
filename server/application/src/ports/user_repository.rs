@@ -1,6 +1,6 @@
 //! Persistence port for [`User`]s.
 
-use domain::{Role, User, UserId};
+use domain::{Role, User, UserId, UserSummary};
 
 use crate::ports::RepositoryError;
 
@@ -55,6 +55,15 @@ pub trait UserRepository: Send + Sync {
     async fn find_by_email(&self, email: String) -> Result<Option<User>, RepositoryError>;
 
     async fn list(&self) -> Result<Vec<User>, RepositoryError>;
+
+    /// The summaries of the users with these ids, in one query (D17). Unknown
+    /// ids are simply omitted; the order of the result is not significant.
+    /// Deactivated users are included, flagged by [`UserSummary::active`].
+    async fn summaries_by_ids(&self, ids: &[UserId]) -> Result<Vec<UserSummary>, RepositoryError>;
+
+    /// The summaries of every active user (D17), ordered by display name
+    /// (case-insensitive) then id.
+    async fn list_active_summaries(&self) -> Result<Vec<UserSummary>, RepositoryError>;
 
     async fn update(&self, user: User) -> Result<User, RepositoryError>;
 

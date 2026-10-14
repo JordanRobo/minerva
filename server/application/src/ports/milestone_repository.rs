@@ -1,7 +1,7 @@
 //! Persistence port for [`Milestone`]s.
 
 use chrono::NaiveDate;
-use domain::{Milestone, MilestoneId, Status};
+use domain::{Milestone, MilestoneId, Status, UserId};
 
 use crate::pagination::{Page, PageRequest};
 use crate::ports::RepositoryError;
@@ -45,6 +45,16 @@ pub trait MilestoneRepository: Send + Sync {
         status_override: Option<Status>,
     ) -> Result<(), RepositoryError>;
 
+    /// Set or clear the milestone's owner; `None` clears it (D17). One
+    /// single-column write of the owner and `updated_at` that cannot clobber a
+    /// concurrent edit of any other field; returns the updated milestone. An
+    /// unknown id is a `NotFound`.
+    async fn set_owner(
+        &self,
+        id: MilestoneId,
+        owner_id: Option<UserId>,
+    ) -> Result<Milestone, RepositoryError>;
+
     async fn delete(&self, id: MilestoneId) -> Result<(), RepositoryError>;
 
     /// One page of the milestones matching `filter` (roadmap 3.10), in the
@@ -66,7 +76,7 @@ pub mod fakes {
     use std::sync::Mutex;
 
     use chrono::{DateTime, NaiveDate, Utc};
-    use domain::{Milestone, MilestoneId, Status};
+    use domain::{Milestone, MilestoneId, Status, UserId};
 
     use super::{MilestoneListFilter, MilestoneRepository};
     use crate::pagination::{Page, PageRequest};
@@ -207,6 +217,22 @@ pub mod fakes {
             Ok(())
         }
 
+        async fn set_owner(
+            &self,
+            id: MilestoneId,
+            owner_id: Option<UserId>,
+        ) -> Result<Milestone, RepositoryError> {
+            let mut milestones = self.milestones.lock().unwrap();
+            let Some(milestone) = milestones.iter_mut().find(|existing| existing.id == id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the column and the
+            // updated_at timestamp.
+            milestone.owner_id = owner_id;
+            milestone.updated_at = Utc::now();
+            Ok(milestone.clone())
+        }
+
         async fn delete(&self, id: MilestoneId) -> Result<(), RepositoryError> {
             let mut milestones = self.milestones.lock().unwrap();
             let before = milestones.len();
@@ -261,6 +287,7 @@ pub mod fakes {
                 status,
                 status_override,
                 target_date,
+                owner_id: None,
                 created_at,
                 updated_at: created_at,
             }
