@@ -86,8 +86,13 @@ route group; signed-out screens live in the `(auth)` route group
   two-column grid with a fixed sidebar (264px, collapsible to 72px in
   memory only — a reload starts expanded) and only the content column
   scrolling; below it a 56px top bar and a 64px (+ safe-area) bottom tab
-  bar. The desktop user menu is a disclosure; the mobile one is a Bits UI
-  Dialog bottom sheet (6.6, D18). Sign out posts `/api/auth/logout`, then
+  bar. The desktop user menu is a Bits UI Popover — a disclosure, not a
+  menu (`trapFocus={false}`, focus returns to the trigger on close) — and
+  the mobile one is a Bits UI Dialog bottom sheet (6.6, D18). Collapsed
+  sidebar nav links and the collapse toggle carry Bits UI Tooltips; one
+  `Tooltip.Provider` wraps this layout for all of them, and the shared
+  floating chrome (dialog overlay/card, tooltip bubble) is styled from
+  tokens in `src/lib/styles/dialogs.css`. Sign out posts `/api/auth/logout`, then
   `goto('/login', { invalidateAll: true })`; a failed sign-out stays put
   with an inline error.
 - **Navigation** — `apps/web/src/lib/nav.ts` owns the primary and admin

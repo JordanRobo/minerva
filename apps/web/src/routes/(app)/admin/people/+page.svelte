@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { Tooltip } from 'bits-ui';
 	import { apiRequest } from '$lib/api';
 	import type { ApiErr } from '$lib/api';
 	import type { AdminUser, PasswordResetLink, Role } from '$lib/server/api';
@@ -267,27 +268,61 @@
 						</td>
 						<td data-label="" class="actions-cell">
 							{#if u.active}
-								<Button
-									variant="secondary"
-									disabled={busyId !== null || self}
-									title={self ? "You can't deactivate yourself" : undefined}
-									onclick={() => openDeactivate(u)}
-								>
-									Deactivate
-								</Button>
+								{#if self}
+									<!-- The button is disabled (pointer-events: none), so a native
+									     tooltip could never show: the trigger is a focusable
+									     wrapper span instead. It shows on hover and keyboard
+									     focus, is named after the button for screen readers
+									     (aria-describedby carries this text while open), and the
+									     button itself stays non-interactive. -->
+									<Tooltip.Root>
+										<Tooltip.Trigger>
+											{#snippet child({ props })}
+												<span class="disabled-tip" aria-labelledby={`deactivate-${u.id}`} {...props}>
+													<Button id={`deactivate-${u.id}`} variant="secondary" disabled>
+														Deactivate
+													</Button>
+												</span>
+											{/snippet}
+										</Tooltip.Trigger>
+										<Tooltip.Content side="top" sideOffset={6}>
+											<span class="minerva-tooltip" role="tooltip">You can't deactivate yourself</span>
+										</Tooltip.Content>
+									</Tooltip.Root>
+								{:else}
+									<Button variant="secondary" disabled={busyId !== null || self} onclick={() => openDeactivate(u)}>
+										Deactivate
+									</Button>
+								{/if}
 							{:else}
 								<Button variant="secondary" disabled={busyId !== null} onclick={() => reactivate(u)}>
 									Reactivate
 								</Button>
 							{/if}
-							<Button
-								variant="ghost"
-								disabled={busyId !== null || creatingReset || !u.active}
-								title={!u.active ? 'Deactivated accounts can\'t get a reset link' : undefined}
-								onclick={() => issueReset(u)}
-							>
-								Reset password
-							</Button>
+							{#if u.active}
+								<Button
+									variant="ghost"
+									disabled={busyId !== null || creatingReset}
+									onclick={() => issueReset(u)}
+								>
+									Reset password
+								</Button>
+							{:else}
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										{#snippet child({ props })}
+											<span class="disabled-tip" aria-labelledby={`reset-${u.id}`} {...props}>
+												<Button id={`reset-${u.id}`} variant="ghost" disabled>
+													Reset password
+												</Button>
+											</span>
+										{/snippet}
+									</Tooltip.Trigger>
+									<Tooltip.Content side="top" sideOffset={6}>
+										<span class="minerva-tooltip" role="tooltip">Deactivated accounts can't get a reset link</span>
+									</Tooltip.Content>
+								</Tooltip.Root>
+							{/if}
 						</td>
 					</tr>
 				{/each}

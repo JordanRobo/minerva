@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Popover } from 'bits-ui';
+	import { Popover, Tooltip } from 'bits-ui';
 	import Icon from '$lib/components/icons/Icon.svelte';
 	import { adminEntry, isActive, primaryNav, roleLabel } from '$lib/nav';
 	import type { CurrentUser } from '$lib/server/api';
@@ -38,17 +38,29 @@
 <aside class="sidebar" class:collapsed={collapsed}>
 	<div class="brand-row">
 		<Wordmark collapsed={collapsed} />
-		<button
-			class="collapse-btn"
-			class:collapsed={collapsed}
-			type="button"
-			aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-			aria-expanded={!collapsed}
-			title={collapsed ? 'Expand' : 'Collapse'}
-			onclick={onToggleCollapse}
-		>
-			<Icon name="chevron" size={16} />
-		</button>
+		<Tooltip.Root>
+			<Tooltip.Trigger>
+				{#snippet child({ props })}
+					<!-- {...props} before onclick: the trigger's own click handler would
+					     otherwise clobber the toggle (a pointer press already dismisses the
+					     tooltip via pointerdown). -->
+					<button
+						class="collapse-btn"
+						class:collapsed={collapsed}
+						type="button"
+						aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+						aria-expanded={!collapsed}
+						{...props}
+						onclick={onToggleCollapse}
+					>
+						<Icon name="chevron" size={16} />
+					</button>
+				{/snippet}
+			</Tooltip.Trigger>
+			<Tooltip.Content side="right" sideOffset={6}>
+				<span class="minerva-tooltip" role="tooltip">{collapsed ? 'Expand' : 'Collapse'}</span>
+			</Tooltip.Content>
+		</Tooltip.Root>
 	</div>
 
 	<nav class="nav" aria-label="Primary">

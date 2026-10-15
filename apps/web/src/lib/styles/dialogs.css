@@ -1,5 +1,7 @@
-/* Shared chrome for the Bits UI dialogs (ConfirmDialog, LinkDialog, UserSheet).
-   The primitives are headless — this file is what makes them look like Minerva. */
+/* Shared chrome for the Bits UI floating components (D18): the dialog
+   overlay/card, the tooltip bubble and the disabled-button tooltip trigger.
+   The primitives are headless — this file is what makes them look like
+   Minerva. */
 
 [data-dialog-overlay] {
 	position: fixed;
@@ -21,4 +23,31 @@
 	border-radius: var(--minerva-radius);
 	background: var(--minerva-surface);
 	color: var(--minerva-fg);
+}
+
+/* Tooltip bubble: the existing tokens inverted (no new colour values). The
+   primitive supplies only an id and data attributes, so role="tooltip" is set
+   by the consumer. */
+.minerva-tooltip {
+	display: block;
+	max-width: 240px;
+	padding: 6px 10px;
+	border-radius: var(--minerva-radius);
+	background: var(--minerva-fg);
+	color: var(--minerva-bg);
+	font-size: 12.5px;
+	line-height: 1.35;
+	box-shadow: 0 4px 16px color-mix(in oklch, var(--minerva-fg) 18%, transparent);
+}
+
+/* Tooltip trigger wrapping a disabled action button (the button itself is
+   pointer-events: none and not focusable — the span takes the hover/focus). */
+.disabled-tip {
+	display: inline-flex;
+	border-radius: var(--minerva-radius);
+}
+
+.disabled-tip:focus-visible {
+	outline: 2px solid var(--minerva-accent);
+	outline-offset: 2px;
 }

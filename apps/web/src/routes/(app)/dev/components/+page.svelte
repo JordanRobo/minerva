@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Popover, Tooltip } from 'bits-ui';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Banner from '$lib/components/ui/Banner.svelte';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
@@ -186,6 +187,62 @@
 </section>
 
 <section class="section">
+	<h2>Tooltip</h2>
+	<p class="demo-note">Opens on hover (after a short delay) and straight away on keyboard focus; it closes when the pointer leaves or the trigger blurs.</p>
+	<div class="row">
+		<Tooltip.Root>
+			<Tooltip.Trigger>
+				{#snippet child({ props })}
+					<Button variant="secondary" {...props}>Hover or focus me</Button>
+				{/snippet}
+			</Tooltip.Trigger>
+			<Tooltip.Content side="top" sideOffset={6}>
+				<span class="minerva-tooltip" role="tooltip">A short explanation, on hover and on keyboard focus.</span>
+			</Tooltip.Content>
+		</Tooltip.Root>
+
+		<!-- The People-screen pattern: a disabled button inside a focusable
+		     wrapper — the button stays inert, the span takes hover/focus. -->
+		<Tooltip.Root>
+			<Tooltip.Trigger>
+				{#snippet child({ props })}
+					<span class="disabled-tip" aria-labelledby="gallery-disabled-btn" {...props}>
+						<Button id="gallery-disabled-btn" variant="secondary" disabled>Disabled action</Button>
+					</span>
+				{/snippet}
+			</Tooltip.Trigger>
+			<Tooltip.Content side="top" sideOffset={6}>
+				<span class="minerva-tooltip" role="tooltip">This one is disabled on purpose — the tooltip still works.</span>
+			</Tooltip.Content>
+		</Tooltip.Root>
+	</div>
+</section>
+
+<section class="section">
+	<h2>Popover</h2>
+	<p class="demo-note">
+		Disclosure semantics (aria-expanded on the trigger, not role="menu"): click or Enter/Space opens it; Escape and outside clicks close it and return focus to the trigger.
+	</p>
+	<Popover.Root>
+		<Popover.Trigger>
+			{#snippet child({ props })}
+				<Button variant="secondary" {...props}>Open a popover</Button>
+			{/snippet}
+		</Popover.Trigger>
+		<Popover.Content side="top" align="start" sideOffset={8} trapFocus={false}>
+			{#snippet child({ props, wrapperProps })}
+				<div {...wrapperProps}>
+					<div class="gallery-popover" {...props}>
+						<p class="gp-title">A small panel</p>
+						<p class="gp-body">Placed by floating-ui and styled from tokens, like the sidebar user menu.</p>
+					</div>
+				</div>
+			{/snippet}
+		</Popover.Content>
+	</Popover.Root>
+</section>
+
+<section class="section">
 	<h2>PageSkeleton</h2>
 	<PageSkeleton />
 </section>
@@ -214,6 +271,38 @@
 		align-items: center;
 		gap: 10px;
 		flex-wrap: wrap;
+	}
+
+	.demo-note {
+		margin: 0 0 var(--minerva-space-3);
+		font-size: 14px;
+		color: var(--minerva-fg-muted);
+		max-width: 60ch;
+	}
+
+	/* Placed by Bits UI floating-ui (side="top" align="start"); the wrapper
+	   inherits this z-index from the content's computed style. */
+	.gallery-popover {
+		width: 240px;
+		z-index: 40;
+		background: var(--minerva-surface);
+		border: var(--minerva-border-w) solid var(--minerva-border);
+		border-radius: var(--minerva-radius);
+		box-shadow: 0 12px 32px color-mix(in oklch, var(--minerva-fg) 14%, transparent);
+		padding: var(--minerva-space-3);
+	}
+
+	.gp-title {
+		margin: 0 0 4px;
+		font-size: 14.5px;
+		font-weight: 600;
+		color: var(--minerva-fg);
+	}
+
+	.gp-body {
+		margin: 0;
+		font-size: 13.5px;
+		color: var(--minerva-fg-muted);
 	}
 
 	.wide {
