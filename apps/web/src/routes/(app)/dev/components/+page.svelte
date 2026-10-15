@@ -18,6 +18,11 @@
 
 	let confirmOpen = $state(false);
 	let linkOpen = $state(false);
+	let busyConfirmOpen = $state(false);
+	let busyInFlight = $state(false);
+	let errorConfirmOpen = $state(false);
+	let errorConfirmError = $state<string | null>(null);
+	let errorConfirmTries = $state(0);
 </script>
 
 <PageHeader
@@ -108,6 +113,58 @@
 		confirmLabel="Delete"
 		onConfirm={() => (confirmOpen = false)}
 		onClose={() => (confirmOpen = false)}
+	/>
+</section>
+
+<section class="section">
+	<h2>ConfirmDialog — refuses to close while busy</h2>
+	<Button variant="secondary" onclick={() => (busyConfirmOpen = true)}>
+		Open a confirm that saves for two seconds
+	</Button>
+	<ConfirmDialog
+		open={busyConfirmOpen}
+		title="Save this change?"
+		message="The save takes two seconds. While it is in flight, Escape, the backdrop and Cancel must not close the dialog."
+		confirmLabel="Save"
+		busy={busyInFlight}
+		onConfirm={() => {
+			busyInFlight = true;
+			setTimeout(() => {
+				busyInFlight = false;
+				busyConfirmOpen = false;
+			}, 2000);
+		}}
+		onClose={() => (busyConfirmOpen = false)}
+	/>
+</section>
+
+<section class="section">
+	<h2>ConfirmDialog — error state</h2>
+	<Button
+		variant="secondary"
+		onclick={() => {
+			errorConfirmError = null;
+			errorConfirmTries = 0;
+			errorConfirmOpen = true;
+		}}
+	>
+		Open a confirm that fails once
+	</Button>
+	<ConfirmDialog
+		open={errorConfirmOpen}
+		title="Delete this item?"
+		message="The first attempt fails and shows the error below; the second succeeds."
+		confirmLabel="Delete"
+		error={errorConfirmError}
+		onConfirm={() => {
+			if (errorConfirmTries === 0) {
+				errorConfirmTries = 1;
+				errorConfirmError = 'Something went wrong. Try again.';
+			} else {
+				errorConfirmOpen = false;
+			}
+		}}
+		onClose={() => (errorConfirmOpen = false)}
 	/>
 </section>
 

@@ -1,12 +1,13 @@
 <script lang="ts">
+	import { Dialog } from 'bits-ui';
 	import Button from './Button.svelte';
 	import FormAlert from './FormAlert.svelte';
 
-	// A destructive-action confirmation on a native <dialog>: showModal()
-	// brings the focus trap, Escape and the ::backdrop for free (the UserSheet
-	// pattern). Mount only one at a time — the title id is static. While
-	// `busy` the dialog refuses to close, so an in-flight request can't be
-	// abandoned mid-write.
+	// A destructive-action confirmation on Bits UI Dialog (D18): the primitive
+	// brings the focus trap, Escape, outside-click and focus return to the
+	// trigger. While `busy` the dialog refuses to close — every close attempt
+	// (Escape, backdrop, Cancel) funnels through setOpen, which rejects it — so
+	// an in-flight request can't be abandoned mid-write.
 	let {
 		open,
 		title,
@@ -27,57 +28,53 @@
 		onClose: () => void;
 	} = $props();
 
-	let dialog = $state<HTMLDialogElement | null>(null);
+	let bitsOpen = $state(false);
 
+	function setOpen(next: boolean) {
+		if (!next && busy) return;
+		bitsOpen = next;
+		if (!next) onClose();
+	}
+
+	const getOpen = () => bitsOpen;
+
+	// The parent drives `open` one way. Mirror it into Bits UI's state in both
+	// directions: a parent close (e.g. after a successful confirm) must not
+	// re-fire onClose, which is reserved for user-initiated closes.
 	$effect(() => {
-		if (!dialog) return;
-		if (open && !dialog.open) dialog.showModal();
-		else if (!open && dialog.open) dialog.close();
+		if (open && !bitsOpen) bitsOpen = true;
+		else if (!open && bitsOpen) bitsOpen = false;
 	});
-
-	function refuseCloseWhileBusy(e: Event) {
-		if (busy) e.preventDefault();
-	}
-
-	function onBackdropClick(e: MouseEvent) {
-		// A click on the ::backdrop targets the dialog element itself.
-		if (!dialog || busy) return;
-		if (e.target === dialog) dialog.close();
-	}
 </script>
 
-<dialog
-	class="confirm"
-	bind:this={dialog}
-	aria-labelledby="confirm-dialog-title"
-	oncancel={refuseCloseWhileBusy}
-	onclose={onClose}
-	onclick={onBackdropClick}
->
-	<h2 id="confirm-dialog-title">{title}</h2>
-	<p>{message}</p>
-	{#if error}
-		<FormAlert>{error}</FormAlert>
-	{/if}
-	<div class="actions">
-		<Button variant="secondary" disabled={busy} onclick={onClose}>Cancel</Button>
-		<Button variant="primary" disabled={busy} onclick={onConfirm}>{confirmLabel}</Button>
-	</div>
-</dialog>
+<Dialog.Root bind:open={getOpen, setOpen}>
+	<Dialog.Portal>
+		<Dialog.Overlay />
+		<Dialog.Content>
+			{#snippet child({ props })}
+				<div {...props} class="confirm minerva-dialog-card">
+					<Dialog.Title>
+						{#snippet child({ props })}
+							<h2 {...props}>{title}</h2>
+						{/snippet}
+					</Dialog.Title>
+					<p>{message}</p>
+					{#if error}
+						<FormAlert>{error}</FormAlert>
+					{/if}
+					<div class="actions">
+						<Button variant="secondary" disabled={busy} onclick={() => setOpen(false)}>Cancel</Button>
+						<Button variant="primary" disabled={busy} onclick={onConfirm}>{confirmLabel}</Button>
+					</div>
+				</div>
+			{/snippet}
+		</Dialog.Content>
+	</Dialog.Portal>
+</Dialog.Root>
 
 <style>
 	.confirm {
 		width: min(480px, calc(100vw - 32px));
-		margin: auto;
-		padding: var(--minerva-space-6);
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		border-radius: var(--minerva-radius);
-		background: var(--minerva-surface);
-		color: var(--minerva-fg);
-	}
-
-	.confirm::backdrop {
-		background: color-mix(in oklch, var(--minerva-fg) 40%, transparent);
 	}
 
 	h2 {

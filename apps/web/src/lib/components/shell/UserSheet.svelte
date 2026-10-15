@@ -1,8 +1,13 @@
 <script lang="ts">
+	import { Dialog } from 'bits-ui';
 	import Icon from '$lib/components/icons/Icon.svelte';
 	import { adminEntry, roleLabel } from '$lib/nav';
 	import type { CurrentUser } from '$lib/server/api';
 
+	// Mobile bottom sheet on Bits UI Dialog (D18): the primitive brings the
+	// focus trap, Escape, outside-click and focus return to the trigger — no
+	// manual bookkeeping. Positioned as a bottom sheet in CSS (the inner
+	// content element, never the floating wrapper).
 	let {
 		user,
 		initials,
@@ -21,81 +26,78 @@
 
 	const name = $derived(user.display_name || user.email);
 
-	// Native <dialog>: showModal() brings the focus trap, Escape, the
-	// ::backdrop and inert siblings for free. Closing (Escape, backdrop,
-	// Close button) fires the `close` event, which bubbles back up as
-	// onClosed. When focus returns on close, the browser hands it back to
-	// the trigger — no manual bookkeeping needed.
-	let dialog = $state<HTMLDialogElement | null>(null);
+	let bitsOpen = $state(false);
 
-	$effect(() => {
-		if (!dialog) return;
-		if (open && !dialog.open) dialog.showModal();
-		else if (!open && dialog.open) dialog.close();
-	});
-
-	function onBackdropClick(e: MouseEvent) {
-		// A click on the ::backdrop targets the dialog element itself.
-		if (e.target === dialog) dialog?.close();
+	function setOpen(next: boolean) {
+		bitsOpen = next;
+		if (!next) onClosed();
 	}
+
+	const getOpen = () => bitsOpen;
+
+	// The parent drives `open` one way (it also closes the sheet on
+	// navigation). Mirror it into Bits UI's state in both directions: a parent
+	// close must not re-fire onClosed, which is reserved for user-initiated
+	// closes.
+	$effect(() => {
+		if (open && !bitsOpen) bitsOpen = true;
+		else if (!open && bitsOpen) bitsOpen = false;
+	});
 </script>
 
-<dialog
-	class="sheet"
-	bind:this={dialog}
-	aria-label="Account"
-	onclose={onClosed}
-	onclick={onBackdropClick}
->
-	<button class="sheet-close" type="button" aria-label="Close menu" onclick={() => dialog?.close()}>
-		<Icon name="close" size={15} />
-	</button>
+<Dialog.Root bind:open={getOpen, setOpen}>
+	<Dialog.Portal>
+		<Dialog.Overlay />
+		<Dialog.Content aria-label="Account">
+			{#snippet child({ props })}
+				<div {...props} class="sheet">
+					<button class="sheet-close" type="button" aria-label="Close menu" onclick={() => setOpen(false)}>
+						<Icon name="close" size={15} />
+					</button>
 
-	<div class="sheet-id">
-		<span class="avatar" aria-hidden="true">{initials}</span>
-		<div class="sheet-id-text">
-			<p class="um-name">{name}</p>
-			<p class="um-email">{user.email}</p>
-			<p class="um-role">{roleLabel(user.role)}</p>
-		</div>
-	</div>
+					<div class="sheet-id">
+						<span class="avatar" aria-hidden="true">{initials}</span>
+						<div class="sheet-id-text">
+							<p class="um-name">{name}</p>
+							<p class="um-email">{user.email}</p>
+							<p class="um-role">{roleLabel(user.role)}</p>
+						</div>
+					</div>
 
-	<hr class="rule" />
+					<hr class="rule" />
 
-	{#if user.role === 'admin'}
-		<p class="sheet-group-label">Admin</p>
-		<a class="um-item" href={adminEntry.href}>
-			<Icon name={adminEntry.icon} />{adminEntry.label}
-		</a>
-		<hr class="rule" />
-	{/if}
+					{#if user.role === 'admin'}
+						<p class="sheet-group-label">Admin</p>
+						<a class="um-item" href={adminEntry.href}>
+							<Icon name={adminEntry.icon} />{adminEntry.label}
+						</a>
+						<hr class="rule" />
+					{/if}
 
-	<button class="um-item" type="button" onclick={onSignOut}>
-		<Icon name="signout" />Sign out
-	</button>
+					<button class="um-item" type="button" onclick={onSignOut}>
+						<Icon name="signout" />Sign out
+					</button>
 
-	{#if signOutError}
-		<p class="um-error" role="alert">{signOutError}</p>
-	{/if}
-</dialog>
+					{#if signOutError}
+						<p class="um-error" role="alert">{signOutError}</p>
+					{/if}
+				</div>
+			{/snippet}
+		</Dialog.Content>
+	</Dialog.Portal>
+</Dialog.Root>
 
 <style>
 	.sheet {
 		position: fixed;
 		inset: auto 0 0 0;
 		width: 100%;
-		margin: 0;
-		border: 0;
 		border-top: var(--minerva-border-w) solid var(--minerva-border);
 		border-radius: var(--minerva-radius) var(--minerva-radius) 0 0;
 		background: var(--minerva-surface);
 		color: var(--minerva-fg);
 		padding: var(--minerva-space-2) var(--minerva-space-4)
 			calc(var(--minerva-space-4) + env(safe-area-inset-bottom));
-	}
-
-	.sheet::backdrop {
-		background: color-mix(in oklch, var(--minerva-fg) 40%, transparent);
 	}
 
 	.sheet-close {

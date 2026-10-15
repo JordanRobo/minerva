@@ -86,8 +86,8 @@ route group; signed-out screens live in the `(auth)` route group
   two-column grid with a fixed sidebar (264px, collapsible to 72px in
   memory only — a reload starts expanded) and only the content column
   scrolling; below it a 56px top bar and a 64px (+ safe-area) bottom tab
-  bar. The desktop user menu is a disclosure; the mobile one is a native
-  `<dialog>` sheet. Sign out posts `/api/auth/logout`, then
+  bar. The desktop user menu is a disclosure; the mobile one is a Bits UI
+  Dialog bottom sheet (6.6, D18). Sign out posts `/api/auth/logout`, then
   `goto('/login', { invalidateAll: true })`; a failed sign-out stays put
   with an inline error.
 - **Navigation** — `apps/web/src/lib/nav.ts` owns the primary and admin
