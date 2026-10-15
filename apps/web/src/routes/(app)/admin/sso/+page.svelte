@@ -7,6 +7,7 @@
 	import Button from '$lib/components/ui/Button.svelte';
 	import Banner from '$lib/components/ui/Banner.svelte';
 	import Field from '$lib/components/ui/Field.svelte';
+	import Input from '$lib/components/ui/Input.svelte';
 	import FormAlert from '$lib/components/ui/FormAlert.svelte';
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -307,12 +308,7 @@
 						<tr>
 							{#if editing && editing.rule.id === r.id}
 								<td data-label="Group name">
-									<input
-										class="group-input"
-										bind:this={editInput}
-										bind:value={editing.name}
-										aria-label="Group name"
-									/>
+									<Input bind:ref={editInput} bind:value={editing.name} aria-label="Group name" />
 									{#if editing.name.trim().length > 255}
 										<p class="helper">Group names can be at most 255 characters.</p>
 									{/if}
@@ -519,23 +515,6 @@
 		word-break: break-all;
 	}
 
-	.group-input {
-		width: 100%;
-		min-height: var(--minerva-control-h);
-		padding: 6px 12px;
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		border-radius: var(--minerva-radius);
-		background: var(--minerva-surface);
-		color: var(--minerva-fg);
-		font-family: inherit;
-		font-size: 14.5px;
-	}
-
-	.group-input:focus {
-		outline: 2px solid var(--minerva-accent);
-		border-color: var(--minerva-accent);
-	}
-
 	.helper {
 		margin: 6px 0 0;
 		font-size: 13px;
@@ -619,10 +598,6 @@
 
 		td[data-label='']::before {
 			content: none;
-		}
-
-		.group-input {
-			flex: 1 1 180px;
 		}
 
 		.helper {
