@@ -2,6 +2,7 @@
 	import { Popover, Tooltip } from 'bits-ui';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Banner from '$lib/components/ui/Banner.svelte';
+	import Field from '$lib/components/ui/Field.svelte';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -24,6 +25,7 @@
 	let errorConfirmOpen = $state(false);
 	let errorConfirmError = $state<string | null>(null);
 	let errorConfirmTries = $state(0);
+	let fieldName = $state('');
 </script>
 
 <PageHeader
@@ -67,6 +69,15 @@
 		<Button variant="primary" disabled>Disabled</Button>
 		<Button variant="secondary" href="/goals">As a link</Button>
 		<Button variant="ghost" href="/goals" disabled>Disabled link</Button>
+	</div>
+</section>
+
+<section class="section">
+	<h2>Field</h2>
+	<p class="demo-note">Label (Bits UI Label) + input. Clicking the label focuses its input; the password field's eye toggle flips type and aria-pressed.</p>
+	<div class="field-demo">
+		<Field id="gallery-field-name" label="Full name" bind:value={fieldName} />
+		<Field id="gallery-field-pass" label="Password" input="password" autocomplete="new-password" />
 	</div>
 </section>
 
@@ -271,6 +282,13 @@
 		align-items: center;
 		gap: 10px;
 		flex-wrap: wrap;
+	}
+
+	.field-demo {
+		display: flex;
+		flex-direction: column;
+		gap: var(--minerva-space-4);
+		max-width: 360px;
 	}
 
 	.demo-note {

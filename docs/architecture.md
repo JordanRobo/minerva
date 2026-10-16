@@ -196,8 +196,8 @@ failure or a non-JSON body becomes `code: "network"` and it never throws.
   self-service reset emails only arrive with 7.3 email delivery.
 - **Form components** — `ui/Input.svelte`, `ui/PasswordInput.svelte`
   (Input plus a show/hide toggle with `aria-pressed` and a "Show
-  password"/"Hide password" label), `ui/Field.svelte` (label + hint/error,
-  wiring `aria-describedby`/`aria-invalid`), and `ui/FormAlert.svelte`
+  password"/"Hide password" label), `ui/Field.svelte` (Bits UI Label +
+  hint/error, wiring `aria-describedby`/`aria-invalid`), and `ui/FormAlert.svelte`
   (`role="alert"`, `tabindex="-1"` so a failed submit can move focus
   there). There is no error colour token, so an error is signalled by the
   alert icon plus a 3 px accent left border and the field's accent outline —
