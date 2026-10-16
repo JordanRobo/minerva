@@ -105,8 +105,9 @@ route group; signed-out screens live in the `(auth)` route group
   (StateCard, EmptyState, ErrorState, AccessDenied, RouteError) and
   `shell/` (the 6.3a shell components plus BareLayout — a centred card and
   the 28px wordmark, no navigation; the `(auth)` layout's frame). `Button`
-  renders an `<a>` when given an `href`, else a `<button type="button">`;
-  a disabled link is `aria-disabled` and does not navigate. `PageHeader`
+  wraps Bits UI Button (6.6, D18) — it renders an `<a>` when given an
+  `href`, else a `<button type="button">`; a disabled link is
+  `aria-disabled`, out of the tab order, and does not navigate. `PageHeader`
   owns a page's one `<h1>` and its document title; the state components
   render beneath it as `h2`, while route errors render their card at `h1`.
   Components never check roles themselves: pages pass an action only when

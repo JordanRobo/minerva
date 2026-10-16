@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Button as BitsButton } from 'bits-ui';
 	import type { Snippet } from 'svelte';
 
 	export type ButtonVariant = 'primary' | 'secondary' | 'ghost';
@@ -22,28 +23,29 @@
 </script>
 
 {#if href !== undefined}
-	<!-- A link: `disabled` means aria-disabled + navigation blocked, because
-	     a real <a> has no disabled state. -->
-	<a
+	<!-- A link: `disabled` means aria-disabled + no navigation. The primitive
+	     owns that now — it drops the href from the DOM and takes the link out
+	     of the tab order (tabindex="-1"), so a disabled link is inert. -->
+	<BitsButton.Root
 		class="btn {variant}"
-		href={href}
-		aria-disabled={disabled || undefined}
-		onclick={(event) => {
-			if (disabled) event.preventDefault();
-			else onclick?.(event);
-		}}
+		{href}
+		disabled={disabled}
+		onclick={disabled ? undefined : onclick}
 		{...rest}
 	>
 		{@render children?.()}
-	</a>
+	</BitsButton.Root>
 {:else}
-	<button class="btn {variant}" type={type} disabled={disabled} onclick={onclick} {...rest}>
+	<BitsButton.Root class="btn {variant}" {type} disabled={disabled} onclick={onclick} {...rest}>
 		{@render children?.()}
-	</button>
+	</BitsButton.Root>
 {/if}
 
 <style>
-	.btn {
+	/* :global() because the element is rendered inside Bits UI's Button.Root —
+	   scoped selectors can't reach it (no child snippet exists for this part).
+	   The class names were already global in effect: auth.css targets .btn. */
+	:global(.btn) {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -63,45 +65,45 @@
 			border-color var(--minerva-motion-mid) var(--minerva-motion-ease-in-out);
 	}
 
-	.btn:active {
+	:global(.btn:active) {
 		transform: translateY(1px);
 	}
 
 	/* DESIGN.md posture: primary labels are 18px+ — the accent only carries
 	   white (light) or cream (dark) labels at that size or larger. */
-	.primary {
+	:global(.primary) {
 		background: var(--minerva-accent);
 		color: var(--minerva-surface);
 		font-size: 18px;
 		padding: 9px 20px;
 	}
 
-	.primary:hover {
+	:global(.primary:hover) {
 		background: color-mix(in oklch, var(--minerva-accent) 88%, black);
 	}
 
-	:global(html.dark) .primary {
+	:global(html.dark .primary) {
 		color: var(--minerva-fg);
 	}
 
-	.secondary {
+	:global(.secondary) {
 		border-color: var(--minerva-border);
 	}
 
-	.secondary:hover {
+	:global(.secondary:hover) {
 		border-color: var(--minerva-fg);
 	}
 
-	.ghost {
+	:global(.ghost) {
 		padding: 8px 10px;
 	}
 
-	.ghost:hover {
+	:global(.ghost:hover) {
 		background: color-mix(in oklch, var(--minerva-fg) 6%, transparent);
 	}
 
-	.btn[disabled],
-	.btn[aria-disabled='true'] {
+	:global(.btn[disabled]),
+	:global(.btn[aria-disabled='true']) {
 		opacity: 0.55;
 		pointer-events: none;
 	}
