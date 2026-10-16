@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Collapsible, Popover, Tooltip } from 'bits-ui';
+	import { Collapsible, Popover, Separator, Tooltip } from 'bits-ui';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Banner from '$lib/components/ui/Banner.svelte';
 	import Field from '$lib/components/ui/Field.svelte';
@@ -278,6 +278,31 @@
 </section>
 
 <section class="section">
+	<h2>Separator</h2>
+	<p class="demo-note">
+		The sidebar / user-sheet rule (role="separator"), and the login "or" divider (decorative, inside an aria-hidden wrapper).
+	</p>
+	<Separator.Root>
+		{#snippet child({ props })}
+			<div {...props} class="gallery-rule"></div>
+		{/snippet}
+	</Separator.Root>
+	<div class="divider-demo" aria-hidden="true">
+		<Separator.Root decorative>
+			{#snippet child({ props })}
+				<div {...props} class="gallery-divider-line"></div>
+			{/snippet}
+		</Separator.Root>
+		<span>or</span>
+		<Separator.Root decorative>
+			{#snippet child({ props })}
+				<div {...props} class="gallery-divider-line"></div>
+			{/snippet}
+		</Separator.Root>
+	</div>
+</section>
+
+<section class="section">
 	<h2>PageSkeleton</h2>
 	<PageSkeleton />
 </section>
@@ -367,6 +392,29 @@
 		gap: 6px;
 		font-size: 13.5px;
 		color: var(--minerva-fg-muted);
+	}
+
+	/* Same look as the shell's .rule and the login page's divider lines. */
+	.gallery-rule {
+		border: 0;
+		border-top: var(--minerva-border-w) solid var(--minerva-border);
+		margin: 10px 0;
+	}
+
+	.divider-demo {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		font-size: 12px;
+		color: var(--minerva-fg-muted);
+		max-width: 360px;
+		margin-top: var(--minerva-space-4);
+	}
+
+	.gallery-divider-line {
+		flex: 1;
+		height: var(--minerva-border-w);
+		background: var(--minerva-border);
 	}
 
 	.wide {

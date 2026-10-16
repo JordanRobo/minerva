@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Dialog } from 'bits-ui';
+	import { Dialog, Separator } from 'bits-ui';
 	import Icon from '$lib/components/icons/Icon.svelte';
 	import { adminEntry, roleLabel } from '$lib/nav';
 	import type { CurrentUser } from '$lib/server/api';
@@ -64,14 +64,24 @@
 						</div>
 					</div>
 
-					<hr class="rule" />
+					<!-- Bits UI Separator (D18): replaces the <hr>; the child
+					     snippet keeps .rule in this component's scope. -->
+					<Separator.Root>
+						{#snippet child({ props })}
+							<div {...props} class="rule"></div>
+						{/snippet}
+					</Separator.Root>
 
 					{#if user.role === 'admin'}
 						<p class="sheet-group-label">Admin</p>
 						<a class="um-item" href={adminEntry.href}>
 							<Icon name={adminEntry.icon} />{adminEntry.label}
 						</a>
-						<hr class="rule" />
+						<Separator.Root>
+							{#snippet child({ props })}
+								<div {...props} class="rule"></div>
+							{/snippet}
+						</Separator.Root>
 					{/if}
 
 					<button class="um-item" type="button" onclick={onSignOut}>

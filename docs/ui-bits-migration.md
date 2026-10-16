@@ -87,9 +87,9 @@ Native dividers/rules (added 2026-10-16):
 
 | # | Location | What it is | Verdict |
 |---|---|---|---|
-| 1 | `(auth)/login/+page.svelte:122` | "or" divider between the credentials form and the redirect buttons — `aria-hidden` wrapper, two `::before`/`::after` pseudo-element lines | **Bits UI Separator** — pending (step 4e): two `Separator.Root` lines in the same `aria-hidden` wrapper; the pseudo-elements are gone |
-| 2 | `shell/Sidebar.svelte:104` | `<hr class="rule">` between the user-menu head and Sign out | **Bits UI Separator** — pending (step 4e) |
-| 3–4 | `shell/UserSheet.svelte:67,74` | Two `<hr class="rule">`s in the mobile sheet | **Bits UI Separator** — pending (step 4e) |
+| 1 | `(auth)/login/+page.svelte:122` | "or" divider between the credentials form and the redirect buttons — `aria-hidden` wrapper, two `::before`/`::after` pseudo-element lines | **Bits UI Separator** — migrated (step 4e): two decorative `Separator.Root` lines in the same `aria-hidden` wrapper; the pseudo-elements are gone (the lines are real elements styled from tokens) |
+| 2 | `shell/Sidebar.svelte:104` | `<hr class="rule">` between the user-menu head and Sign out | **Bits UI Separator** — migrated (step 4e): child snippet keeps `.rule` in scope; `role="separator"` + `aria-orientation="horizontal"` from the primitive |
+| 3–4 | `shell/UserSheet.svelte:67,74` | Two `<hr class="rule">`s in the mobile sheet | **Bits UI Separator** — migrated (step 4e): same treatment as the sidebar rule |
 
 Native `<dialog>` elements — 3 places, all covered by the table above: `ui/ConfirmDialog.svelte:49`, `ui/LinkDialog.svelte:67`, `shell/UserSheet.svelte:43` → **Bits UI Dialog** — migrated (step 2); no `<dialog>` or `showModal` remains under `src/lib/components`.
 
@@ -119,7 +119,7 @@ Native `<dialog>` elements — 3 places, all covered by the table above: `ui/Con
 - Field's label → **Bits UI Label** — **done (step 4b)**
 - PasswordInput's show/hide toggle → **Bits UI Toggle** — **done (step 4c)**
 - SSO help `<details>` → **Bits UI Collapsible** — **done (step 4d)**
-- 4 divider/rule elements (the login "or" divider's two lines, the user-menu rule, the two mobile-sheet rules) → **Bits UI Separator** — pending (step 4e)
+- 4 divider/rule elements (the login "or" divider, the user-menu rule, the two mobile-sheet rules) → **Bits UI Separator** — **done (step 4e)** (5 `Separator.Root`s: the login divider is two decorative lines)
 - All four native `<select>`s → **Bits UI Select** — pending (separate step after step 4)
 
 Everything else stays custom because no Bits UI primitive exists for it: Input, FormAlert, PageHeader/Banner/Skeletons, the states family, all shell layout and navigation, Icon.

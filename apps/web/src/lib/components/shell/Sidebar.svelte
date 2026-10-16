@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Popover, Tooltip } from 'bits-ui';
+	import { Popover, Separator, Tooltip } from 'bits-ui';
 	import Icon from '$lib/components/icons/Icon.svelte';
 	import { adminEntry, isActive, primaryNav, roleLabel } from '$lib/nav';
 	import type { CurrentUser } from '$lib/server/api';
@@ -101,7 +101,13 @@
 								<p class="um-email">{user.email}</p>
 								<p class="um-role">{roleLabel(user.role)}</p>
 							</div>
-							<hr class="rule" />
+							<!-- Bits UI Separator (D18): replaces the <hr>; the child
+							     snippet keeps .rule in this component's scope. -->
+							<Separator.Root>
+								{#snippet child({ props })}
+									<div {...props} class="rule"></div>
+								{/snippet}
+							</Separator.Root>
 							<button class="um-item" type="button" onclick={onSignOut}>
 								<Icon name="signout" />Sign out
 							</button>
