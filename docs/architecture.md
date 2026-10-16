@@ -195,7 +195,7 @@ failure or a non-JSON body becomes `code: "network"` and it never throws.
   on `/login` is a plain-text pointer to an administrator, since
   self-service reset emails only arrive with 7.3 email delivery.
 - **Form components** — `ui/Input.svelte`, `ui/PasswordInput.svelte`
-  (Input plus a show/hide toggle with `aria-pressed` and a "Show
+  (Input plus a Bits UI Toggle show/hide with `aria-pressed` and a "Show
   password"/"Hide password" label), `ui/Field.svelte` (Bits UI Label +
   hint/error, wiring `aria-describedby`/`aria-invalid`), and `ui/FormAlert.svelte`
   (`role="alert"`, `tabindex="-1"` so a failed submit can move focus
