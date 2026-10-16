@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Popover, Tooltip } from 'bits-ui';
+	import { Collapsible, Popover, Tooltip } from 'bits-ui';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Banner from '$lib/components/ui/Banner.svelte';
 	import Field from '$lib/components/ui/Field.svelte';
@@ -254,6 +254,30 @@
 </section>
 
 <section class="section">
+	<h2>Collapsible</h2>
+	<p class="demo-note">
+		The SSO help pattern: click or Enter/Space on the trigger toggles it; aria-expanded follows the state and the content is hidden (not just visually) while closed.
+	</p>
+	<Collapsible.Root>
+		{#snippet child({ props })}
+			<div {...props}>
+				<Collapsible.Trigger>
+					{#snippet child({ props })}
+						<button {...props} class="gallery-help-trigger">How group rules work</button>
+					{/snippet}
+				</Collapsible.Trigger>
+				<Collapsible.Content>
+					<ul class="gallery-help-list">
+						<li>First line of the help text, shown while open.</li>
+						<li>Second line — hidden from the DOM (and screen readers) while closed.</li>
+					</ul>
+				</Collapsible.Content>
+			</div>
+		{/snippet}
+	</Collapsible.Root>
+</section>
+
+<section class="section">
 	<h2>PageSkeleton</h2>
 	<PageSkeleton />
 </section>
@@ -319,6 +343,28 @@
 
 	.gp-body {
 		margin: 0;
+		font-size: 13.5px;
+		color: var(--minerva-fg-muted);
+	}
+
+	/* Same look as the SSO page's .help-trigger (native button resets). */
+	.gallery-help-trigger {
+		cursor: pointer;
+		font-size: 14.5px;
+		font-weight: 500;
+		font-family: inherit;
+		color: inherit;
+		background: none;
+		border: 0;
+		padding: 0;
+		text-align: left;
+	}
+
+	.gallery-help-list {
+		margin: 10px 0 0;
+		padding-left: 20px;
+		display: grid;
+		gap: 6px;
 		font-size: 13.5px;
 		color: var(--minerva-fg-muted);
 	}
