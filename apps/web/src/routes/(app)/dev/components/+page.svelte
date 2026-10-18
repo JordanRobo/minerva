@@ -3,6 +3,7 @@
 	import Button from '$lib/components/ui/Button.svelte';
 	import Banner from '$lib/components/ui/Banner.svelte';
 	import Field from '$lib/components/ui/Field.svelte';
+	import Select from '$lib/components/ui/Select.svelte';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -26,6 +27,21 @@
 	let errorConfirmError = $state<string | null>(null);
 	let errorConfirmTries = $state(0);
 	let fieldName = $state('');
+
+	const GALLERY_ROLES = [
+		{ value: 'read_only', label: 'Read-only' },
+		{ value: 'staff', label: 'Staff' },
+		{ value: 'admin', label: 'Administrator' }
+	];
+	const GALLERY_LONG = [
+		{ value: 'a', label: 'A very long option label that needs to truncate gracefully' },
+		{ value: 'b', label: 'Another lengthy label, wider than the trigger is' },
+		{ value: 'c', label: 'Short one for contrast' }
+	];
+	let galleryRole = $state('staff');
+	let galleryRoleOpen = $state('admin');
+	let gallerySelectOpen = $state(true);
+	let galleryLong = $state('a');
 </script>
 
 <PageHeader
@@ -78,6 +94,24 @@
 	<div class="field-demo">
 		<Field id="gallery-field-name" label="Full name" bind:value={fieldName} />
 		<Field id="gallery-field-pass" label="Password" input="password" autocomplete="new-password" />
+	</div>
+</section>
+
+<section class="section">
+	<h2>Select</h2>
+	<p class="demo-note">
+		Bits UI Select: click or Enter/Space opens the listbox, arrow keys move the highlight, Enter/Space chooses, Escape closes (focus never leaves the trigger), and typing a letter jumps to that option. The second one starts open; the third is disabled; the fourth has long labels.
+	</p>
+	<div class="select-demo">
+		<Select bind:value={galleryRole} options={GALLERY_ROLES} aria-label="Gallery role" />
+		<Select
+			bind:value={galleryRoleOpen}
+			bind:open={gallerySelectOpen}
+			options={GALLERY_ROLES}
+			aria-label="Gallery role, starts open"
+		/>
+		<Select value="read_only" options={GALLERY_ROLES} aria-label="Gallery role, disabled" disabled />
+		<Select bind:value={galleryLong} options={GALLERY_LONG} aria-label="Gallery long labels" />
 	</div>
 </section>
 
@@ -337,6 +371,13 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--minerva-space-4);
+		max-width: 360px;
+	}
+
+	.select-demo {
+		display: flex;
+		flex-direction: column;
+		gap: var(--minerva-space-3);
 		max-width: 360px;
 	}
 
