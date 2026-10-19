@@ -101,12 +101,22 @@ route group; signed-out screens live in the `(auth)` route group
   Admin group is rendered via `{#if}` only for admins — it is absent from
   the DOM for other roles.
 - **Components** — shared components in `apps/web/src/lib/components/`:
-  `ui/` (Button, PageHeader, Banner, Skeleton, PageSkeleton), `states/`
-  (StateCard, EmptyState, ErrorState, AccessDenied, RouteError) and
-  `shell/` (the 6.3a shell components plus BareLayout — a centred card and
-  the 28px wordmark, no navigation; the `(auth)` layout's frame). `Button`
-  wraps Bits UI Button (6.6, D18) — it renders an `<a>` when given an
-  `href`, else a `<button type="button">`; a disabled link is
+  `ui/` (Button, Field, Input, PasswordInput, Select, FormAlert,
+  ConfirmDialog, LinkDialog, PageHeader, Banner, Skeleton, PageSkeleton),
+  `states/` (StateCard, EmptyState, ErrorState, AccessDenied, RouteError)
+  and `shell/` (the 6.3a shell components plus BareLayout — a centred card
+  and the 28px wordmark, no navigation; the `(auth)` layout's frame).
+  **Bits UI is the headless layer for every interactive primitive** (6.6,
+  D18): Button wraps Bits UI Button, Field's label is Bits UI Label,
+  PasswordInput's show/hide is Bits UI Toggle, Select is Bits UI Select,
+  ConfirmDialog/LinkDialog/UserSheet are Bits UI Dialog, the desktop user
+  menu is Bits UI Popover, tooltips are Bits UI Tooltip, the SSO help
+  section is Bits UI Collapsible and the dividers are Bits UI Separator —
+  all styled with CSS on the `--minerva-*` tokens (shared floating chrome
+  in `src/lib/styles/dialogs.css`); custom components remain only where no
+  primitive exists (Input, FormAlert, Banner, PageHeader, Skeletons, the
+  states family, Icon, shell layout and nav). `Button` renders an `<a>`
+  when given an `href`, else a `<button type="button">`; a disabled link is
   `aria-disabled`, out of the tab order, and does not navigate. `PageHeader`
   owns a page's one `<h1>` and its document title; the state components
   render beneath it as `h2`, while route errors render their card at `h1`.
@@ -204,7 +214,10 @@ failure or a non-JSON body becomes `code: "network"` and it never throws.
   (`role="alert"`, `tabindex="-1"` so a failed submit can move focus
   there). There is no error colour token, so an error is signalled by the
   alert icon plus a 3 px accent left border and the field's accent outline —
-  never colour alone.
+  never colour alone. The same rule as the rest of the app (6.6): Bits UI
+  is the headless layer for every interactive primitive, styled with CSS on
+  the `--minerva-*` tokens; custom components remain only where no
+  primitive exists.
 
 Styling uses only the `--minerva-*` design tokens (6.2); the shell layout
 tokens are the `--minerva-shell-*` set.

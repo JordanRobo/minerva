@@ -90,10 +90,12 @@
 
 <section class="section">
 	<h2>Field</h2>
-	<p class="demo-note">Label (Bits UI Label) + input. Clicking the label focuses its input; the password field's eye toggle flips type and aria-pressed.</p>
+	<p class="demo-note">Label (Bits UI Label) + input. Clicking the label focuses its input; the password field's eye toggle flips type and aria-pressed; the hint and error fields wire their messages in via aria-describedby / aria-invalid.</p>
 	<div class="field-demo">
 		<Field id="gallery-field-name" label="Full name" bind:value={fieldName} />
 		<Field id="gallery-field-pass" label="Password" input="password" autocomplete="new-password" />
+		<Field id="gallery-field-hint" label="Display name" hint="Shown next to your avatar." value="Ada Lovelace" />
+		<Field id="gallery-field-error" label="Email" error="That doesn't look like an email address." value="ada@" />
 	</div>
 </section>
 

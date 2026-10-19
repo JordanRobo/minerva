@@ -13,6 +13,8 @@ Two Svelte 5 reactivity traps surfaced in acceptance, both fixed at the root: (1
 
 Acceptance is green — headless Chrome over CDP against the running compose stack, 1280px and 480px, light and dark, mouse and keyboard-only: gallery (closed / open via `bind:open` / disabled / long-label truncation; listbox portaled to `<body>` at z-index 50 above the popover's 40, options ≥44px); full keyboard flow on a trigger (Enter/Space open, typeahead, arrows, Enter/Space choose, Escape closes with focus on the trigger, outside-click close drops focus exactly as native does); Invitations creates an invite with the chosen role and the show-once link; accept-invite signs the new user straight in; People's draft → Apply → confirm → row updates (plus a keyboard round trip where Apply reappears), own-row disabled + helper, SSO-managed rows read-only with badge and no picker; SSO add-rule with first-rule confirm, inline edit (focus into the input, role change, save) and last-rule confirm back to the empty state; at 480px the listbox opens over table rows and stacked cards with no viewport clipping and no scroll jump; dark mode repaints trigger and listbox from tokens. `bun run check`: 0 errors 0 warnings; `bun run build` passes.
 
+**Status (updated 2026-10-19, close-out):** 6.6 is complete — every component that has a Bits UI primitive now uses one. The final interactive-element audit below accounts for every native interactive element in the app (a fresh grep sweep found nothing missed), and the full M6 regression was re-run green for close-out.
+
 ## Bits UI version
 
 **bits-ui 2.19.5** (latest on npm as of 2026-10-15). Peer dependency `svelte ^5.33.0`; the app is on `svelte ^5.56.1` with SvelteKit 2 — **Svelte 5 support confirmed**. The other peer, `@internationalized/date ^3.8.1`, is only required by the date components (Calendar / DatePicker / …), which Minerva does not use — not needed at install.
@@ -129,4 +131,42 @@ Native `<dialog>` elements — 3 places, all covered by the table above: `ui/Con
 - All four native `<select>`s → **Bits UI Select** (one shared `ui/Select.svelte` wrapper: trigger button + portaled listbox, z-index 50 above the popover's 40 so it clears table cards and dialogs) — **done (step 5)**
 - Step 4 final acceptance pass — **done (2026-10-16)**: every button variant as `<button>`/`<a>`, disabled link inert, failed submits on /login, /accept-invite and /reset-password with alert focus, label-click focus, toggle round-trip, collapsible round-trip and separator roles verified at 1280px and 480px in light and dark (headless Chrome over CDP). The pass caught one pre-existing bug: base.css's `button { all: unset }` reset (added in 6.5) resets box-sizing to its initial value (content-box) on every `<button>`, beating the universal border-box reset, so `width:100%` buttons overflowed their containers by padding + border at narrow widths — fixed by restoring `box-sizing: border-box` inside the same rule (the old native login button was affected too; it surfaced only because the pass measured button widths)
 
-Everything else stays custom because no Bits UI primitive exists for it: Input, FormAlert, PageHeader/Banner/Skeletons, the states family, all shell layout and navigation, Icon.
+Everything else stays custom because no Bits UI primitive exists for it — the per-component reasons are in the [final interactive-element audit](#final-interactive-element-audit-2026-10-19-close-out) below.
+
+## Final interactive-element audit (2026-10-19, close-out)
+
+A fresh grep sweep of `apps/web/src/lib/components` and `apps/web/src/routes` (`<button`, `<a`, `<select`, `<details`, `<summary`, `<dialog`, `showModal`, checkbox/radio/switch inputs, `document.addEventListener`, `title=`, `aria-haspopup`/`aria-expanded`) accounts for every native interactive element in the app. Nothing was missed by the migration; no fixes were needed. No `<select>`, `<details>`, `<dialog>` or `showModal` remains anywhere under `src`; every `title=` hit is a component prop (PageHeader, StateCard family, ConfirmDialog, LinkDialog), not an HTML tooltip; there are no document-level listeners left from the pre-migration disclosure.
+
+| File | Native interactive elements it renders | Verdict |
+|---|---|---|
+| `ui/Button.svelte` | `<button>` or `<a>` (the app's one button/link) | **Bits UI Button** (step 4a) — every page-level button and link routes through this wrapper |
+| `ui/Select.svelte` | trigger `<button>`, listbox items | **Bits UI Select** (step 5) — the button is rendered inside the primitive's `child` snippet; the four call sites bind into it |
+| `ui/PasswordInput.svelte` | show/hide `<button>` | **Bits UI Toggle** (step 4c) — the button is rendered inside the primitive's `child` snippet; the input itself stays custom (no textfield primitive) |
+| `ui/Field.svelte` | `<label>` | **Bits UI Label** (step 4b); the hint/error `aria-describedby`/`aria-invalid` wiring stays custom — Bits UI has no form-field compound |
+| `ui/ConfirmDialog.svelte`, `ui/LinkDialog.svelte` | dialog content; buttons via `Button.svelte` | **Bits UI Dialog** (step 2) |
+| `shell/Sidebar.svelte` | collapse-toggle `<button>`, userchip `<button>`, sign-out `<button>` | The collapse toggle is rendered inside a **Tooltip.Trigger** child snippet (step 3b); the userchip inside a **Popover.Trigger** child snippet (step 3a); the sign-out item is a plain button in the panel's content — the panel is deliberately a disclosure, not a `role="menu"` dropdown, so no menu-item primitive applies |
+| `shell/UserSheet.svelte` | close `<button>`, sign-out `<button>` | The sheet itself is **Bits UI Dialog** (step 2); the two buttons are plain content inside it |
+| `shell/TopBar.svelte` | avatar `<button>` | Keep custom — layout; one pass-through trigger that opens the sheet, no behaviour code of its own |
+| `shell/NavLink.svelte` | nav `<a>`, collapsed-label tooltip | The link is navigation, not a button (no primitive applies); the collapsed label is a **Bits UI Tooltip** (step 3b) |
+| `(app)/admin/people/+page.svelte` | per-row role select; buttons via `Button.svelte`; two disabled-button tooltips | **Bits UI Select** (step 5) + **Tooltip** (step 3b) |
+| `(app)/admin/invitations/+page.svelte` | form role select; buttons | **Bits UI Select** (step 5) |
+| `(app)/admin/sso/+page.svelte` | two role selects, help `<button>` trigger; buttons | **Bits UI Select** (step 5) + **Collapsible** (step 4d) — the help button is rendered inside the primitive's `child` snippet |
+| `(auth)/login`, `(auth)/accept-invite`, `(auth)/reset-password` pages | form inputs, submit buttons via `Button.svelte`; the "or" divider lines | Inputs stay custom (no textfield primitive); the divider is **Bits UI Separator** (step 4e) |
+| `(app)/dev/components/+page.svelte` | gallery instances of every component above | Demos — covers every migrated component and state, incl. Field's hint/error states added at close-out |
+
+**No Bits UI equivalent** (verified against the live docs index for bits-ui 2.19.x — there is no `alert` component, no `field` compound, and no icon set):
+
+| Component | Why it stays custom |
+|---|---|
+| `ui/Input.svelte` | No textfield primitive in Bits UI; zero behaviour code to remove |
+| `ui/FormAlert.svelte` | Display component, and load-bearing: the three auth pages focus `form [role="alert"]` after a failed submit. Bits UI's only alert is `AlertDialog`, a modal confirm — not an inline form message |
+| `ui/Banner.svelte` | Display notice; the dismissal is two lines of local state |
+| `ui/PageHeader.svelte` | Layout/display: the page's one `<h1>` plus its document title |
+| `ui/Skeleton.svelte`, `ui/PageSkeleton.svelte` | aria-hidden pulse placeholders; loading is not a determinate value, so `Progress`/`Meter` don't fit either |
+| `states/` family (StateCard, EmptyState, ErrorState, AccessDenied, RouteError) | Display plus page-level routing logic (RouteError dispatches on `page.status`) |
+| `icons/Icon.svelte` | Bits UI ships no icons; the single-component set is deliberate |
+| Shell layout and nav links (Sidebar layout, TopBar, TabBar, NavLink's `<a>`, BareLayout) | Layout/navigation. Bits UI Tabs is for in-page content panels and NavigationMenu for hover/flyout menus — neither is a sidebar or tab bar. The plain affordance buttons inside them (sheet close, sign-out item, avatar trigger) are single-purpose controls with no behaviour code; wrapping them in `Button.svelte` would import the `.btn` design language into contexts that deliberately don't use it |
+
+Also re-checked at close-out: there are no checkbox/radio/switch inputs anywhere in the app (the primitives exist but nothing to migrate); Avatar stays custom (initials-only displays, no image source — see "Other Bits UI primitives re-checked"); `ScrollArea` has no fit (native scrollbars, no behaviour code).
+
+The full M6 regression was re-run for close-out (headless Chrome over CDP against the running compose stack): the step-5 suite (gallery states, keyboard flow, Invitations create + accept, People role change incl. a keyboard round trip, SSO add/edit/delete with first/last-rule confirms, 480px listbox behaviour, dark mode) plus a supplement pass — /login at 1280 and 480 in light and dark (credentials layout, failed-submit alert focus, the full-width button width fix, dark primary from tokens), invalid-token states on /accept-invite and /reset-password, the shell at 1280 (sidebar, primary nav, skip link, user-menu popover open/Escape/focus return) and at 768 and 480 (top bar + tab bar, avatar sheet with its two separator rules, Escape close), and the in-shell 403 (AccessDenied) and 404 (ErrorState) error pages — all green. The one layout not renderable live is /login's SSO branch (redirect buttons + "or" divider): this dev stack configures no OIDC provider, so that pattern is verified through the gallery's Separator section and the Button link variant, as in steps 4–5. No behavioural differences from the pre-migration UI beyond those already recorded above.
