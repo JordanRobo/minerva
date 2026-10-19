@@ -41,7 +41,11 @@ a {
 }
 
 button {
-    all: unset;
+	all: unset;
+	/* `all` resets box-sizing to its initial value (content-box) and the
+	   element selector beats the * border-box reset above — restore it, or
+	   width:100% buttons overflow their containers by padding + border. */
+	box-sizing: border-box;
 }
 
 a:focus-visible,

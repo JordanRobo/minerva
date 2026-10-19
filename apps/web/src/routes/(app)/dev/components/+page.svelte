@@ -1,6 +1,9 @@
 <script lang="ts">
+	import { Collapsible, Popover, Separator, Tooltip } from 'bits-ui';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Banner from '$lib/components/ui/Banner.svelte';
+	import Field from '$lib/components/ui/Field.svelte';
+	import Select from '$lib/components/ui/Select.svelte';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -18,6 +21,27 @@
 
 	let confirmOpen = $state(false);
 	let linkOpen = $state(false);
+	let busyConfirmOpen = $state(false);
+	let busyInFlight = $state(false);
+	let errorConfirmOpen = $state(false);
+	let errorConfirmError = $state<string | null>(null);
+	let errorConfirmTries = $state(0);
+	let fieldName = $state('');
+
+	const GALLERY_ROLES = [
+		{ value: 'read_only', label: 'Read-only' },
+		{ value: 'staff', label: 'Staff' },
+		{ value: 'admin', label: 'Administrator' }
+	];
+	const GALLERY_LONG = [
+		{ value: 'a', label: 'A very long option label that needs to truncate gracefully' },
+		{ value: 'b', label: 'Another lengthy label, wider than the trigger is' },
+		{ value: 'c', label: 'Short one for contrast' }
+	];
+	let galleryRole = $state('staff');
+	let galleryRoleOpen = $state('admin');
+	let gallerySelectOpen = $state(true);
+	let galleryLong = $state('a');
 </script>
 
 <PageHeader
@@ -61,6 +85,35 @@
 		<Button variant="primary" disabled>Disabled</Button>
 		<Button variant="secondary" href="/goals">As a link</Button>
 		<Button variant="ghost" href="/goals" disabled>Disabled link</Button>
+	</div>
+</section>
+
+<section class="section">
+	<h2>Field</h2>
+	<p class="demo-note">Label (Bits UI Label) + input. Clicking the label focuses its input; the password field's eye toggle flips type and aria-pressed; the hint and error fields wire their messages in via aria-describedby / aria-invalid.</p>
+	<div class="field-demo">
+		<Field id="gallery-field-name" label="Full name" bind:value={fieldName} />
+		<Field id="gallery-field-pass" label="Password" input="password" autocomplete="new-password" />
+		<Field id="gallery-field-hint" label="Display name" hint="Shown next to your avatar." value="Ada Lovelace" />
+		<Field id="gallery-field-error" label="Email" error="That doesn't look like an email address." value="ada@" />
+	</div>
+</section>
+
+<section class="section">
+	<h2>Select</h2>
+	<p class="demo-note">
+		Bits UI Select: click or Enter/Space opens the listbox, arrow keys move the highlight, Enter/Space chooses, Escape closes (focus never leaves the trigger), and typing a letter jumps to that option. The second one starts open; the third is disabled; the fourth has long labels.
+	</p>
+	<div class="select-demo">
+		<Select bind:value={galleryRole} options={GALLERY_ROLES} aria-label="Gallery role" />
+		<Select
+			bind:value={galleryRoleOpen}
+			bind:open={gallerySelectOpen}
+			options={GALLERY_ROLES}
+			aria-label="Gallery role, starts open"
+		/>
+		<Select value="read_only" options={GALLERY_ROLES} aria-label="Gallery role, disabled" disabled />
+		<Select bind:value={galleryLong} options={GALLERY_LONG} aria-label="Gallery long labels" />
 	</div>
 </section>
 
@@ -112,6 +165,58 @@
 </section>
 
 <section class="section">
+	<h2>ConfirmDialog — refuses to close while busy</h2>
+	<Button variant="secondary" onclick={() => (busyConfirmOpen = true)}>
+		Open a confirm that saves for two seconds
+	</Button>
+	<ConfirmDialog
+		open={busyConfirmOpen}
+		title="Save this change?"
+		message="The save takes two seconds. While it is in flight, Escape, the backdrop and Cancel must not close the dialog."
+		confirmLabel="Save"
+		busy={busyInFlight}
+		onConfirm={() => {
+			busyInFlight = true;
+			setTimeout(() => {
+				busyInFlight = false;
+				busyConfirmOpen = false;
+			}, 2000);
+		}}
+		onClose={() => (busyConfirmOpen = false)}
+	/>
+</section>
+
+<section class="section">
+	<h2>ConfirmDialog — error state</h2>
+	<Button
+		variant="secondary"
+		onclick={() => {
+			errorConfirmError = null;
+			errorConfirmTries = 0;
+			errorConfirmOpen = true;
+		}}
+	>
+		Open a confirm that fails once
+	</Button>
+	<ConfirmDialog
+		open={errorConfirmOpen}
+		title="Delete this item?"
+		message="The first attempt fails and shows the error below; the second succeeds."
+		confirmLabel="Delete"
+		error={errorConfirmError}
+		onConfirm={() => {
+			if (errorConfirmTries === 0) {
+				errorConfirmTries = 1;
+				errorConfirmError = 'Something went wrong. Try again.';
+			} else {
+				errorConfirmOpen = false;
+			}
+		}}
+		onClose={() => (errorConfirmOpen = false)}
+	/>
+</section>
+
+<section class="section">
 	<h2>LinkDialog</h2>
 	<Button variant="secondary" onclick={() => (linkOpen = true)}>Open a link dialog</Button>
 	<LinkDialog
@@ -126,6 +231,111 @@
 		Share this link with <strong>someone@example.com</strong>. When they open it, they set a password and are
 		signed in straight away.
 	</LinkDialog>
+</section>
+
+<section class="section">
+	<h2>Tooltip</h2>
+	<p class="demo-note">Opens on hover (after a short delay) and straight away on keyboard focus; it closes when the pointer leaves or the trigger blurs.</p>
+	<div class="row">
+		<Tooltip.Root>
+			<Tooltip.Trigger>
+				{#snippet child({ props })}
+					<Button variant="secondary" {...props}>Hover or focus me</Button>
+				{/snippet}
+			</Tooltip.Trigger>
+			<Tooltip.Content side="top" sideOffset={6}>
+				<span class="minerva-tooltip" role="tooltip">A short explanation, on hover and on keyboard focus.</span>
+			</Tooltip.Content>
+		</Tooltip.Root>
+
+		<!-- The People-screen pattern: a disabled button inside a focusable
+		     wrapper — the button stays inert, the span takes hover/focus. -->
+		<Tooltip.Root>
+			<Tooltip.Trigger>
+				{#snippet child({ props })}
+					<span class="disabled-tip" aria-labelledby="gallery-disabled-btn" {...props}>
+						<Button id="gallery-disabled-btn" variant="secondary" disabled>Disabled action</Button>
+					</span>
+				{/snippet}
+			</Tooltip.Trigger>
+			<Tooltip.Content side="top" sideOffset={6}>
+				<span class="minerva-tooltip" role="tooltip">This one is disabled on purpose — the tooltip still works.</span>
+			</Tooltip.Content>
+		</Tooltip.Root>
+	</div>
+</section>
+
+<section class="section">
+	<h2>Popover</h2>
+	<p class="demo-note">
+		Disclosure semantics (aria-expanded on the trigger, not role="menu"): click or Enter/Space opens it; Escape and outside clicks close it and return focus to the trigger.
+	</p>
+	<Popover.Root>
+		<Popover.Trigger>
+			{#snippet child({ props })}
+				<Button variant="secondary" {...props}>Open a popover</Button>
+			{/snippet}
+		</Popover.Trigger>
+		<Popover.Content side="top" align="start" sideOffset={8} trapFocus={false}>
+			{#snippet child({ props, wrapperProps })}
+				<div {...wrapperProps}>
+					<div class="gallery-popover" {...props}>
+						<p class="gp-title">A small panel</p>
+						<p class="gp-body">Placed by floating-ui and styled from tokens, like the sidebar user menu.</p>
+					</div>
+				</div>
+			{/snippet}
+		</Popover.Content>
+	</Popover.Root>
+</section>
+
+<section class="section">
+	<h2>Collapsible</h2>
+	<p class="demo-note">
+		The SSO help pattern: click or Enter/Space on the trigger toggles it; aria-expanded follows the state and the content is hidden (not just visually) while closed.
+	</p>
+	<Collapsible.Root>
+		{#snippet child({ props })}
+			<div {...props}>
+				<Collapsible.Trigger>
+					{#snippet child({ props })}
+						<button {...props} class="gallery-help-trigger">How group rules work</button>
+					{/snippet}
+				</Collapsible.Trigger>
+				<Collapsible.Content>
+					<ul class="gallery-help-list">
+						<li>First line of the help text, shown while open.</li>
+						<li>Second line — hidden from the DOM (and screen readers) while closed.</li>
+					</ul>
+				</Collapsible.Content>
+			</div>
+		{/snippet}
+	</Collapsible.Root>
+</section>
+
+<section class="section">
+	<h2>Separator</h2>
+	<p class="demo-note">
+		The sidebar / user-sheet rule (role="separator"), and the login "or" divider (decorative, inside an aria-hidden wrapper).
+	</p>
+	<Separator.Root>
+		{#snippet child({ props })}
+			<div {...props} class="gallery-rule"></div>
+		{/snippet}
+	</Separator.Root>
+	<div class="divider-demo" aria-hidden="true">
+		<Separator.Root decorative>
+			{#snippet child({ props })}
+				<div {...props} class="gallery-divider-line"></div>
+			{/snippet}
+		</Separator.Root>
+		<span>or</span>
+		<Separator.Root decorative>
+			{#snippet child({ props })}
+				<div {...props} class="gallery-divider-line"></div>
+			{/snippet}
+		</Separator.Root>
+	</div>
 </section>
 
 <section class="section">
@@ -157,6 +367,97 @@
 		align-items: center;
 		gap: 10px;
 		flex-wrap: wrap;
+	}
+
+	.field-demo {
+		display: flex;
+		flex-direction: column;
+		gap: var(--minerva-space-4);
+		max-width: 360px;
+	}
+
+	.select-demo {
+		display: flex;
+		flex-direction: column;
+		gap: var(--minerva-space-3);
+		max-width: 360px;
+	}
+
+	.demo-note {
+		margin: 0 0 var(--minerva-space-3);
+		font-size: 14px;
+		color: var(--minerva-fg-muted);
+		max-width: 60ch;
+	}
+
+	/* Placed by Bits UI floating-ui (side="top" align="start"); the wrapper
+	   inherits this z-index from the content's computed style. */
+	.gallery-popover {
+		width: 240px;
+		z-index: 40;
+		background: var(--minerva-surface);
+		border: var(--minerva-border-w) solid var(--minerva-border);
+		border-radius: var(--minerva-radius);
+		box-shadow: 0 12px 32px color-mix(in oklch, var(--minerva-fg) 14%, transparent);
+		padding: var(--minerva-space-3);
+	}
+
+	.gp-title {
+		margin: 0 0 4px;
+		font-size: 14.5px;
+		font-weight: 600;
+		color: var(--minerva-fg);
+	}
+
+	.gp-body {
+		margin: 0;
+		font-size: 13.5px;
+		color: var(--minerva-fg-muted);
+	}
+
+	/* Same look as the SSO page's .help-trigger (native button resets). */
+	.gallery-help-trigger {
+		cursor: pointer;
+		font-size: 14.5px;
+		font-weight: 500;
+		font-family: inherit;
+		color: inherit;
+		background: none;
+		border: 0;
+		padding: 0;
+		text-align: left;
+	}
+
+	.gallery-help-list {
+		margin: 10px 0 0;
+		padding-left: 20px;
+		display: grid;
+		gap: 6px;
+		font-size: 13.5px;
+		color: var(--minerva-fg-muted);
+	}
+
+	/* Same look as the shell's .rule and the login page's divider lines. */
+	.gallery-rule {
+		border: 0;
+		border-top: var(--minerva-border-w) solid var(--minerva-border);
+		margin: 10px 0;
+	}
+
+	.divider-demo {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		font-size: 12px;
+		color: var(--minerva-fg-muted);
+		max-width: 360px;
+		margin-top: var(--minerva-space-4);
+	}
+
+	.gallery-divider-line {
+		flex: 1;
+		height: var(--minerva-border-w);
+		background: var(--minerva-border);
 	}
 
 	.wide {

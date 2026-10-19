@@ -11,11 +11,13 @@
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import LinkDialog from '$lib/components/ui/LinkDialog.svelte';
+	import Select from '$lib/components/ui/Select.svelte';
 	import EmptyState from '$lib/components/states/EmptyState.svelte';
 	import ErrorState from '$lib/components/states/ErrorState.svelte';
 	import { roleLabel } from '$lib/nav';
 
 	const ROLES: Role[] = ['admin', 'staff', 'read_only'];
+	const ROLE_OPTIONS = ROLES.map((r) => ({ value: r, label: roleLabel(r) }));
 
 	// null = still loading. The list is fetched in the browser (like the
 	// People screen): every action is a same-origin fetch too, so all of the
@@ -241,11 +243,7 @@
 			/>
 			<div class="field role-field">
 				<label for="invite-role">Role</label>
-				<select id="invite-role" class="role-select" bind:value={role} disabled={anyBusy}>
-					{#each ROLES as r (r)}
-						<option value={r}>{roleLabel(r)}</option>
-					{/each}
-				</select>
+				<Select id="invite-role" bind:value={role} options={ROLE_OPTIONS} disabled={anyBusy} />
 			</div>
 		</div>
 		<div class="form-actions">
@@ -402,27 +400,6 @@
 		font-size: 13px;
 		font-weight: 500;
 		color: var(--minerva-fg-muted);
-	}
-
-	.role-select {
-		min-height: var(--minerva-control-h);
-		padding: 6px 12px;
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		border-radius: var(--minerva-radius);
-		background: var(--minerva-surface);
-		color: var(--minerva-fg);
-		font-family: inherit;
-		font-size: 14.5px;
-	}
-
-	.role-select:focus {
-		outline: 2px solid var(--minerva-accent);
-		border-color: var(--minerva-accent);
-	}
-
-	.role-select[disabled] {
-		opacity: 0.55;
-		cursor: not-allowed;
 	}
 
 	.form-actions {

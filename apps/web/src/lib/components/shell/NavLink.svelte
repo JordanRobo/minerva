@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Tooltip } from 'bits-ui';
 	import Icon from '$lib/components/icons/Icon.svelte';
 	import type { NavItem } from '$lib/nav';
 
@@ -6,19 +7,40 @@
 		$props();
 </script>
 
-<a
-	href={item.href}
-	class="navlink"
-	class:active={active}
-	class:collapsed={collapsed}
-	aria-current={active ? 'page' : undefined}
-	title={collapsed ? item.label : undefined}
->
-	<Icon name={item.icon} />
-	<!-- Visually hidden when collapsed, never display:none: the link keeps
-	     its accessible name either way. -->
-	<span class="navlabel" class:vh={collapsed}>{item.label}</span>
-</a>
+{#if collapsed}
+	<!-- Collapsed: the label is visually hidden but present (the link keeps its
+	     accessible name); the tooltip replaces the old title=, which only worked
+	     on hover and never on keyboard focus. -->
+	<Tooltip.Root>
+		<Tooltip.Trigger>
+			{#snippet child({ props })}
+				<a
+					href={item.href}
+					class="navlink collapsed"
+					class:active={active}
+					aria-current={active ? 'page' : undefined}
+					{...props}
+				>
+					<Icon name={item.icon} />
+					<span class="navlabel vh">{item.label}</span>
+				</a>
+			{/snippet}
+		</Tooltip.Trigger>
+		<Tooltip.Content side="right" sideOffset={6}>
+			<span class="minerva-tooltip" role="tooltip">{item.label}</span>
+		</Tooltip.Content>
+	</Tooltip.Root>
+{:else}
+	<a
+		href={item.href}
+		class="navlink"
+		class:active={active}
+		aria-current={active ? 'page' : undefined}
+	>
+		<Icon name={item.icon} />
+		<span class="navlabel">{item.label}</span>
+	</a>
+{/if}
 
 <style>
 	.navlink {

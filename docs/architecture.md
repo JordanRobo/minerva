@@ -86,8 +86,13 @@ route group; signed-out screens live in the `(auth)` route group
   two-column grid with a fixed sidebar (264px, collapsible to 72px in
   memory only — a reload starts expanded) and only the content column
   scrolling; below it a 56px top bar and a 64px (+ safe-area) bottom tab
-  bar. The desktop user menu is a disclosure; the mobile one is a native
-  `<dialog>` sheet. Sign out posts `/api/auth/logout`, then
+  bar. The desktop user menu is a Bits UI Popover — a disclosure, not a
+  menu (`trapFocus={false}`, focus returns to the trigger on close) — and
+  the mobile one is a Bits UI Dialog bottom sheet (6.6, D18). Collapsed
+  sidebar nav links and the collapse toggle carry Bits UI Tooltips; one
+  `Tooltip.Provider` wraps this layout for all of them, and the shared
+  floating chrome (dialog overlay/card, tooltip bubble) is styled from
+  tokens in `src/lib/styles/dialogs.css`. Sign out posts `/api/auth/logout`, then
   `goto('/login', { invalidateAll: true })`; a failed sign-out stays put
   with an inline error.
 - **Navigation** — `apps/web/src/lib/nav.ts` owns the primary and admin
@@ -96,12 +101,23 @@ route group; signed-out screens live in the `(auth)` route group
   Admin group is rendered via `{#if}` only for admins — it is absent from
   the DOM for other roles.
 - **Components** — shared components in `apps/web/src/lib/components/`:
-  `ui/` (Button, PageHeader, Banner, Skeleton, PageSkeleton), `states/`
-  (StateCard, EmptyState, ErrorState, AccessDenied, RouteError) and
-  `shell/` (the 6.3a shell components plus BareLayout — a centred card and
-  the 28px wordmark, no navigation; the `(auth)` layout's frame). `Button`
-  renders an `<a>` when given an `href`, else a `<button type="button">`;
-  a disabled link is `aria-disabled` and does not navigate. `PageHeader`
+  `ui/` (Button, Field, Input, PasswordInput, Select, FormAlert,
+  ConfirmDialog, LinkDialog, PageHeader, Banner, Skeleton, PageSkeleton),
+  `states/` (StateCard, EmptyState, ErrorState, AccessDenied, RouteError)
+  and `shell/` (the 6.3a shell components plus BareLayout — a centred card
+  and the 28px wordmark, no navigation; the `(auth)` layout's frame).
+  **Bits UI is the headless layer for every interactive primitive** (6.6,
+  D18): Button wraps Bits UI Button, Field's label is Bits UI Label,
+  PasswordInput's show/hide is Bits UI Toggle, Select is Bits UI Select,
+  ConfirmDialog/LinkDialog/UserSheet are Bits UI Dialog, the desktop user
+  menu is Bits UI Popover, tooltips are Bits UI Tooltip, the SSO help
+  section is Bits UI Collapsible and the dividers are Bits UI Separator —
+  all styled with CSS on the `--minerva-*` tokens (shared floating chrome
+  in `src/lib/styles/dialogs.css`); custom components remain only where no
+  primitive exists (Input, FormAlert, Banner, PageHeader, Skeletons, the
+  states family, Icon, shell layout and nav). `Button` renders an `<a>`
+  when given an `href`, else a `<button type="button">`; a disabled link is
+  `aria-disabled`, out of the tab order, and does not navigate. `PageHeader`
   owns a page's one `<h1>` and its document title; the state components
   render beneath it as `h2`, while route errors render their card at `h1`.
   Components never check roles themselves: pages pass an action only when
@@ -189,13 +205,19 @@ failure or a non-JSON body becomes `code: "network"` and it never throws.
   on `/login` is a plain-text pointer to an administrator, since
   self-service reset emails only arrive with 7.3 email delivery.
 - **Form components** — `ui/Input.svelte`, `ui/PasswordInput.svelte`
-  (Input plus a show/hide toggle with `aria-pressed` and a "Show
-  password"/"Hide password" label), `ui/Field.svelte` (label + hint/error,
-  wiring `aria-describedby`/`aria-invalid`), and `ui/FormAlert.svelte`
+  (Input plus a Bits UI Toggle show/hide with `aria-pressed` and a "Show
+  password"/"Hide password" label), `ui/Field.svelte` (Bits UI Label +
+  hint/error, wiring `aria-describedby`/`aria-invalid`), `ui/Select.svelte`
+  (a Bits UI Select — one trigger button plus a portaled listbox for every
+  picker in the app; the primitive owns open state, keyboard handling and
+  ARIA, and the trigger keeps focus the whole time) and `ui/FormAlert.svelte`
   (`role="alert"`, `tabindex="-1"` so a failed submit can move focus
   there). There is no error colour token, so an error is signalled by the
   alert icon plus a 3 px accent left border and the field's accent outline —
-  never colour alone.
+  never colour alone. The same rule as the rest of the app (6.6): Bits UI
+  is the headless layer for every interactive primitive, styled with CSS on
+  the `--minerva-*` tokens; custom components remain only where no
+  primitive exists.
 
 Styling uses only the `--minerva-*` design tokens (6.2); the shell layout
 tokens are the `--minerva-shell-*` set.

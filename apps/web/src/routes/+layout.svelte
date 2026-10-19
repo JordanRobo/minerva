@@ -3,6 +3,7 @@
 	import '$lib/styles/shell-tokens.css';
 	import '$lib/styles/fonts.css';
 	import '$lib/styles/base.css';
+	import '$lib/styles/dialogs.css';
 
 	let { children } = $props();
 </script>

@@ -81,8 +81,8 @@ services:
             # without a config file, set e.g. in .env:
             # MINERVA_OIDC__ISSUER_URL=https://auth.example.com/application/o/minerva/
             # First-admin bootstrap (only takes effect while no users exist):
-            # MINERVA_BOOTSTRAP__ADMIN_EMAIL=admin@example.com
-            # MINERVA_BOOTSTRAP__ADMIN_PASSWORD=<change-me, at least 8 characters>
+            MINERVA_BOOTSTRAP__ADMIN_EMAIL: admin@example.com
+            MINERVA_BOOTSTRAP__ADMIN_PASSWORD: password_123
         ports:
             # Host port 3010 (host 8080 is used by gluetun on the dev machine).
             - "3010:8080"

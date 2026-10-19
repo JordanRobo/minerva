@@ -1,14 +1,15 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import { Dialog } from 'bits-ui';
 	import Button from './Button.svelte';
 	import Banner from './Banner.svelte';
 
-	// The one-time link dialog (password resets, invitations): the raw token
-	// lives in the parent's state and is shown exactly once, here — never
-	// stored or logged. `note` is an instruction line above the link (e.g.
-	// "email isn't set up, send it by hand"); `emailedTo` shows the "also sent
-	// by email" banner; `children` is the intro sentence. Mount only one at a
-	// time — the title id is static.
+	// The one-time link dialog (password resets, invitations) on Bits UI
+	// Dialog (D18): the raw token lives in the parent's state and is shown
+	// exactly once, here — never stored or logged. `note` is an instruction
+	// line above the link (e.g. "email isn't set up, send it by hand");
+	// `emailedTo` shows the "also sent by email" banner; `children` is the
+	// intro sentence.
 	let {
 		open,
 		title,
@@ -29,15 +30,26 @@
 		children?: Snippet;
 	} = $props();
 
+	let bitsOpen = $state(false);
+
+	function setOpen(next: boolean) {
+		bitsOpen = next;
+		if (!next) onClose();
+	}
+
+	const getOpen = () => bitsOpen;
+
+	// The parent drives `open` one way. Mirror it into Bits UI's state in both
+	// directions: a parent close (e.g. after the link was copied and the row
+	// dismissed) must not re-fire onClose, which is reserved for user-initiated
+	// closes.
+	$effect(() => {
+		if (open && !bitsOpen) bitsOpen = true;
+		else if (!open && bitsOpen) bitsOpen = false;
+	});
+
 	let copied = $state(false);
 	let linkInput = $state<HTMLInputElement | null>(null);
-	let dialog = $state<HTMLDialogElement | null>(null);
-
-	$effect(() => {
-		if (!dialog) return;
-		if (open && !dialog.open) dialog.showModal();
-		else if (!open && dialog.open) dialog.close();
-	});
 
 	// A new link means a fresh "Copied" state.
 	$effect(() => {
@@ -64,52 +76,53 @@
 	}
 </script>
 
-<dialog class="link" bind:this={dialog} aria-labelledby="link-dialog-title" onclose={onClose}>
-	{#if open}
-		<h2 id="link-dialog-title">{title}</h2>
-		<p class="intro">{@render children?.()}</p>
-		{#if note}
-			<p class="note">{note}</p>
-		{/if}
-		<div class="link-row">
-			<input
-				class="link-input"
-				type="text"
-				readonly
-				value={shownLink}
-				bind:this={linkInput}
-				aria-label={title}
-				onfocus={(e) => e.currentTarget.select()}
-				onclick={(e) => e.currentTarget.select()}
-			/>
-			<Button variant="secondary" onclick={copyLink}>{copied ? 'Copied' : 'Copy'}</Button>
-		</div>
-		<p class="fine">{finePrint}</p>
-		{#if emailedTo}
-			<Banner>We've also sent it by email to {emailedTo}.</Banner>
-		{/if}
-		<div class="actions">
-			<Button variant="secondary" onclick={onClose}>Close</Button>
-		</div>
-	{/if}
-</dialog>
+<Dialog.Root bind:open={getOpen, setOpen}>
+	<Dialog.Portal>
+		<Dialog.Overlay />
+		<Dialog.Content>
+			{#snippet child({ props })}
+				<div {...props} class="link minerva-dialog-card">
+					<Dialog.Title>
+						{#snippet child({ props: headingProps })}
+							<h2 {...headingProps}>{title}</h2>
+						{/snippet}
+					</Dialog.Title>
+					<p class="intro">{@render children?.()}</p>
+					{#if note}
+						<p class="note">{note}</p>
+					{/if}
+					<div class="link-row">
+						<input
+							class="link-input"
+							type="text"
+							readonly
+							value={shownLink}
+							bind:this={linkInput}
+							aria-label={title}
+							onfocus={(e) => e.currentTarget.select()}
+							onclick={(e) => e.currentTarget.select()}
+						/>
+						<Button variant="secondary" onclick={copyLink}>{copied ? 'Copied' : 'Copy'}</Button>
+					</div>
+					<p class="fine">{finePrint}</p>
+					{#if emailedTo}
+						<Banner>We've also sent it by email to {emailedTo}.</Banner>
+					{/if}
+					<div class="actions">
+						<Button variant="secondary" onclick={() => setOpen(false)}>Close</Button>
+					</div>
+				</div>
+			{/snippet}
+		</Dialog.Content>
+	</Dialog.Portal>
+</Dialog.Root>
 
 <style>
 	.link {
 		width: min(560px, calc(100vw - 32px));
-		margin: auto;
-		padding: var(--minerva-space-6);
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		border-radius: var(--minerva-radius);
-		background: var(--minerva-surface);
-		color: var(--minerva-fg);
 	}
 
-	.link::backdrop {
-		background: color-mix(in oklch, var(--minerva-fg) 40%, transparent);
-	}
-
-	.link h2 {
+	h2 {
 		margin: 0;
 		font-size: 19px;
 	}

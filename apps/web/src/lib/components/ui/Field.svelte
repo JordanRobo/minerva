@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Label } from 'bits-ui';
 	import Icon from '../icons/Icon.svelte';
 	import Input from './Input.svelte';
 	import PasswordInput from './PasswordInput.svelte';
@@ -28,7 +29,14 @@
 </script>
 
 <div class="field">
-	<label for={id}>{label}</label>
+	<!-- Bits UI Label (D18): the child snippet keeps the <label> in this
+	     component's scope so the .field > label styles still apply; `for`
+	     flows back through props. -->
+	<Label.Root for={id}>
+		{#snippet child({ props })}
+			<label {...props}>{label}</label>
+		{/snippet}
+	</Label.Root>
 	{#if input === 'password'}
 		<PasswordInput
 			id={id}

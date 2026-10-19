@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Popover, Separator, Tooltip } from 'bits-ui';
 	import Icon from '$lib/components/icons/Icon.svelte';
 	import { adminEntry, isActive, primaryNav, roleLabel } from '$lib/nav';
 	import type { CurrentUser } from '$lib/server/api';
@@ -27,61 +28,39 @@
 
 	const name = $derived(user.display_name || user.email);
 
-	// Desktop user menu: a disclosure (aria-expanded on the trigger), not a
-	// role="menu" popup — the panel holds one action, disclosure is the
-	// honest pattern.
-	let menuOpen = $state(false);
-	let chipBtn = $state<HTMLButtonElement | null>(null);
-	let menuEl = $state<HTMLDivElement | null>(null);
-	let lastFocus: HTMLElement | null = null;
-
-	function toggleMenu() {
-		menuOpen = !menuOpen;
-		if (menuOpen) lastFocus = (document.activeElement as HTMLElement | null) ?? null;
-	}
-
-	function closeMenu(refocus = true) {
-		if (!menuOpen) return;
-		menuOpen = false;
-		if (refocus) lastFocus?.focus();
-	}
-
-	$effect(() => {
-		if (!menuOpen) return;
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key === 'Escape') {
-				e.preventDefault();
-				e.stopPropagation();
-				closeMenu();
-			}
-		};
-		const onClick = (e: MouseEvent) => {
-			const t = e.target as Node;
-			if (menuEl && !menuEl.contains(t) && chipBtn && !chipBtn.contains(t)) closeMenu();
-		};
-		document.addEventListener('keydown', onKey, true);
-		document.addEventListener('mousedown', onClick, true);
-		return () => {
-			document.removeEventListener('keydown', onKey, true);
-			document.removeEventListener('mousedown', onClick, true);
-		};
-	});
+	// Desktop user menu: a Bits UI Popover (D18), deliberately not a
+	// DropdownMenu — the panel holds one action, so it keeps disclosure
+	// semantics (aria-expanded on the trigger) rather than role="menu". The
+	// primitive brings Escape/outside-click closing and focus return to the
+	// trigger; trapFocus is off because the old disclosure never trapped.
 </script>
 
 <aside class="sidebar" class:collapsed={collapsed}>
 	<div class="brand-row">
 		<Wordmark collapsed={collapsed} />
-		<button
-			class="collapse-btn"
-			class:collapsed={collapsed}
-			type="button"
-			aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-			aria-expanded={!collapsed}
-			title={collapsed ? 'Expand' : 'Collapse'}
-			onclick={onToggleCollapse}
-		>
-			<Icon name="chevron" size={16} />
-		</button>
+		<Tooltip.Root>
+			<Tooltip.Trigger>
+				{#snippet child({ props })}
+					<!-- {...props} before onclick: the trigger's own click handler would
+					     otherwise clobber the toggle (a pointer press already dismisses the
+					     tooltip via pointerdown). -->
+					<button
+						class="collapse-btn"
+						class:collapsed={collapsed}
+						type="button"
+						aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+						aria-expanded={!collapsed}
+						{...props}
+						onclick={onToggleCollapse}
+					>
+						<Icon name="chevron" size={16} />
+					</button>
+				{/snippet}
+			</Tooltip.Trigger>
+			<Tooltip.Content side="right" sideOffset={6}>
+				<span class="minerva-tooltip" role="tooltip">{collapsed ? 'Expand' : 'Collapse'}</span>
+			</Tooltip.Content>
+		</Tooltip.Root>
 	</div>
 
 	<nav class="nav" aria-label="Primary">
@@ -101,38 +80,45 @@
 	{/if}
 
 	<div class="userchip-wrap">
-		<button
-			bind:this={chipBtn}
-			class="userchip"
-			type="button"
-			aria-haspopup="true"
-			aria-expanded={menuOpen}
-			aria-controls="user-menu"
-			onclick={toggleMenu}
-		>
-			<span class="avatar" aria-hidden="true">{initials}</span>
-			<span class="uchip-text" class:vh={collapsed}>
-				<span class="uchip-name">{name}</span>
-				<span class="uchip-role">{roleLabel(user.role)}</span>
-			</span>
-		</button>
-
-		{#if menuOpen}
-			<div class="usermenu" id="user-menu" bind:this={menuEl}>
-				<div class="um-head">
-					<p class="um-name">{name}</p>
-					<p class="um-email">{user.email}</p>
-					<p class="um-role">{roleLabel(user.role)}</p>
-				</div>
-				<hr class="rule" />
-				<button class="um-item" type="button" onclick={onSignOut}>
-					<Icon name="signout" />Sign out
-				</button>
-				{#if signOutError}
-					<p class="um-error" role="alert">{signOutError}</p>
-				{/if}
-			</div>
-		{/if}
+		<Popover.Root>
+			<Popover.Trigger>
+				{#snippet child({ props })}
+					<button class="userchip" {...props}>
+						<span class="avatar" aria-hidden="true">{initials}</span>
+						<span class="uchip-text" class:vh={collapsed}>
+							<span class="uchip-name">{name}</span>
+							<span class="uchip-role">{roleLabel(user.role)}</span>
+						</span>
+					</button>
+				{/snippet}
+			</Popover.Trigger>
+			<Popover.Content side="top" align="start" sideOffset={8} trapFocus={false}>
+				{#snippet child({ props, wrapperProps })}
+					<div {...wrapperProps}>
+						<div class="usermenu" {...props}>
+							<div class="um-head">
+								<p class="um-name">{name}</p>
+								<p class="um-email">{user.email}</p>
+								<p class="um-role">{roleLabel(user.role)}</p>
+							</div>
+							<!-- Bits UI Separator (D18): replaces the <hr>; the child
+							     snippet keeps .rule in this component's scope. -->
+							<Separator.Root>
+								{#snippet child({ props })}
+									<div {...props} class="rule"></div>
+								{/snippet}
+							</Separator.Root>
+							<button class="um-item" type="button" onclick={onSignOut}>
+								<Icon name="signout" />Sign out
+							</button>
+							{#if signOutError}
+								<p class="um-error" role="alert">{signOutError}</p>
+							{/if}
+						</div>
+					</div>
+				{/snippet}
+			</Popover.Content>
+		</Popover.Root>
 	</div>
 </aside>
 
@@ -261,10 +247,9 @@
 		color: var(--minerva-fg-muted);
 	}
 
+	/* Placed by Bits UI floating-ui (side="top" align="start"); the wrapper
+	   inherits this z-index from the content's computed style. */
 	.usermenu {
-		position: absolute;
-		bottom: calc(100% + 8px);
-		left: 0;
 		width: 240px;
 		z-index: 40;
 		background: var(--minerva-surface);

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Separator } from 'bits-ui';
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { postJson } from '$lib/api';
@@ -119,7 +120,22 @@
 		{/if}
 
 		{#if credentials && redirects.length > 0}
-			<div class="divider" aria-hidden="true"><span>or</span></div>
+			<!-- Bits UI Separator (D18): the two lines are decorative inside
+			     the aria-hidden wrapper; the child snippets keep .divider-line
+			     in this component's scope. -->
+			<div class="divider" aria-hidden="true">
+				<Separator.Root decorative>
+					{#snippet child({ props })}
+						<div {...props} class="divider-line"></div>
+					{/snippet}
+				</Separator.Root>
+				<span>or</span>
+				<Separator.Root decorative>
+					{#snippet child({ props })}
+						<div {...props} class="divider-line"></div>
+					{/snippet}
+				</Separator.Root>
+			</div>
 		{/if}
 
 		{#each redirects as provider (provider.id)}
@@ -153,9 +169,7 @@
 		color: var(--minerva-fg-muted);
 	}
 
-	.divider::before,
-	.divider::after {
-		content: '';
+	.divider-line {
 		flex: 1;
 		height: var(--minerva-border-w);
 		background: var(--minerva-border);

@@ -13,6 +13,7 @@
 		| 'users'
 		| 'invite'
 		| 'sso'
+		| 'check'
 		| 'close'
 		| 'signout'
 		| 'chevron'
@@ -35,6 +36,7 @@
 			'<circle cx="9" cy="9" r="3.5"/><path d="M3.5 19.5c.7-3 3-4.5 5.5-4.5s4.8 1.5 5.5 4.5"/><path d="M15.5 6a3.5 3.5 0 010 6.7M17.2 15.2c1.7.7 2.9 2 3.3 4.3"/>',
 		invite: '<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M4.5 7.5l7.5 5.5 7.5-5.5"/>',
 		sso: '<circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H20M16.5 12v3M19.5 12v2.5"/>',
+		check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
 		close: '<path d="M6 6l12 12M18 6L6 18"/>',
 		signout: '<path d="M13.5 4H18a2 2 0 012 2v12a2 2 0 01-2 2h-4.5"/><path d="M10 8l-4 4 4 4M6 12h9"/>',
 		chevron: '<path d="M14.5 6l-6 6 6 6"/>',

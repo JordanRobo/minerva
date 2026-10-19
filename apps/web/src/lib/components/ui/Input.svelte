@@ -2,11 +2,12 @@
 	let {
 		value = $bindable(''),
 		type = 'text',
+		ref = $bindable(null),
 		...rest
-	}: { value?: string; type?: string } & Record<string, unknown> = $props();
+	}: { value?: string; type?: string; ref?: HTMLInputElement | null } & Record<string, unknown> = $props();
 </script>
 
-<input class="input" {type} bind:value {...rest} />
+<input class="input" {type} bind:value bind:this={ref} {...rest} />
 
 <style>
 	/* docs/design/app-shell.html .field/.input, tokens only. */

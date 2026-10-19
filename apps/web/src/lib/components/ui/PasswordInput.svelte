@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Toggle } from 'bits-ui';
 	import Input from './Input.svelte';
 	import Icon from '../icons/Icon.svelte';
 
@@ -12,15 +13,17 @@
 
 <div class="pw">
 	<Input type={visible ? 'text' : 'password'} bind:value {...rest} />
-	<button
-		type="button"
-		class="toggle"
-		aria-pressed={visible}
-		aria-label={visible ? 'Hide password' : 'Show password'}
-		onclick={() => (visible = !visible)}
-	>
-		<Icon name={visible ? 'eye-off' : 'eye'} size={18} />
-	</button>
+	<!-- Bits UI Toggle (D18): the child snippet keeps the <button> in this
+	     component's scope so the .toggle styles apply; `class` and
+	     `aria-label` flow back through props, aria-pressed is set by the
+	     primitive, and its click handler flips the bound pressed state. -->
+	<Toggle.Root bind:pressed={visible} class="toggle" aria-label={visible ? 'Hide password' : 'Show password'}>
+		{#snippet child({ props })}
+			<button {...props}>
+				<Icon name={visible ? 'eye-off' : 'eye'} size={18} />
+			</button>
+		{/snippet}
+	</Toggle.Root>
 </div>
 
 <style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Tooltip } from 'bits-ui';
 	import { page } from '$app/state';
 	import { beforeNavigate, goto } from '$app/navigation';
 	import Sidebar from '$lib/components/shell/Sidebar.svelte';
@@ -59,6 +60,9 @@
 	}
 </script>
 
+<!-- One provider for the whole shell (D18): coordinates at most one visible
+     tooltip at a time and supplies the hover delay. -->
+<Tooltip.Provider>
 <div class="shell" class:collapsed={collapsed}>
 	<a class="skip-link" href="#main">Skip to content</a>
 
@@ -92,6 +96,7 @@
 		onSignOut={signOut}
 	/>
 </div>
+</Tooltip.Provider>
 
 <style>
 	/* One breakpoint (900px): desktop is a two-column grid with a fixed

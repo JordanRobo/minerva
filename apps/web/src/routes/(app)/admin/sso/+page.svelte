@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Collapsible } from 'bits-ui';
 	import { onMount } from 'svelte';
 	import { apiRequest, postJson } from '$lib/api';
 	import type { ApiErr } from '$lib/api';
@@ -7,14 +8,17 @@
 	import Button from '$lib/components/ui/Button.svelte';
 	import Banner from '$lib/components/ui/Banner.svelte';
 	import Field from '$lib/components/ui/Field.svelte';
+	import Input from '$lib/components/ui/Input.svelte';
 	import FormAlert from '$lib/components/ui/FormAlert.svelte';
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import Select from '$lib/components/ui/Select.svelte';
 	import EmptyState from '$lib/components/states/EmptyState.svelte';
 	import ErrorState from '$lib/components/states/ErrorState.svelte';
 	import { roleLabel } from '$lib/nav';
 
 	const ROLES: Role[] = ['admin', 'staff', 'read_only'];
+	const ROLE_OPTIONS = ROLES.map((r) => ({ value: r, label: roleLabel(r) }));
 
 	// null = still loading. Like the other admin screens, everything is a
 	// same-origin browser fetch, so all of the screen's data lives here.
@@ -148,7 +152,20 @@
 		busyId = null;
 		if (res.ok) {
 			editing = null;
-			rules = rules ? rules.map((x) => (x.id === res.data.id ? res.data : x)).sort(byName) : [res.data];
+			// Mutate the row's object in place instead of replacing it: a keyed
+			// each block keeps its original item while the key is unchanged, so a
+			// new object would never reach the row. Reassign only when the sort
+			// order changed, to reorder without remounting anything.
+			if (rules) {
+				const i = rules.findIndex((x) => x.id === res.data.id);
+				if (i !== -1) Object.assign(rules[i], res.data);
+				else rules.push(res.data);
+			} else {
+				rules = [res.data];
+			}
+			const current = rules;
+			const sorted = [...current].sort(byName);
+			if (sorted.some((x, i) => x !== current[i])) rules = sorted;
 			notice = { kind: 'success', text: savedText(res.data) };
 		} else {
 			notice = { kind: 'error', text: friendlyError(res) };
@@ -269,11 +286,7 @@
 				/>
 				<div class="field role-field">
 					<label for="sso-rule-role">Role</label>
-					<select id="sso-rule-role" class="role-select" bind:value={role} disabled={anyBusy}>
-						{#each ROLES as r (r)}
-							<option value={r}>{roleLabel(r)}</option>
-						{/each}
-					</select>
+					<Select id="sso-rule-role" bind:value={role} options={ROLE_OPTIONS} disabled={anyBusy} />
 				</div>
 			</div>
 			<div class="form-actions">
@@ -307,22 +320,13 @@
 						<tr>
 							{#if editing && editing.rule.id === r.id}
 								<td data-label="Group name">
-									<input
-										class="group-input"
-										bind:this={editInput}
-										bind:value={editing.name}
-										aria-label="Group name"
-									/>
+									<Input bind:ref={editInput} bind:value={editing.name} aria-label="Group name" />
 									{#if editing.name.trim().length > 255}
 										<p class="helper">Group names can be at most 255 characters.</p>
 									{/if}
 								</td>
 								<td data-label="Role">
-									<select class="role-select" bind:value={editing.role} aria-label="Role">
-										{#each ROLES as roleOption (roleOption)}
-											<option value={roleOption}>{roleLabel(roleOption)}</option>
-										{/each}
-									</select>
+									<Select bind:value={editing.role} options={ROLE_OPTIONS} aria-label="Role" />
 								</td>
 								<td data-label="" class="actions-cell">
 									<Button variant="secondary" disabled={anyBusy || !editValid} onclick={saveRule}>
@@ -357,36 +361,50 @@
 		</div>
 	{/if}
 
-	<details class="help">
-		<summary>How group rules work</summary>
-		<ul>
-			<li>
-				While at least one rule exists, each time someone signs in with single sign-on, their role is re-set from
-				the groups their school's sign-in system says they belong to.
-			</li>
-			<li>
-				If several of their groups have rules, the least permissive role applies — Read-only, then Staff, then
-				Administrator.
-			</li>
-			<li>Group names must match exactly: capitals matter, and spaces at the start or end are ignored.</li>
-			<li>
-				If none of their groups has a rule — or their sign-in doesn't include any groups — they get Read-only. Add a
-				rule for one of their groups to give them more access.
-			</li>
-			<li>
-				Roles set this way can't be edited by hand on the People screen; they're shown as "Managed by SSO". Remove
-				every rule to edit roles there again.
-			</li>
-			<li>
-				The first administrator account (the one created when Minerva was set up) is never changed by group rules,
-				and the last active administrator is never demoted — if a rule would do that, their role is left as it is.
-			</li>
-			<li>
-				For any of this to work, your school's sign-in system must be set up to send each person's groups in its ID
-				token (see the setup documentation). Minerva can't check that from here.
-			</li>
-		</ul>
-	</details>
+	<!-- Bits UI Collapsible (D18): the child snippets keep every element in
+	     this component's scope so the .help styles apply; the primitive owns
+	     aria-expanded/aria-controls on the trigger, Space/Enter handling and
+	     the content's hidden state. Default-closed, as <details> was. -->
+	<Collapsible.Root>
+		{#snippet child({ props })}
+			<div {...props} class="help">
+				<Collapsible.Trigger>
+					{#snippet child({ props })}
+						<button {...props} class="help-trigger">How group rules work</button>
+					{/snippet}
+				</Collapsible.Trigger>
+				<Collapsible.Content>
+					<ul>
+					<li>
+						While at least one rule exists, each time someone signs in with single sign-on, their role is re-set from
+						the groups their school's sign-in system says they belong to.
+					</li>
+					<li>
+						If several of their groups have rules, the least permissive role applies — Read-only, then Staff, then
+						Administrator.
+					</li>
+					<li>Group names must match exactly: capitals matter, and spaces at the start or end are ignored.</li>
+					<li>
+						If none of their groups has a rule — or their sign-in doesn't include any groups — they get Read-only. Add a
+						rule for one of their groups to give them more access.
+					</li>
+					<li>
+						Roles set this way can't be edited by hand on the People screen; they're shown as "Managed by SSO". Remove
+						every rule to edit roles there again.
+					</li>
+					<li>
+						The first administrator account (the one created when Minerva was set up) is never changed by group rules,
+						and the last active administrator is never demoted — if a rule would do that, their role is left as it is.
+					</li>
+					<li>
+						For any of this to work, your school's sign-in system must be set up to send each person's groups in its ID
+						token (see the setup documentation). Minerva can't check that from here.
+					</li>
+					</ul>
+				</Collapsible.Content>
+			</div>
+		{/snippet}
+	</Collapsible.Root>
 {/if}
 
 <ConfirmDialog
@@ -450,27 +468,6 @@
 		color: var(--minerva-fg-muted);
 	}
 
-	.role-select {
-		min-height: var(--minerva-control-h);
-		padding: 6px 12px;
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		border-radius: var(--minerva-radius);
-		background: var(--minerva-surface);
-		color: var(--minerva-fg);
-		font-family: inherit;
-		font-size: 14.5px;
-	}
-
-	.role-select:focus {
-		outline: 2px solid var(--minerva-accent);
-		border-color: var(--minerva-accent);
-	}
-
-	.role-select[disabled] {
-		opacity: 0.55;
-		cursor: not-allowed;
-	}
-
 	.form-actions {
 		display: flex;
 		margin-top: var(--minerva-space-4);
@@ -519,23 +516,6 @@
 		word-break: break-all;
 	}
 
-	.group-input {
-		width: 100%;
-		min-height: var(--minerva-control-h);
-		padding: 6px 12px;
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		border-radius: var(--minerva-radius);
-		background: var(--minerva-surface);
-		color: var(--minerva-fg);
-		font-family: inherit;
-		font-size: 14.5px;
-	}
-
-	.group-input:focus {
-		outline: 2px solid var(--minerva-accent);
-		border-color: var(--minerva-accent);
-	}
-
 	.helper {
 		margin: 6px 0 0;
 		font-size: 13px;
@@ -554,10 +534,19 @@
 		margin-top: var(--minerva-space-5);
 	}
 
-	.help summary {
+	/* The Collapsible trigger is a real <button> now; the resets keep it
+	   reading like the old <summary> text (the native disclosure triangle
+	   went with the native element). */
+	.help-trigger {
 		cursor: pointer;
 		font-size: 14.5px;
 		font-weight: 500;
+		font-family: inherit;
+		color: inherit;
+		background: none;
+		border: 0;
+		padding: 0;
+		text-align: left;
 	}
 
 	.help ul {
@@ -619,10 +608,6 @@
 
 		td[data-label='']::before {
 			content: none;
-		}
-
-		.group-input {
-			flex: 1 1 180px;
 		}
 
 		.helper {
