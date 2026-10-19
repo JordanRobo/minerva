@@ -11,6 +11,7 @@
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import LinkDialog from '$lib/components/ui/LinkDialog.svelte';
+	import Select from '$lib/components/ui/Select.svelte';
 	import EmptyState from '$lib/components/states/EmptyState.svelte';
 	import ErrorState from '$lib/components/states/ErrorState.svelte';
 	import { roleLabel } from '$lib/nav';
@@ -20,6 +21,7 @@
 	const me = $derived(data.user);
 
 	const ROLES: Role[] = ['admin', 'staff', 'read_only'];
+	const ROLE_OPTIONS = ROLES.map((r) => ({ value: r, label: roleLabel(r) }));
 
 	// null = still loading. The list is fetched in the browser (see
 	// +page.server.ts): every action below is a same-origin fetch too, so all
@@ -36,8 +38,19 @@
 	let notice = $state<{ kind: 'error' | 'success'; text: string } | null>(null);
 
 	// Per-row role drafts: what the select shows before "Apply" confirms it.
-	const draftRoles = $state(new Map<string, Role>());
-	const draftRole = (u: AdminUser): Role => draftRoles.get(u.id) ?? u.role;
+	// A plain object, not a Map — $state proxies objects and arrays but not
+	// Maps, so a Map here would never fire reactivity and Apply would never appear.
+	const draftRoles = $state<Record<string, Role>>({});
+	const draftRole = (u: AdminUser): Role => draftRoles[u.id] ?? u.role;
+
+	// Per-row draft bindings for the Select wrapper (step 5): the getter reads
+	// the draft object (falling back to the row's role), the setter writes into
+	// it. Bits UI only ever emits one of the option values, so the old
+	// onchange type-check went with the native element.
+	const getDraftRole = (u: AdminUser) => () => draftRoles[u.id] ?? u.role;
+	const setDraftRole = (u: AdminUser) => (v: string) => {
+		draftRoles[u.id] = v as Role;
+	};
 
 	type PendingAction =
 		| { kind: 'role'; user: AdminUser; newRole: Role }
@@ -68,8 +81,12 @@
 
 	function replaceUser(updated: AdminUser) {
 		if (!users) return;
-		users = users.map((u) => (u.id === updated.id ? updated : u));
-		draftRoles.delete(updated.id);
+		// Mutate the row's object in place instead of replacing it: a keyed each
+		// block keeps its original item while the key is unchanged, so a new
+		// object would never reach the row (its closures would stay stale).
+		const i = users.findIndex((u) => u.id === updated.id);
+		if (i !== -1) Object.assign(users[i], updated);
+		delete draftRoles[updated.id];
 	}
 
 	// The API's messages are plain language by design, but the UI never shows
@@ -236,22 +253,15 @@
 								</p>
 							{:else}
 								<span class="role-cell">
-									<select
-										class="role-select"
+									<!-- Bits UI Select (step 5): the getter/setter pair binds
+										 this row's draft into/out of draftRoles; the
+										 Apply button below appears when the draft differs. -->
+									<Select
+										bind:value={getDraftRole(u), setDraftRole(u)}
+										options={ROLE_OPTIONS}
 										aria-label="Role for {name(u)}"
-										value={draftRole(u)}
 										disabled={self}
-										onchange={(e) => {
-											const v = e.currentTarget.value;
-											if (v === 'admin' || v === 'staff' || v === 'read_only') {
-												draftRoles.set(u.id, v);
-											}
-										}}
-									>
-										{#each ROLES as r (r)}
-											<option value={r}>{roleLabel(r)}</option>
-										{/each}
-									</select>
+									/>
 									{#if !self && draftRole(u) !== u.role}
 										<Button variant="ghost" disabled={busyId !== null} onclick={() => openRoleChange(u)}>
 											Apply
@@ -454,27 +464,6 @@
 		align-items: center;
 		gap: 8px;
 		flex-wrap: wrap;
-	}
-
-	.role-select {
-		min-height: var(--minerva-control-h);
-		padding: 6px 12px;
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		border-radius: var(--minerva-radius);
-		background: var(--minerva-surface);
-		color: var(--minerva-fg);
-		font-family: inherit;
-		font-size: 14.5px;
-	}
-
-	.role-select:focus {
-		outline: 2px solid var(--minerva-accent);
-		border-color: var(--minerva-accent);
-	}
-
-	.role-select[disabled] {
-		opacity: 0.55;
-		cursor: not-allowed;
 	}
 
 	.helper {

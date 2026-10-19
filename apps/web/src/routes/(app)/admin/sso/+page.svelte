@@ -12,11 +12,13 @@
 	import FormAlert from '$lib/components/ui/FormAlert.svelte';
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import Select from '$lib/components/ui/Select.svelte';
 	import EmptyState from '$lib/components/states/EmptyState.svelte';
 	import ErrorState from '$lib/components/states/ErrorState.svelte';
 	import { roleLabel } from '$lib/nav';
 
 	const ROLES: Role[] = ['admin', 'staff', 'read_only'];
+	const ROLE_OPTIONS = ROLES.map((r) => ({ value: r, label: roleLabel(r) }));
 
 	// null = still loading. Like the other admin screens, everything is a
 	// same-origin browser fetch, so all of the screen's data lives here.
@@ -150,7 +152,20 @@
 		busyId = null;
 		if (res.ok) {
 			editing = null;
-			rules = rules ? rules.map((x) => (x.id === res.data.id ? res.data : x)).sort(byName) : [res.data];
+			// Mutate the row's object in place instead of replacing it: a keyed
+			// each block keeps its original item while the key is unchanged, so a
+			// new object would never reach the row. Reassign only when the sort
+			// order changed, to reorder without remounting anything.
+			if (rules) {
+				const i = rules.findIndex((x) => x.id === res.data.id);
+				if (i !== -1) Object.assign(rules[i], res.data);
+				else rules.push(res.data);
+			} else {
+				rules = [res.data];
+			}
+			const current = rules;
+			const sorted = [...current].sort(byName);
+			if (sorted.some((x, i) => x !== current[i])) rules = sorted;
 			notice = { kind: 'success', text: savedText(res.data) };
 		} else {
 			notice = { kind: 'error', text: friendlyError(res) };
@@ -271,11 +286,7 @@
 				/>
 				<div class="field role-field">
 					<label for="sso-rule-role">Role</label>
-					<select id="sso-rule-role" class="role-select" bind:value={role} disabled={anyBusy}>
-						{#each ROLES as r (r)}
-							<option value={r}>{roleLabel(r)}</option>
-						{/each}
-					</select>
+					<Select id="sso-rule-role" bind:value={role} options={ROLE_OPTIONS} disabled={anyBusy} />
 				</div>
 			</div>
 			<div class="form-actions">
@@ -315,11 +326,7 @@
 									{/if}
 								</td>
 								<td data-label="Role">
-									<select class="role-select" bind:value={editing.role} aria-label="Role">
-										{#each ROLES as roleOption (roleOption)}
-											<option value={roleOption}>{roleLabel(roleOption)}</option>
-										{/each}
-									</select>
+									<Select bind:value={editing.role} options={ROLE_OPTIONS} aria-label="Role" />
 								</td>
 								<td data-label="" class="actions-cell">
 									<Button variant="secondary" disabled={anyBusy || !editValid} onclick={saveRule}>
@@ -459,27 +466,6 @@
 		font-size: 13px;
 		font-weight: 500;
 		color: var(--minerva-fg-muted);
-	}
-
-	.role-select {
-		min-height: var(--minerva-control-h);
-		padding: 6px 12px;
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		border-radius: var(--minerva-radius);
-		background: var(--minerva-surface);
-		color: var(--minerva-fg);
-		font-family: inherit;
-		font-size: 14.5px;
-	}
-
-	.role-select:focus {
-		outline: 2px solid var(--minerva-accent);
-		border-color: var(--minerva-accent);
-	}
-
-	.role-select[disabled] {
-		opacity: 0.55;
-		cursor: not-allowed;
 	}
 
 	.form-actions {

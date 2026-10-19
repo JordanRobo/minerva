@@ -197,7 +197,10 @@ failure or a non-JSON body becomes `code: "network"` and it never throws.
 - **Form components** — `ui/Input.svelte`, `ui/PasswordInput.svelte`
   (Input plus a Bits UI Toggle show/hide with `aria-pressed` and a "Show
   password"/"Hide password" label), `ui/Field.svelte` (Bits UI Label +
-  hint/error, wiring `aria-describedby`/`aria-invalid`), and `ui/FormAlert.svelte`
+  hint/error, wiring `aria-describedby`/`aria-invalid`), `ui/Select.svelte`
+  (a Bits UI Select — one trigger button plus a portaled listbox for every
+  picker in the app; the primitive owns open state, keyboard handling and
+  ARIA, and the trigger keeps focus the whole time) and `ui/FormAlert.svelte`
   (`role="alert"`, `tabindex="-1"` so a failed submit can move focus
   there). There is no error colour token, so an error is signalled by the
   alert icon plus a 3 px accent left border and the field's accent outline —
