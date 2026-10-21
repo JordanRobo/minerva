@@ -291,17 +291,24 @@ session without its id mapping or index entry. In Redis, expiry itself needs
 no maintenance: the keys' native TTLs evict expired sessions, so
 `purge_expired` there is a no-op.
 
-When Postgres holds the sessions, expired rows are removed by an hourly
-maintenance job in `interface` (`src/maintenance.rs`), started only on that
-branch of startup. Each tick first takes a session-level Postgres advisory
-lock with a try-lock — when another node holds it the tick skips silently, so
-however many API nodes run, exactly one purges per tick; the first tick lands
-about 30 seconds after startup. While holding the lock it calls
-`SessionRepository::purge_expired` and logs the removed count only when it is
-non-zero; a failing tick warns and retries on the next hour. The rate-limit
-counter purge is registered as a second `MaintenanceJob` (name + advisory
-lock key + async fn) on the same Postgres branch, with its own lock key so
-the two jobs tick independently.
+The maintenance runner in `interface` (`src/maintenance.rs`) starts on every
+node regardless of the session store (roadmap 3.13, step 5). It always
+registers the status-recomputation sweep: automatic statuses depend on
+today's date, so they go stale when a target date passes even if nobody edits
+anything, and `recompute_all` refreshes every milestone and goal. When
+Postgres holds the sessions it also registers the expired-session purge (with
+Redis, native TTLs evict them instead), and when Postgres holds the rate-limit
+counters the counter purge joins as well — each job is a `MaintenanceJob`
+(name + advisory lock key + async fn) with its own lock key, so the jobs tick
+independently. Each tick first takes a session-level Postgres advisory lock
+with a try-lock — when another node holds it the tick skips silently, so
+however many API nodes run, exactly one does each job's work per tick; the
+first tick lands about 30 seconds after startup. While holding the lock it
+runs the job and logs the processed count only when it is non-zero; a failing
+tick warns and retries on the next hour. One `recompute_all` also runs at
+startup (after migrations, before serving) so existing rows are backfilled
+with fresh statuses; like the sweep it is best-effort — a failure warns but
+does not stop startup.
 
 The redirect flow (`interface/src/redirect.rs`) is generic over providers:
 
@@ -513,6 +520,77 @@ is locked against hand edits: `UserAdminService::change_role` answers 409
 value (the flag AND any rule exists). Deleting the last rule frees such roles
 for hand edits again; the stored flag then simply stops being enforced.
 
+### Status computation
+
+Goals and milestones each carry an **automatic status** that is *computed*
+from their data (roadmap 3.13, D19) rather than entered by a client. The
+computed value is **persisted** in the `status` column, not derived on read:
+the list filters of roadmap 3.16 match `status` against the stored effective
+status in one SQL query, and deriving date-dependent rules per row on every
+read would move that arithmetic into the read path for no benefit.
+
+**Milestone rule** (`domain::progress::compute_milestone_status`, applied in
+order with the milestone's task counts, its target date and today):
+
+1. `Complete` when it has at least one task and every task is Done.
+2. `OnTrack` when it has no target date.
+3. `OffTrack` when the target date is in the past (`target_date < today`).
+4. Otherwise a schedule gap: `expected − percent_complete`, where
+   `percent_complete` is done/total and `expected` is the fraction of the
+   window from the milestone's creation date to its target date that has
+   elapsed (clamped to 0..=1; a target on or before the start date counts as
+   fully elapsed). A gap below `SCHEDULE_GAP_AT_RISK` (0.20) is `OnTrack`,
+   below `SCHEDULE_GAP_OFF_TRACK` (0.40) is `AtRisk`, and at or beyond it is
+   `OffTrack`.
+
+**Goal rollup** (`Goal::compute_status_from_milestones`) reads the *effective*
+statuses of its linked milestones: no milestones is `OnTrack`; all Complete is
+`Complete`; OffTrack when the off-track milestones are half of the incomplete
+ones or more; AtRisk when any milestone is OffTrack or AtRisk; otherwise
+OnTrack.
+
+The computation itself lives in
+`application::status_computation::StatusComputationService`: it reads the
+named milestones, fetches their task counts with one grouped lookup
+(`TaskRepository::task_counts_for_milestones`), applies the rules with "today"
+from the `Clock` port (`SystemClock`, UTC calendar date — D19), and writes each
+changed value through `set_automatic_status` (a single-column write that is a
+no-op when unchanged). `recompute_all` walks every milestone and then every
+goal in batches of 200.
+
+**Triggers.** The automatic status is refreshed best-effort after every
+mutation that can change it, inside the mutation service — the write has
+already committed, so a recompute failure only warns (the sweep below heals
+any miss) and never fails the request: milestone create/update/delete
+(`MilestoneService`), task create/update/delete (`TaskService`) and board
+transitions (`TaskStatusService`), goal↔milestone link/unlink
+(`GoalMilestoneLinkService`), a milestone status-override set/clear
+(`StatusOverrideService` — the override changes the effective status that
+feeds linked goals' rollups; a goal's own override feeds nothing, so it
+recomputes nothing), and goal create (`GoalService`; a goal's automatic status
+depends solely on its linked milestones, so its update/delete recompute
+nothing). Milestones are always recomputed before the goals that read them.
+
+**Scheduled refresh.** A target date passes even when nobody edits anything,
+so two scheduled runs backstop the per-mutation triggers: one full
+`recompute_all` at server startup (best-effort; no advisory lock — unchanged
+rows write nothing, so concurrent multi-node backfills are harmless), and an
+hourly maintenance job (`interface::maintenance::recompute_statuses`,
+advisory lock key `MNVRRCMP`) that every node ticks but exactly one performs.
+Staleness is therefore self-healing: any missed or failed recompute is
+corrected by the next tick.
+
+**Wire format.** Every goal and milestone response reports the effective
+`status`, its `status_source` (`"automatic"` or `"manual"`), and
+`automatic_status`, the stored computed value even while an override is
+active. Milestone responses additionally carry `task_counts: {total, done}`
+and `percent_complete` (0–100), resolved with one batched counts lookup per
+response or page, like person summaries. The automatic status is no longer
+client-writable: the create and update request bodies have no `status` field,
+and because those DTOs derive `Deserialize` without `deny_unknown_fields`, a
+`status` sent by a client is silently ignored rather than rejected. New goals
+and milestones start from their computed value.
+
 ### Status overrides
 
 Goals and milestones each carry a **manual status override** on top of their
@@ -523,10 +601,13 @@ the override when set, otherwise the automatic status — and
 `status_source()`, which is `ManualOverride` only while an override is active.
 
 Overrides are **sticky**: a normal update never writes the column (the
-repository's `update` omits it), and `apply_computed_status` — what 3.13's
-recomputation will call — updates only the automatic status, so a
-recomputation can neither change nor clear an override. The only write path is
-`set_status_override(id, Option<Status>)`, where `None` clears it.
+repository's `update` omits it), and 3.13's recomputation writes only through
+`set_automatic_status`, so a recomputation can neither change nor clear an
+override. The only write path for the override itself is
+`set_status_override(id, Option<Status>)`, where `None` clears it — and since
+the automatic status is kept fresh by the recomputation (above), clearing an
+override returns the effective status to a current computed value, never a
+stale one.
 
 The endpoints are `PUT`/`DELETE /api/goals/{id}/status-override` and the
 milestone equivalent — Staff or Admin (`EditAccess`); both verbs answer 200

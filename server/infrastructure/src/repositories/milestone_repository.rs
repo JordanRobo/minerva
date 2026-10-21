@@ -6,6 +6,7 @@ use chrono::Utc;
 use diesel::prelude::*;
 use diesel::sql_types::{Nullable, Text};
 use domain::{Milestone, MilestoneId, Status, StatusSource, UserId};
+use uuid::Uuid;
 
 use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
@@ -71,11 +72,38 @@ impl MilestoneRepository for PostgresMilestoneRepository {
         .await
     }
 
+    async fn find_by_ids(&self, ids: &[MilestoneId]) -> Result<Vec<Milestone>, RepositoryError> {
+        let pool = self.pool.clone();
+        let id_values: Vec<Uuid> = ids.iter().map(|id| id.0).collect();
+        run_on_postgres(pool, move |conn| {
+            let rows: Vec<MilestoneRow> = milestones::table
+                .filter(milestones::id.eq_any(id_values))
+                .order_by(milestones::id.asc())
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            rows.into_iter().map(milestone_from_row).collect()
+        })
+        .await
+    }
+
     async fn list(&self) -> Result<Vec<Milestone>, RepositoryError> {
         let pool = self.pool.clone();
         run_on_postgres(pool, |conn| {
             let rows: Vec<MilestoneRow> = milestones::table.load(conn).map_err(map_diesel_error)?;
             rows.into_iter().map(milestone_from_row).collect()
+        })
+        .await
+    }
+
+    async fn list_all_ids(&self) -> Result<Vec<MilestoneId>, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, |conn| {
+            let ids: Vec<Uuid> = milestones::table
+                .select(milestones::id)
+                .order_by(milestones::id.asc())
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            Ok(ids.into_iter().map(MilestoneId).collect())
         })
         .await
     }
@@ -130,6 +158,44 @@ impl MilestoneRepository for PostgresMilestoneRepository {
                 return Err(RepositoryError::NotFound);
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn set_automatic_status(
+        &self,
+        id: MilestoneId,
+        status: Status,
+    ) -> Result<bool, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            // One single-column write of the automatic status (roadmap 3.13):
+            // it cannot clobber a concurrent edit of any other field, and it
+            // leaves updated_at and the manual override untouched. The legacy
+            // `status_source` column mirrors the override, as every other
+            // write does — so read the override first; that also resolves an
+            // unknown id to NotFound before the conditional write.
+            let override_status: Option<String> = milestones::table
+                .find(id.0)
+                .select(milestones::status_override)
+                .first(conn)
+                .optional()
+                .map_err(map_diesel_error)?
+                .ok_or(RepositoryError::NotFound)?;
+            let source = match override_status {
+                Some(_) => StatusSource::ManualOverride,
+                None => StatusSource::Computed,
+            };
+            // An unchanged value is a no-op: the filter matches no row.
+            let changed = diesel::update(milestones::table.find(id.0))
+                .filter(milestones::status.is_distinct_from(status_to_db(status)))
+                .set((
+                    milestones::status.eq(status_to_db(status)),
+                    milestones::status_source.eq(status_source_to_db(source)),
+                ))
+                .execute(conn)
+                .map_err(map_diesel_error)?;
+            Ok(changed > 0)
         })
         .await
     }

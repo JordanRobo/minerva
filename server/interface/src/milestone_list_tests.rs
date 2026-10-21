@@ -16,18 +16,24 @@ use actix_web::test::{TestRequest, init_service, read_body};
 use actix_web::web;
 use application::auth::SessionService;
 use application::milestone_list::MilestoneListService;
-use application::pagination::PageRequest;
-use application::ports::{MilestoneRepository, SessionRepository, UserRepository};
+use application::pagination::{Page, PageRequest};
+use application::ports::{
+    MilestoneRepository, RepositoryError, SessionRepository, TaskCounts, TaskListFilter,
+    TaskRepository, UserRepository,
+};
+use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use diesel::prelude::*;
-use domain::{Milestone, MilestoneId, Role, Status, User, UserId};
+use domain::{Milestone, MilestoneId, Role, Status, Task, TaskId, TaskStatus, User, UserId};
 use infrastructure::Sha256SessionTokens;
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{
-    PostgresMilestoneRepository, PostgresSessionRepository, PostgresUserRepository,
+    PostgresMilestoneRepository, PostgresSessionRepository, PostgresTaskRepository,
+    PostgresUserRepository,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use uuid::Uuid;
 
 use crate::auth::{COOKIE_NAME, CookieSettings};
@@ -61,12 +67,83 @@ fn test_pool(url: &str) -> PgPool {
     pool
 }
 
+/// A task attached to a milestone, created directly in the database.
+fn test_task(milestone_id: MilestoneId, status: TaskStatus) -> Task {
+    let now = Utc::now();
+    Task {
+        id: TaskId::new(),
+        milestone_id: Some(milestone_id),
+        title: "List count task".into(),
+        description: None,
+        status,
+        target_date: None,
+        assignee_id: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// Wraps the real task repository, counting `task_counts_for_milestones`
+/// calls and delegating everything else to Postgres: proves a list page
+/// resolves every milestone's counts with one grouped lookup (roadmap
+/// 3.13), the twin of [`crate::task_assignee_tests::CountingUserRepository`]'s
+/// D17 rule. `pub` so other handler test modules can reuse it.
+pub struct CountingTaskRepository {
+    pub inner: Arc<PostgresTaskRepository>,
+    pub count_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TaskRepository for CountingTaskRepository {
+    async fn create(&self, task: Task) -> Result<Task, RepositoryError> {
+        self.inner.create(task).await
+    }
+    async fn find_by_id(&self, id: TaskId) -> Result<Option<Task>, RepositoryError> {
+        self.inner.find_by_id(id).await
+    }
+    async fn find_by_ids(&self, ids: &[TaskId]) -> Result<Vec<Task>, RepositoryError> {
+        self.inner.find_by_ids(ids).await
+    }
+    async fn task_counts_for_milestones(
+        &self,
+        milestone_ids: &[MilestoneId],
+    ) -> Result<HashMap<MilestoneId, TaskCounts>, RepositoryError> {
+        self.count_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.task_counts_for_milestones(milestone_ids).await
+    }
+    async fn update(&self, task: Task) -> Result<Task, RepositoryError> {
+        self.inner.update(task).await
+    }
+    async fn set_status(&self, id: TaskId, status: TaskStatus) -> Result<Task, RepositoryError> {
+        self.inner.set_status(id, status).await
+    }
+    async fn set_assignee(
+        &self,
+        id: TaskId,
+        assignee_id: Option<UserId>,
+    ) -> Result<Task, RepositoryError> {
+        self.inner.set_assignee(id, assignee_id).await
+    }
+    async fn delete(&self, id: TaskId) -> Result<(), RepositoryError> {
+        self.inner.delete(id).await
+    }
+    async fn list_page(
+        &self,
+        filter: &TaskListFilter,
+        page: &PageRequest,
+    ) -> Result<Page<Task>, RepositoryError> {
+        self.inner.list_page(filter, page).await
+    }
+}
+
 /// Build the app with the real route table and only the `web::Data` the list
 /// handler (and the milestone routes these tests clean up through) can need;
 /// the other routes 500 if hit, but these tests never do. A macro because
-/// `init_service`'s service type is opaque.
+/// `init_service`'s service type is opaque. The task repository is always
+/// the counting wrapper: two tests assert the one-grouped-lookup-per-page
+/// rule on its counter, the rest pass a throwaway.
 macro_rules! test_app {
-    ($url:expr) => {{
+    ($url:expr, $count_calls:expr) => {{
         let pool = test_pool($url);
         let sessions: Arc<dyn SessionRepository> =
             Arc::new(PostgresSessionRepository::new(pool.clone()));
@@ -80,11 +157,19 @@ macro_rules! test_app {
         // The list goes through the service (roadmap 3.10), like in `main.rs`.
         let list =
             MilestoneListService::new(Arc::new(PostgresMilestoneRepository::new(pool.clone())));
+        // The milestone handlers read task counts through the port (roadmap
+        // 3.13), so a trait-object registration sits beside the concrete one,
+        // like in `main.rs`.
+        let task_counts: Arc<dyn TaskRepository> = Arc::new(CountingTaskRepository {
+            inner: Arc::new(PostgresTaskRepository::new(pool.clone())),
+            count_calls: $count_calls,
+        });
         init_service(
             App::new()
                 .app_data(web::Data::new(PostgresMilestoneRepository::new(
                     pool.clone(),
                 )))
+                .app_data(web::Data::from(task_counts))
                 .app_data(users_data)
                 .app_data(web::Data::new(session_service))
                 .app_data(web::Data::new(list))
@@ -245,7 +330,7 @@ async fn the_list_answers_with_the_page_envelope_and_standard_milestone_items() 
         return;
     };
     let pool = test_pool(&url);
-    let app = test_app!(&url);
+    let app = test_app!(&url, Arc::new(AtomicUsize::new(0)));
 
     let (user, token) = staff(&pool).await;
     let milestones = PostgresMilestoneRepository::new(pool.clone());
@@ -281,21 +366,31 @@ async fn the_list_answers_with_the_page_envelope_and_standard_milestone_items() 
     assert_eq!(json["offset"], 0);
 
     // ...and each item is the standard milestone shape — no new fields. The
-    // status is the effective one, with its source alongside.
+    // status is the effective one, with its source and the automatic value
+    // underneath alongside, plus the task counts and completion share.
     let item = &json["items"][0];
     assert_eq!(item["id"], created.id.0.to_string());
     assert_eq!(item["status"], "on_track");
     assert_eq!(item["status_source"], "automatic");
+    assert_eq!(item["automatic_status"], "on_track");
+    assert_eq!(
+        item["task_counts"],
+        serde_json::json!({ "total": 0, "done": 0 })
+    );
+    assert_eq!(item["percent_complete"], 0);
     assert_eq!(
         keys(item),
         [
+            "automatic_status",
             "created_at",
             "description",
             "id",
             "owner",
+            "percent_complete",
             "status",
             "status_source",
             "target_date",
+            "task_counts",
             "title",
             "updated_at"
         ]
@@ -317,7 +412,7 @@ async fn the_default_order_is_target_date_nulls_last_then_created_at_then_id() {
         return;
     };
     let pool = test_pool(&url);
-    let app = test_app!(&url);
+    let app = test_app!(&url, Arc::new(AtomicUsize::new(0)));
 
     let (user, token) = staff(&pool).await;
     let milestones = PostgresMilestoneRepository::new(pool.clone());
@@ -398,7 +493,7 @@ async fn paging_walks_every_match_exactly_once_and_the_total_ignores_paging() {
         return;
     };
     let pool = test_pool(&url);
-    let app = test_app!(&url);
+    let app = test_app!(&url, Arc::new(AtomicUsize::new(0)));
 
     let (user, token) = staff(&pool).await;
     let milestones = PostgresMilestoneRepository::new(pool.clone());
@@ -474,7 +569,7 @@ async fn the_default_page_limit_is_50() {
         return;
     };
     let pool = test_pool(&url);
-    let app = test_app!(&url);
+    let app = test_app!(&url, Arc::new(AtomicUsize::new(0)));
 
     let (user, token) = staff(&pool).await;
     let milestones = PostgresMilestoneRepository::new(pool.clone());
@@ -537,7 +632,7 @@ async fn the_status_filter_matches_the_effective_status_and_search_is_literal() 
         return;
     };
     let pool = test_pool(&url);
-    let app = test_app!(&url);
+    let app = test_app!(&url, Arc::new(AtomicUsize::new(0)));
 
     let (user, token) = staff(&pool).await;
     let milestones = PostgresMilestoneRepository::new(pool.clone());
@@ -690,7 +785,7 @@ async fn the_date_bounds_are_inclusive_and_exclude_undated_milestones() {
         return;
     };
     let pool = test_pool(&url);
-    let app = test_app!(&url);
+    let app = test_app!(&url, Arc::new(AtomicUsize::new(0)));
 
     let (user, token) = staff(&pool).await;
     let milestones = PostgresMilestoneRepository::new(pool.clone());
@@ -797,7 +892,7 @@ async fn invalid_query_values_are_400s_naming_the_parameter() {
         return;
     };
     let pool = test_pool(&url);
-    let app = test_app!(&url);
+    let app = test_app!(&url, Arc::new(AtomicUsize::new(0)));
 
     let (user, token) = staff(&pool).await;
     let cases = [
@@ -848,5 +943,161 @@ async fn invalid_query_values_are_400s_naming_the_parameter() {
     );
     assert_eq!(res.status(), StatusCode::OK);
 
+    delete_user(&pool, user.id);
+}
+
+#[actix_web::test]
+async fn the_list_reports_task_counts_and_percent_complete_per_milestone() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let app = test_app!(&url, Arc::new(AtomicUsize::new(0)));
+
+    let (user, token) = staff(&pool).await;
+    let milestones = PostgresMilestoneRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool.clone());
+    let prefix = format!("ml-counts-{}", Uuid::new_v4().simple());
+
+    // Three milestones: no tasks, one of two done, both of two done.
+    let none = milestones
+        .create(list_milestone(&prefix, 1, Status::OnTrack, None, at(1, 1)))
+        .await
+        .expect("create milestone");
+    let partial = milestones
+        .create(list_milestone(&prefix, 2, Status::OnTrack, None, at(1, 2)))
+        .await
+        .expect("create milestone");
+    let full = milestones
+        .create(list_milestone(&prefix, 3, Status::OnTrack, None, at(1, 3)))
+        .await
+        .expect("create milestone");
+    let mut created_tasks = Vec::new();
+    for status in [TaskStatus::Backlog, TaskStatus::Done] {
+        created_tasks.push(
+            tasks
+                .create(test_task(partial.id, status))
+                .await
+                .expect("create task"),
+        );
+    }
+    for _ in 0..2 {
+        created_tasks.push(
+            tasks
+                .create(test_task(full.id, TaskStatus::Done))
+                .await
+                .expect("create task"),
+        );
+    }
+
+    let res = request!(
+        &app,
+        Method::GET,
+        format!("/api/milestones?q={prefix}"),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(res.status(), StatusCode::OK);
+    let json = json_of(res).await;
+    assert_eq!(json["total"], 3);
+
+    // The ids outlive the lookups below, which shadow the milestone names.
+    let none_id = none.id;
+    let partial_id = partial.id;
+    let full_id = full.id;
+
+    fn item(json: &serde_json::Value, id: MilestoneId) -> &serde_json::Value {
+        json["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id.0.to_string())
+            .expect("the milestone in the list")
+    }
+
+    // Each item reports its own counts and completion share (roadmap 3.13):
+    // zero, partial and all-done.
+    let none = item(&json, none.id);
+    assert_eq!(
+        none["task_counts"],
+        serde_json::json!({ "total": 0, "done": 0 })
+    );
+    assert_eq!(none["percent_complete"], 0);
+    let partial = item(&json, partial.id);
+    assert_eq!(
+        partial["task_counts"],
+        serde_json::json!({ "total": 2, "done": 1 })
+    );
+    assert_eq!(partial["percent_complete"], 50);
+    let full = item(&json, full.id);
+    assert_eq!(
+        full["task_counts"],
+        serde_json::json!({ "total": 2, "done": 2 })
+    );
+    assert_eq!(full["percent_complete"], 100);
+
+    for task in &created_tasks {
+        tasks.delete(task.id).await.expect("cleanup task");
+    }
+    milestones.delete(none_id).await.expect("cleanup milestone");
+    milestones
+        .delete(partial_id)
+        .await
+        .expect("cleanup milestone");
+    milestones.delete(full_id).await.expect("cleanup milestone");
+    delete_user(&pool, user.id);
+}
+
+#[actix_web::test]
+async fn a_page_of_milestones_costs_one_grouped_count_lookup() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let count_calls = Arc::new(AtomicUsize::new(0));
+    let app = test_app!(&url, count_calls.clone());
+
+    let (user, token) = staff(&pool).await;
+    let milestones = PostgresMilestoneRepository::new(pool.clone());
+    let prefix = format!("ml-counting-{}", Uuid::new_v4().simple());
+    let a = milestones
+        .create(list_milestone(&prefix, 1, Status::OnTrack, None, at(1, 1)))
+        .await
+        .expect("create milestone");
+    let b = milestones
+        .create(list_milestone(&prefix, 2, Status::OnTrack, None, at(1, 2)))
+        .await
+        .expect("create milestone");
+
+    // A page with two items costs exactly one grouped lookup (roadmap 3.13),
+    // not one per row...
+    let res = request!(
+        &app,
+        Method::GET,
+        format!("/api/milestones?q={prefix}"),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(res.status(), StatusCode::OK);
+    let json = json_of(res).await;
+    assert_eq!(json["total"], 2);
+    assert_eq!(count_calls.load(Ordering::SeqCst), 1);
+
+    // ...and a second page costs one more.
+    let res = request!(
+        &app,
+        Method::GET,
+        format!("/api/milestones?q={prefix}&limit=1"),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json_of(res).await["total"], 2);
+    assert_eq!(count_calls.load(Ordering::SeqCst), 2);
+
+    milestones.delete(a.id).await.expect("cleanup milestone");
+    milestones.delete(b.id).await.expect("cleanup milestone");
     delete_user(&pool, user.id);
 }

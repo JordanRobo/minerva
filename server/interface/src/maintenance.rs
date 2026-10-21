@@ -5,6 +5,7 @@
 
 use application::ports::{RepositoryError, SessionRepository};
 use application::rate_limit::{RateLimiter, longest_policy_window};
+use application::status_computation::{StatusComputationError, StatusComputationService};
 use chrono::Utc;
 use infrastructure::db::{PgPool, try_acquire_advisory_lock};
 use std::future::Future;
@@ -29,6 +30,10 @@ const PURGE_LOCK_KEY: i64 = 0x4D4E5652_50524745;
 /// ASCII, distinct from the session purge's key so the two jobs tick
 /// independently.
 const RATE_LIMIT_PURGE_LOCK_KEY: i64 = 0x4D4E5652_524C494D;
+
+/// Advisory lock key for the status-recomputation job; "MNVRRCMP" read as
+/// ASCII, distinct from the purge keys so all three jobs tick independently.
+const RECOMPUTE_LOCK_KEY: i64 = 0x4D4E5652_52434D50;
 
 /// The work a maintenance job does: how many items it processed, or the
 /// storage error that stopped it.
@@ -92,6 +97,43 @@ pub fn purge_rate_limit_counters(limiter: Arc<dyn RateLimiter>) -> MaintenanceJo
     )
 }
 
+/// The status-recomputation job (roadmap 3.13, step 5): automatic statuses
+/// depend on today's date, so they go stale when a target date passes even
+/// if nobody edits anything — this sweep refreshes every milestone and goal.
+/// It needs only Postgres, so it is registered on every node regardless of
+/// the session store (see `jobs_for`).
+pub fn recompute_statuses(computation: Arc<StatusComputationService>) -> MaintenanceJob {
+    MaintenanceJob::new("recompute_statuses", RECOMPUTE_LOCK_KEY, move || {
+        let computation = computation.clone();
+        async move {
+            computation
+                .recompute_all()
+                .await
+                .map(|counts| (counts.milestones + counts.goals) as u64)
+                .map_err(|err| match err {
+                    StatusComputationError::Repository(err) => err,
+                })
+        }
+    })
+}
+
+/// The maintenance jobs for one node: the status recompute always runs (it
+/// needs only Postgres), while the session and rate-limit purges run only
+/// when Postgres holds those stores — with Redis, native TTLs evict them
+/// instead. Every node ticks every job it registers; the advisory locks mean
+/// exactly one node does each job's work per tick (roadmap 2.8).
+pub fn jobs_for(
+    computation: Arc<StatusComputationService>,
+    postgres_stores: Option<(Arc<dyn SessionRepository>, Arc<dyn RateLimiter>)>,
+) -> Vec<MaintenanceJob> {
+    let mut jobs = vec![recompute_statuses(computation)];
+    if let Some((sessions, limiter)) = postgres_stores {
+        jobs.push(purge_expired_sessions(sessions));
+        jobs.push(purge_rate_limit_counters(limiter));
+    }
+    jobs
+}
+
 /// One maintenance tick: take the job's advisory lock (skipping silently
 /// when another node holds it) and run the job while holding it. Errors are
 /// logged, never propagated — a failing job must not take the server down,
@@ -137,6 +179,15 @@ pub fn start(pool: PgPool, jobs: Vec<MaintenanceJob>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use application::ports::{Clock, MilestoneRepository};
+    use chrono::NaiveDate;
+    use domain::{Milestone, MilestoneId, Status};
+    use infrastructure::migrations::run_migrations;
+    use infrastructure::repositories::{
+        PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
+        PostgresRateLimiter, PostgresSessionRepository, PostgresTaskRepository,
+    };
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Two connections: the "lock denied" test holds one while `run_tick`
@@ -228,5 +279,136 @@ mod tests {
             .await
             .expect("re-take the lock");
         assert!(free.is_some(), "a finished tick must release its lock");
+    }
+
+    /// A clock pinned to one date, so the recompute test can advance "today"
+    /// past a milestone's target date without waiting for it.
+    struct FixedClock(NaiveDate);
+
+    impl Clock for FixedClock {
+        fn today(&self) -> NaiveDate {
+            self.0
+        }
+    }
+
+    /// A full recompute service over the real Postgres tables, with the
+    /// clock pinned to `today`.
+    fn recompute_service(pool: &PgPool, today: NaiveDate) -> Arc<StatusComputationService> {
+        Arc::new(StatusComputationService::new(
+            Arc::new(PostgresGoalRepository::new(pool.clone())),
+            Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            Arc::new(FixedClock(today)),
+        ))
+    }
+
+    /// A milestone whose target date has passed under the test clock, still
+    /// carrying its old On Track status — exactly the row shape a stale
+    /// database holds.
+    fn past_due_milestone() -> Milestone {
+        let created = NaiveDate::from_ymd_opt(2026, 1, 1)
+            .expect("valid date")
+            .and_hms_opt(9, 0, 0)
+            .expect("valid time")
+            .and_utc();
+        Milestone {
+            id: MilestoneId::new(),
+            title: "Maintenance recompute milestone".into(),
+            description: None,
+            status: Status::OnTrack,
+            status_override: None,
+            target_date: Some(NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date")),
+            owner_id: None,
+            created_at: created,
+            updated_at: created,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recompute_tick_refreshes_stale_statuses_and_skips_when_locked() {
+        let Some(pool) = pool() else { return };
+        run_migrations(&pool).expect("apply migrations");
+        let milestones = PostgresMilestoneRepository::new(pool.clone());
+        let job = recompute_statuses(recompute_service(
+            &pool,
+            NaiveDate::from_ymd_opt(2026, 2, 15).expect("valid date"),
+        ));
+
+        // Phase 1: the tick takes the lock itself and runs. A running dev
+        // server's hourly sweep could hold the key for a moment; if it does,
+        // bail rather than assert against its in-flight work.
+        let stale = past_due_milestone();
+        milestones.create(stale.clone()).await.expect("seed");
+        if try_acquire_advisory_lock(&pool, job.lock_key)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            milestones.delete(stale.id).await.ok();
+            return;
+        }
+        run_tick(&pool, &job).await;
+        let refreshed = milestones.find_by_id(stale.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.status, Status::OffTrack);
+
+        // Phase 2: with the lock held by this "node", the tick skips silently
+        // and the milestone keeps its stale status. Seeded under the lock so
+        // no concurrent sweep can touch it.
+        let Some(held) = try_acquire_advisory_lock(&pool, job.lock_key)
+            .await
+            .unwrap()
+        else {
+            milestones.delete(stale.id).await.ok();
+            return;
+        };
+        let untouched = past_due_milestone();
+        milestones.create(untouched.clone()).await.expect("seed");
+        run_tick(&pool, &job).await;
+        drop(held);
+        let still_stale = milestones.find_by_id(untouched.id).await.unwrap().unwrap();
+        assert_eq!(still_stale.status, Status::OnTrack);
+
+        milestones.delete(stale.id).await.ok();
+        milestones.delete(untouched.id).await.ok();
+    }
+
+    #[test]
+    fn jobs_register_for_the_session_store_in_use() {
+        let Some(pool) = pool() else { return };
+        let computation = recompute_service(
+            &pool,
+            NaiveDate::from_ymd_opt(2026, 2, 15).expect("valid date"),
+        );
+
+        // Redis-backed sessions: only the recompute job — native TTLs evict
+        // expired sessions and stale counters.
+        let redis_node = jobs_for(computation.clone(), None);
+        assert_eq!(
+            redis_node.iter().map(|job| job.name).collect::<Vec<_>>(),
+            vec!["recompute_statuses"]
+        );
+
+        // Postgres-backed: the purges join it, each under its own key.
+        let postgres_node = jobs_for(
+            computation,
+            Some((
+                Arc::new(PostgresSessionRepository::new(pool.clone())),
+                Arc::new(PostgresRateLimiter::new(pool.clone())),
+            )),
+        );
+        assert_eq!(
+            postgres_node.iter().map(|job| job.name).collect::<Vec<_>>(),
+            vec![
+                "recompute_statuses",
+                "purge_expired_sessions",
+                "purge_rate_limit_counters"
+            ]
+        );
+        let keys = postgres_node
+            .iter()
+            .map(|job| job.lock_key)
+            .collect::<HashSet<_>>();
+        assert_eq!(keys.len(), 3, "each job needs its own lock key");
     }
 }

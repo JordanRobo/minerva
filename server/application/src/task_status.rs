@@ -7,15 +7,17 @@
 //! column a task already sits in is an idempotent no-op that returns the task
 //! without writing, so its `updated_at` is left alone. The write itself is a
 //! single-column update (see [`TaskRepository::set_status`]), so it cannot
-//! clobber a field another writer changed in between. Nothing here touches
-//! goal or milestone status: board position is not health, and the snapshot
-//! hook belongs to 3.14.
+//! clobber a field another writer changed in between. Board position is not
+//! health (D6): no snapshot hook fires here (roadmap 3.14). But moving a card
+//! changes its milestone's progress, so after a real move the task's milestone
+//! — and the goals linked to it — are recomputed best-effort (roadmap 3.13).
 
 use std::sync::Arc;
 
-use domain::{Task, TaskId, TaskStatus};
+use domain::{MilestoneId, Task, TaskId, TaskStatus};
 
 use crate::ports::{RepositoryError, TaskRepository};
+use crate::status_computation::StatusRecomputation;
 
 /// An error from moving a task to another board column.
 #[derive(Debug)]
@@ -38,15 +40,17 @@ impl std::fmt::Display for TaskStatusError {
 impl std::error::Error for TaskStatusError {}
 
 /// Moves a task between board columns (roadmap 3.7, D6). The service takes no
-/// notion of blocking or of goal/milestone status: a card moves regardless of
-/// what blocks it, and moving it changes nothing but the column.
+/// notion of blocking: a card moves regardless of what blocks it. Moving it
+/// changes nothing but the column itself — but that changes the milestone's
+/// progress, so the automatic statuses are recomputed after a real move.
 pub struct TaskStatusService {
     tasks: Arc<dyn TaskRepository>,
+    computation: Arc<dyn StatusRecomputation>,
 }
 
 impl TaskStatusService {
-    pub fn new(tasks: Arc<dyn TaskRepository>) -> Self {
-        Self { tasks }
+    pub fn new(tasks: Arc<dyn TaskRepository>, computation: Arc<dyn StatusRecomputation>) -> Self {
+        Self { tasks, computation }
     }
 
     /// Move the task to `status`. Any column may move to any other. Moving it
@@ -62,10 +66,31 @@ impl TaskStatusService {
             // Idempotent no-op: nothing is written, so updated_at is untouched.
             return Ok(existing);
         }
-        self.tasks
+        let task = self
+            .tasks
             .set_status(id, status)
             .await
-            .map_err(TaskStatusError::Repository)
+            .map_err(TaskStatusError::Repository)?;
+        if let Some(milestone_id) = existing.milestone_id {
+            self.recompute_milestones(&[milestone_id]).await;
+        }
+        Ok(task)
+    }
+
+    /// Best-effort: the move already committed, so a recompute failure only
+    /// warns (roadmap 3.13's sweep heals any miss). Milestones first, then
+    /// goals: a goal's rollup reads its linked milestones' effective statuses.
+    async fn recompute_milestones(&self, milestone_ids: &[MilestoneId]) {
+        if let Err(err) = self.computation.recompute_milestones(milestone_ids).await {
+            eprintln!("warning: status recompute after a task move failed: {err}");
+        }
+        if let Err(err) = self
+            .computation
+            .recompute_goals_for_milestones(milestone_ids)
+            .await
+        {
+            eprintln!("warning: status recompute after a task move failed: {err}");
+        }
     }
 
     async fn find(&self, id: TaskId) -> Result<Task, TaskStatusError> {
@@ -84,9 +109,11 @@ mod tests {
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use chrono::Utc;
-    use domain::UserId;
+    use domain::{MilestoneId, UserId};
 
     use super::*;
+    use crate::ports::TaskCounts;
+    use crate::status_computation::fakes::{RecomputeCall, RecordingRecomputation};
 
     fn test_task(status: TaskStatus) -> Task {
         let now = Utc::now();
@@ -150,6 +177,32 @@ mod tests {
             let mut found: Vec<Task> = ids.iter().filter_map(|id| tasks.get(id).cloned()).collect();
             found.sort_by_key(|task| task.id.0);
             Ok(found)
+        }
+
+        async fn task_counts_for_milestones(
+            &self,
+            milestone_ids: &[MilestoneId],
+        ) -> Result<HashMap<MilestoneId, TaskCounts>, RepositoryError> {
+            let tasks = self.locked();
+            // Every requested id comes back, with zeros when the milestone
+            // has no tasks (mirroring the Postgres implementation).
+            let mut counts: HashMap<MilestoneId, TaskCounts> = milestone_ids
+                .iter()
+                .map(|id| (*id, TaskCounts { total: 0, done: 0 }))
+                .collect();
+            for task in tasks.values() {
+                let Some(milestone_id) = task.milestone_id else {
+                    continue;
+                };
+                let Some(counts) = counts.get_mut(&milestone_id) else {
+                    continue;
+                };
+                counts.total += 1;
+                if task.status == TaskStatus::Done {
+                    counts.done += 1;
+                }
+            }
+            Ok(counts)
         }
 
         async fn update(&self, task: Task) -> Result<Task, RepositoryError> {
@@ -218,10 +271,15 @@ mod tests {
         }
     }
 
-    fn setup() -> (Arc<InMemoryTaskRepository>, TaskStatusService) {
+    fn setup() -> (
+        Arc<InMemoryTaskRepository>,
+        Arc<RecordingRecomputation>,
+        TaskStatusService,
+    ) {
         let tasks = Arc::new(InMemoryTaskRepository::new());
-        let service = TaskStatusService::new(tasks.clone());
-        (tasks, service)
+        let computation = Arc::new(RecordingRecomputation::new());
+        let service = TaskStatusService::new(tasks.clone(), computation.clone());
+        (tasks, computation, service)
     }
 
     /// Every column of the board, in a stable order.
@@ -236,7 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn any_column_may_move_to_any_other_column() {
-        let (tasks, service) = setup();
+        let (tasks, _computation, service) = setup();
         for from in all_statuses() {
             let task = test_task(from);
             tasks.create(task.clone()).await.unwrap();
@@ -252,7 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn moving_into_and_out_of_done_is_allowed() {
-        let (tasks, service) = setup();
+        let (tasks, _computation, service) = setup();
         let task = test_task(TaskStatus::Backlog);
         tasks.create(task.clone()).await.unwrap();
 
@@ -268,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn setting_the_column_a_task_already_has_is_a_noop_without_a_write() {
-        let (tasks, service) = setup();
+        let (tasks, _computation, service) = setup();
         let task = test_task(TaskStatus::InProgress);
         tasks.create(task.clone()).await.unwrap();
         let original_updated_at = task.updated_at;
@@ -285,7 +343,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_real_move_writes_once_and_bumps_updated_at() {
-        let (tasks, service) = setup();
+        let (tasks, _computation, service) = setup();
         let task = test_task(TaskStatus::Backlog);
         tasks.create(task.clone()).await.unwrap();
         let original_updated_at = task.updated_at;
@@ -299,7 +357,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_task_id_is_a_not_found() {
-        let (_tasks, service) = setup();
+        let (_tasks, _computation, service) = setup();
 
         let result = service.set_status(TaskId::new(), TaskStatus::Done).await;
         assert!(matches!(result, Err(TaskStatusError::NotFound)));
@@ -307,7 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_repository_failure_surfaces_as_the_typed_error() {
-        let (tasks, service) = setup();
+        let (tasks, _computation, service) = setup();
         tasks.set_fail_set_status(true);
         let task = test_task(TaskStatus::Backlog);
         tasks.create(task.clone()).await.unwrap();
@@ -325,7 +383,7 @@ mod tests {
         // moved by its column alone, so one whose blocker is not Done moves
         // just like any other. The end-to-end proof — with a real `blocks`
         // relation in the database — lives in the handler tests.
-        let (tasks, service) = setup();
+        let (tasks, _computation, service) = setup();
         let blocked = test_task(TaskStatus::ToDo);
         tasks.create(blocked.clone()).await.unwrap();
 
@@ -333,6 +391,64 @@ mod tests {
             .set_status(blocked.id, TaskStatus::Done)
             .await
             .unwrap();
+        assert_eq!(moved.status, TaskStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn a_move_recomputes_the_tasks_milestone_and_its_goals() {
+        let (tasks, computation, service) = setup();
+        let milestone_id = MilestoneId::new();
+        let mut task = test_task(TaskStatus::Backlog);
+        task.milestone_id = Some(milestone_id);
+        tasks.create(task.clone()).await.unwrap();
+
+        service.set_status(task.id, TaskStatus::Done).await.unwrap();
+
+        assert_eq!(
+            computation.calls(),
+            vec![
+                RecomputeCall::Milestones(vec![milestone_id]),
+                RecomputeCall::GoalsForMilestones(vec![milestone_id])
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn moving_a_task_without_a_milestone_recomputes_nothing() {
+        let (tasks, computation, service) = setup();
+        let task = test_task(TaskStatus::Backlog);
+        tasks.create(task.clone()).await.unwrap();
+
+        service.set_status(task.id, TaskStatus::Done).await.unwrap();
+
+        assert!(computation.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_noop_move_recomputes_nothing() {
+        let (tasks, computation, service) = setup();
+        let milestone_id = MilestoneId::new();
+        let mut task = test_task(TaskStatus::Done);
+        task.milestone_id = Some(milestone_id);
+        tasks.create(task.clone()).await.unwrap();
+
+        // The idempotent early return writes nothing, so it recomputes nothing.
+        service.set_status(task.id, TaskStatus::Done).await.unwrap();
+
+        assert!(computation.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_recompute_does_not_fail_the_move() {
+        let (tasks, computation, service) = setup();
+        computation.set_fail(true);
+        let milestone_id = MilestoneId::new();
+        let mut task = test_task(TaskStatus::Backlog);
+        task.milestone_id = Some(milestone_id);
+        tasks.create(task.clone()).await.unwrap();
+
+        // The move committed; the recompute failure only warns.
+        let moved = service.set_status(task.id, TaskStatus::Done).await.unwrap();
         assert_eq!(moved.status, TaskStatus::Done);
     }
 }

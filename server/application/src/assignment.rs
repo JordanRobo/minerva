@@ -232,7 +232,8 @@ mod tests {
     use crate::ports::milestone_repository::fakes::{apply_milestone_list_filter, page_milestones};
     use crate::ports::task_repository::fakes::{apply_task_list_filter, page_tasks};
     use crate::ports::{
-        AccessChange, GoalListFilter, MilestoneListFilter, TaskListFilter, UserRepository,
+        AccessChange, GoalListFilter, MilestoneListFilter, TaskCounts, TaskListFilter,
+        UserRepository,
     };
 
     use super::*;
@@ -347,6 +348,32 @@ mod tests {
             Ok(found)
         }
 
+        async fn task_counts_for_milestones(
+            &self,
+            milestone_ids: &[MilestoneId],
+        ) -> Result<HashMap<MilestoneId, TaskCounts>, RepositoryError> {
+            let tasks = self.locked();
+            // Every requested id comes back, with zeros when the milestone
+            // has no tasks (mirroring the Postgres implementation).
+            let mut counts: HashMap<MilestoneId, TaskCounts> = milestone_ids
+                .iter()
+                .map(|id| (*id, TaskCounts { total: 0, done: 0 }))
+                .collect();
+            for task in tasks.values() {
+                let Some(milestone_id) = task.milestone_id else {
+                    continue;
+                };
+                let Some(counts) = counts.get_mut(&milestone_id) else {
+                    continue;
+                };
+                counts.total += 1;
+                if task.status == TaskStatus::Done {
+                    counts.done += 1;
+                }
+            }
+            Ok(counts)
+        }
+
         async fn update(&self, task: Task) -> Result<Task, RepositoryError> {
             if self.locked().contains_key(&task.id) {
                 Ok(task)
@@ -454,6 +481,12 @@ mod tests {
             Ok(self.locked().values().cloned().collect())
         }
 
+        async fn list_all_ids(&self) -> Result<Vec<GoalId>, RepositoryError> {
+            let mut ids: Vec<GoalId> = self.locked().keys().copied().collect();
+            ids.sort_by_key(|id| id.0);
+            Ok(ids)
+        }
+
         async fn update(&self, goal: Goal) -> Result<Goal, RepositoryError> {
             let mut goals = self.locked();
             let Some(existing) = goals.get(&goal.id) else {
@@ -481,6 +514,25 @@ mod tests {
             };
             goal.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_automatic_status(
+            &self,
+            id: GoalId,
+            status: Status,
+        ) -> Result<bool, RepositoryError> {
+            let mut goals = self.locked();
+            let Some(goal) = goals.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the automatic status;
+            // updated_at and the override are untouched, and an unchanged
+            // value writes nothing.
+            if goal.status == status {
+                return Ok(false);
+            }
+            goal.status = status;
+            Ok(true)
         }
 
         async fn set_owner(
@@ -564,8 +616,27 @@ mod tests {
             Ok(self.locked().get(&id).cloned())
         }
 
+        async fn find_by_ids(
+            &self,
+            ids: &[MilestoneId],
+        ) -> Result<Vec<Milestone>, RepositoryError> {
+            let milestones = self.locked();
+            let mut found: Vec<Milestone> = ids
+                .iter()
+                .filter_map(|id| milestones.get(id).cloned())
+                .collect();
+            found.sort_by_key(|milestone| milestone.id.0);
+            Ok(found)
+        }
+
         async fn list(&self) -> Result<Vec<Milestone>, RepositoryError> {
             Ok(self.locked().values().cloned().collect())
+        }
+
+        async fn list_all_ids(&self) -> Result<Vec<MilestoneId>, RepositoryError> {
+            let mut ids: Vec<MilestoneId> = self.locked().keys().copied().collect();
+            ids.sort_by_key(|id| id.0);
+            Ok(ids)
         }
 
         async fn update(&self, milestone: Milestone) -> Result<Milestone, RepositoryError> {
@@ -595,6 +666,25 @@ mod tests {
             };
             milestone.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_automatic_status(
+            &self,
+            id: MilestoneId,
+            status: Status,
+        ) -> Result<bool, RepositoryError> {
+            let mut milestones = self.locked();
+            let Some(milestone) = milestones.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the automatic status;
+            // updated_at and the override are untouched, and an unchanged
+            // value writes nothing.
+            if milestone.status == status {
+                return Ok(false);
+            }
+            milestone.status = status;
+            Ok(true)
         }
 
         async fn set_owner(

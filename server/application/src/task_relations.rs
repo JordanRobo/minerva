@@ -272,9 +272,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::{DateTime, NaiveDate};
-    use domain::UserId;
+    use domain::{MilestoneId, UserId};
 
     use super::*;
+    use crate::ports::TaskCounts;
     use crate::ports::task_relation_repository::fakes::InMemoryTaskRelationRepository;
 
     /// A fixed timestamp in 2026, exact to the second.
@@ -331,6 +332,32 @@ mod tests {
             self.find_by_ids_calls.fetch_add(1, Ordering::Relaxed);
             let tasks = self.tasks.lock().unwrap();
             Ok(ids.iter().filter_map(|id| tasks.get(id).cloned()).collect())
+        }
+
+        async fn task_counts_for_milestones(
+            &self,
+            milestone_ids: &[MilestoneId],
+        ) -> Result<HashMap<MilestoneId, TaskCounts>, RepositoryError> {
+            let tasks = self.tasks.lock().unwrap();
+            // Every requested id comes back, with zeros when the milestone
+            // has no tasks (mirroring the Postgres implementation).
+            let mut counts: HashMap<MilestoneId, TaskCounts> = milestone_ids
+                .iter()
+                .map(|id| (*id, TaskCounts { total: 0, done: 0 }))
+                .collect();
+            for task in tasks.values() {
+                let Some(milestone_id) = task.milestone_id else {
+                    continue;
+                };
+                let Some(counts) = counts.get_mut(&milestone_id) else {
+                    continue;
+                };
+                counts.total += 1;
+                if task.status == TaskStatus::Done {
+                    counts.done += 1;
+                }
+            }
+            Ok(counts)
         }
 
         async fn update(&self, task: Task) -> Result<Task, RepositoryError> {

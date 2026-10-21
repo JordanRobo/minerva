@@ -14,15 +14,18 @@ use actix_web::test::{TestRequest, init_service, read_body};
 use actix_web::web;
 use application::auth::SessionService;
 use application::ports::{
-    SessionRepository, TaskRelationRepository, TaskRepository, UserRepository,
+    SessionRepository, SystemClock, TaskRelationRepository, TaskRepository, UserRepository,
 };
+use application::status_computation::{StatusComputationService, StatusRecomputation};
 use application::task_relations::TaskRelationService;
+use application::task_service::TaskService;
 use chrono::{DateTime, NaiveDate, Utc};
 use diesel::prelude::*;
 use domain::{Role, Task, TaskId, TaskRelation, TaskRelationType, TaskStatus, User, UserId};
 use infrastructure::Sha256SessionTokens;
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{
+    PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
     PostgresSessionRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
     PostgresUserRepository,
 };
@@ -80,6 +83,16 @@ macro_rules! test_app {
         );
         // The relation service takes ports, so it gets its own repository
         // instances over the shared pool (mirrors `main.rs`).
+        // The task service recomputes statuses best-effort after each write
+        // (roadmap 3.13, step 4), so it gets the real computation service over
+        // the shared pool (mirrors `main.rs`).
+        let computation: Arc<dyn StatusRecomputation> = Arc::new(StatusComputationService::new(
+            Arc::new(PostgresGoalRepository::new(pool.clone())),
+            Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            Arc::new(SystemClock),
+        ));
         let relations = TaskRelationService::new(
             Arc::new(PostgresTaskRepository::new(pool.clone())),
             Arc::new(PostgresTaskRelationRepository::new(pool.clone())),
@@ -90,6 +103,10 @@ macro_rules! test_app {
                 .app_data(users_data)
                 .app_data(web::Data::new(session_service))
                 .app_data(web::Data::new(relations))
+                .app_data(web::Data::new(TaskService::new(
+                    Arc::new(PostgresTaskRepository::new(pool.clone())),
+                    computation,
+                )))
                 .app_data(web::Data::new(CookieSettings { secure: false }))
                 .configure(routes::configure),
         )

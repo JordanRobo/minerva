@@ -33,7 +33,14 @@ pub trait MilestoneRepository: Send + Sync {
     /// Returns `None` if no milestone has this id.
     async fn find_by_id(&self, id: MilestoneId) -> Result<Option<Milestone>, RepositoryError>;
 
+    /// The milestones with the given ids, in id order; ids with no matching
+    /// milestone are skipped. An empty slice yields an empty list.
+    async fn find_by_ids(&self, ids: &[MilestoneId]) -> Result<Vec<Milestone>, RepositoryError>;
+
     async fn list(&self) -> Result<Vec<Milestone>, RepositoryError>;
+
+    /// Every milestone id, in id order (roadmap 3.13's sweep).
+    async fn list_all_ids(&self) -> Result<Vec<MilestoneId>, RepositoryError>;
 
     async fn update(&self, milestone: Milestone) -> Result<Milestone, RepositoryError>;
 
@@ -44,6 +51,18 @@ pub trait MilestoneRepository: Send + Sync {
         id: MilestoneId,
         status_override: Option<Status>,
     ) -> Result<(), RepositoryError>;
+
+    /// Record a freshly computed automatic status (roadmap 3.13): one
+    /// single-column write of the stored `status` (and the derived legacy
+    /// `status_source`) that cannot clobber a concurrent edit of any other
+    /// field. It leaves `updated_at` and the manual override untouched, and
+    /// writes nothing when the value is unchanged; returns whether anything
+    /// changed. An unknown id is a `NotFound`.
+    async fn set_automatic_status(
+        &self,
+        id: MilestoneId,
+        status: Status,
+    ) -> Result<bool, RepositoryError>;
 
     /// Set or clear the milestone's owner; `None` clears it (D17). One
     /// single-column write of the owner and `updated_at` that cannot clobber a
@@ -186,8 +205,33 @@ pub mod fakes {
                 .cloned())
         }
 
+        async fn find_by_ids(
+            &self,
+            ids: &[MilestoneId],
+        ) -> Result<Vec<Milestone>, RepositoryError> {
+            let milestones = self.milestones.lock().unwrap();
+            let mut found: Vec<Milestone> = ids
+                .iter()
+                .filter_map(|id| milestones.iter().find(|m| m.id == *id).cloned())
+                .collect();
+            found.sort_by_key(|milestone| milestone.id.0);
+            Ok(found)
+        }
+
         async fn list(&self) -> Result<Vec<Milestone>, RepositoryError> {
             Ok(self.milestones.lock().unwrap().clone())
+        }
+
+        async fn list_all_ids(&self) -> Result<Vec<MilestoneId>, RepositoryError> {
+            let mut ids: Vec<MilestoneId> = self
+                .milestones
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|m| m.id)
+                .collect();
+            ids.sort_by_key(|id| id.0);
+            Ok(ids)
         }
 
         async fn update(&self, milestone: Milestone) -> Result<Milestone, RepositoryError> {
@@ -215,6 +259,25 @@ pub mod fakes {
             };
             milestone.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_automatic_status(
+            &self,
+            id: MilestoneId,
+            status: Status,
+        ) -> Result<bool, RepositoryError> {
+            let mut milestones = self.milestones.lock().unwrap();
+            let Some(milestone) = milestones.iter_mut().find(|existing| existing.id == id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the automatic status;
+            // updated_at and the override are untouched, and an unchanged
+            // value writes nothing.
+            if milestone.status == status {
+                return Ok(false);
+            }
+            milestone.status = status;
+            Ok(true)
         }
 
         async fn set_owner(
@@ -574,6 +637,104 @@ pub mod fakes {
                 .unwrap();
             assert!(page.items.is_empty());
             assert_eq!(page.total, 7);
+        }
+
+        #[tokio::test]
+        async fn set_automatic_status_writes_only_the_status_and_reports_change() {
+            let repo = InMemoryMilestoneRepository::new();
+            let milestone = milestone(1, "Alpha", Status::OnTrack, None, None, at(1));
+            repo.create(milestone.clone()).await.unwrap();
+
+            assert!(
+                repo.set_automatic_status(milestone.id, Status::AtRisk)
+                    .await
+                    .unwrap()
+            );
+            let stored = repo.find_by_id(milestone.id).await.unwrap().unwrap();
+            assert_eq!(stored.status, Status::AtRisk);
+            // updated_at and the override are untouched.
+            assert_eq!(stored.updated_at, milestone.updated_at);
+            assert_eq!(stored.status_override, None);
+
+            // A repeat is a reported no-op...
+            assert!(
+                !repo
+                    .set_automatic_status(milestone.id, Status::AtRisk)
+                    .await
+                    .unwrap()
+            );
+            // ...and an unknown id is NotFound.
+            assert!(matches!(
+                repo.set_automatic_status(MilestoneId::new(), Status::OnTrack)
+                    .await,
+                Err(RepositoryError::NotFound)
+            ));
+        }
+
+        #[tokio::test]
+        async fn set_automatic_status_leaves_an_override_in_place() {
+            let repo = InMemoryMilestoneRepository::new();
+            let milestone = milestone(
+                1,
+                "Alpha",
+                Status::OnTrack,
+                Some(Status::Complete),
+                None,
+                at(1),
+            );
+            repo.create(milestone.clone()).await.unwrap();
+
+            assert!(
+                repo.set_automatic_status(milestone.id, Status::OffTrack)
+                    .await
+                    .unwrap()
+            );
+            let stored = repo.find_by_id(milestone.id).await.unwrap().unwrap();
+            assert_eq!(stored.status, Status::OffTrack);
+            assert_eq!(stored.status_override, Some(Status::Complete));
+        }
+
+        #[tokio::test]
+        async fn find_by_ids_returns_only_known_ids_in_id_order() {
+            let repo = InMemoryMilestoneRepository::new();
+            for milestone in [
+                milestone(3, "c", Status::OnTrack, None, None, at(1)),
+                milestone(1, "a", Status::OnTrack, None, None, at(2)),
+                milestone(2, "b", Status::OnTrack, None, None, at(3)),
+            ] {
+                repo.create(milestone).await.unwrap();
+            }
+
+            let found = repo
+                .find_by_ids(&[
+                    MilestoneId(Uuid::from_u128(2)),
+                    MilestoneId::new(),
+                    MilestoneId(Uuid::from_u128(1)),
+                ])
+                .await
+                .unwrap();
+            assert_eq!(
+                found.iter().map(|m| m.id.0.as_u128()).collect::<Vec<_>>(),
+                vec![1, 2]
+            );
+
+            assert!(repo.find_by_ids(&[]).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn list_all_ids_returns_every_id_in_id_order() {
+            let repo = InMemoryMilestoneRepository::new();
+            for id in [3u128, 1, 2] {
+                repo.create(milestone(id, "m", Status::OnTrack, None, None, at(1)))
+                    .await
+                    .unwrap();
+            }
+
+            let ids = repo.list_all_ids().await.unwrap();
+            assert_eq!(
+                ids.iter().map(|id| id.0.as_u128()).collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
         }
     }
 }

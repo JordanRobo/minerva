@@ -6,6 +6,7 @@ use chrono::Utc;
 use diesel::prelude::*;
 use diesel::sql_types::{Nullable, Text};
 use domain::{Goal, GoalId, Status, StatusSource, UserId};
+use uuid::Uuid;
 
 use crate::db::{PgPool, run_on_postgres};
 use crate::error::map_diesel_error;
@@ -78,6 +79,19 @@ impl GoalRepository for PostgresGoalRepository {
         .await
     }
 
+    async fn list_all_ids(&self) -> Result<Vec<GoalId>, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, |conn| {
+            let ids: Vec<Uuid> = goals::table
+                .select(goals::id)
+                .order_by(goals::id.asc())
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            Ok(ids.into_iter().map(GoalId).collect())
+        })
+        .await
+    }
+
     async fn update(&self, goal: Goal) -> Result<Goal, RepositoryError> {
         let pool = self.pool.clone();
         run_on_postgres(pool, move |conn| {
@@ -128,6 +142,44 @@ impl GoalRepository for PostgresGoalRepository {
                 return Err(RepositoryError::NotFound);
             }
             Ok(())
+        })
+        .await
+    }
+
+    async fn set_automatic_status(
+        &self,
+        id: GoalId,
+        status: Status,
+    ) -> Result<bool, RepositoryError> {
+        let pool = self.pool.clone();
+        run_on_postgres(pool, move |conn| {
+            // One single-column write of the automatic status (roadmap 3.13):
+            // it cannot clobber a concurrent edit of any other field, and it
+            // leaves updated_at and the manual override untouched. The legacy
+            // `status_source` column mirrors the override, as every other
+            // write does — so read the override first; that also resolves an
+            // unknown id to NotFound before the conditional write.
+            let override_status: Option<String> = goals::table
+                .find(id.0)
+                .select(goals::status_override)
+                .first(conn)
+                .optional()
+                .map_err(map_diesel_error)?
+                .ok_or(RepositoryError::NotFound)?;
+            let source = match override_status {
+                Some(_) => StatusSource::ManualOverride,
+                None => StatusSource::Computed,
+            };
+            // An unchanged value is a no-op: the filter matches no row.
+            let changed = diesel::update(goals::table.find(id.0))
+                .filter(goals::status.is_distinct_from(status_to_db(status)))
+                .set((
+                    goals::status.eq(status_to_db(status)),
+                    goals::status_source.eq(status_source_to_db(source)),
+                ))
+                .execute(conn)
+                .map_err(map_diesel_error)?;
+            Ok(changed > 0)
         })
         .await
     }

@@ -6,7 +6,7 @@
 use application::pagination::PageRequest;
 use application::ports::{
     AccessChange, GoalListFilter, GoalMilestoneRepository, GoalRepository, MilestoneListFilter,
-    MilestoneRepository, ProgressSnapshotRepository, RepositoryError, TaskListFilter,
+    MilestoneRepository, ProgressSnapshotRepository, RepositoryError, TaskCounts, TaskListFilter,
     TaskRelationCreateError, TaskRelationRepository, TaskRepository, UserIdentityRepository,
     UserRepository,
 };
@@ -34,7 +34,7 @@ use infrastructure::repositories::{
     PostgresProgressSnapshotRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
     PostgresUserIdentityRepository, PostgresUserRepository,
 };
-use infrastructure::schema::{task_relations, tasks};
+use infrastructure::schema::{goals, milestones, task_relations, tasks};
 use uuid::Uuid;
 
 /// Set once the migrations have been applied by [`pool`], so the tests are
@@ -406,6 +406,355 @@ async fn milestone_status_override_round_trip() {
     assert_eq!(cleared.status_source(), StatusSource::Computed);
 
     repo.delete(milestone.id).await.unwrap();
+}
+
+/// Roadmap 3.13: one lookup returns every requested milestone's task counts —
+/// total and Done-column only — with zero-task milestones present as zeros and
+/// unrequested ids absent.
+#[tokio::test]
+async fn task_counts_for_milestones_groups_by_milestone_and_counts_only_done() {
+    let Some(pool) = pool() else { return };
+    let milestones_repo = PostgresMilestoneRepository::new(pool.clone());
+    let tasks_repo = PostgresTaskRepository::new(pool);
+
+    let milestone_a = test_milestone();
+    let milestone_b = test_milestone();
+    let milestone_c = test_milestone(); // no tasks: must come back as zeros
+    milestones_repo.create(milestone_a.clone()).await.unwrap();
+    milestones_repo.create(milestone_b.clone()).await.unwrap();
+    milestones_repo.create(milestone_c.clone()).await.unwrap();
+
+    let base = Uuid::new_v4().as_u128();
+    let task_1 = task_on(
+        base,
+        Some(milestone_a.id),
+        TaskStatus::Backlog,
+        "counted",
+        None,
+        at(1, 1),
+    );
+    let task_2 = task_on(
+        base + 1,
+        Some(milestone_a.id),
+        TaskStatus::Done,
+        "done",
+        None,
+        at(1, 2),
+    );
+    let task_3 = task_on(
+        base + 2,
+        Some(milestone_b.id),
+        TaskStatus::InProgress,
+        "not done",
+        None,
+        at(1, 3),
+    );
+    tasks_repo.create(task_1.clone()).await.unwrap();
+    tasks_repo.create(task_2.clone()).await.unwrap();
+    tasks_repo.create(task_3.clone()).await.unwrap();
+
+    let counts = tasks_repo
+        .task_counts_for_milestones(&[milestone_a.id, milestone_b.id, milestone_c.id])
+        .await
+        .unwrap();
+    assert_eq!(counts[&milestone_a.id], TaskCounts { total: 2, done: 1 });
+    assert_eq!(counts[&milestone_b.id], TaskCounts { total: 1, done: 0 });
+    assert_eq!(counts[&milestone_c.id], TaskCounts { total: 0, done: 0 });
+    // Only the requested ids are present.
+    assert_eq!(counts.len(), 3);
+
+    tasks_repo.delete(task_1.id).await.unwrap();
+    tasks_repo.delete(task_2.id).await.unwrap();
+    tasks_repo.delete(task_3.id).await.unwrap();
+    milestones_repo.delete(milestone_a.id).await.unwrap();
+    milestones_repo.delete(milestone_b.id).await.unwrap();
+    milestones_repo.delete(milestone_c.id).await.unwrap();
+}
+
+/// Roadmap 3.13: set_automatic_status is a single-column write — it changes
+/// only the stored status (and the derived legacy source), leaves updated_at
+/// and the override untouched, reports unchanged on a repeat, and answers
+/// NotFound for an unknown id.
+#[tokio::test]
+async fn milestone_set_automatic_status_changes_only_the_status_column() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool.clone());
+    let mut milestone = test_milestone();
+    milestone.created_at = at(1, 1);
+    milestone.updated_at = at(1, 1);
+    repo.create(milestone.clone()).await.unwrap();
+
+    assert!(
+        repo.set_automatic_status(milestone.id, Status::AtRisk)
+            .await
+            .unwrap()
+    );
+    {
+        let mut conn = pool.get().expect("pool connection");
+        let (status, source, updated_at, override_status): (
+            String,
+            String,
+            DateTime<Utc>,
+            Option<String>,
+        ) = milestones::table
+            .find(milestone.id.0)
+            .select((
+                milestones::status,
+                milestones::status_source,
+                milestones::updated_at,
+                milestones::status_override,
+            ))
+            .first(&mut *conn)
+            .expect("milestone to exist");
+        assert_eq!(status, "at_risk");
+        assert_eq!(source, "computed");
+        // The writer must not bump updated_at or touch the override.
+        assert_eq!(updated_at, at(1, 1));
+        assert_eq!(override_status, None);
+    }
+
+    // Repeating the current value writes nothing.
+    assert!(
+        !repo
+            .set_automatic_status(milestone.id, Status::AtRisk)
+            .await
+            .unwrap()
+    );
+
+    let unknown = MilestoneId::new();
+    assert!(matches!(
+        repo.set_automatic_status(unknown, Status::OnTrack).await,
+        Err(RepositoryError::NotFound)
+    ));
+
+    repo.delete(milestone.id).await.unwrap();
+}
+
+/// Roadmap 3.13: the goal writer has the same single-column contract as the
+/// milestone one.
+#[tokio::test]
+async fn goal_set_automatic_status_changes_only_the_status_column() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresGoalRepository::new(pool.clone());
+    let mut goal = test_goal();
+    goal.created_at = at(1, 1);
+    goal.updated_at = at(1, 1);
+    repo.create(goal.clone()).await.unwrap();
+
+    assert!(
+        repo.set_automatic_status(goal.id, Status::OffTrack)
+            .await
+            .unwrap()
+    );
+    {
+        let mut conn = pool.get().expect("pool connection");
+        let (status, source, updated_at, override_status): (
+            String,
+            String,
+            DateTime<Utc>,
+            Option<String>,
+        ) = goals::table
+            .find(goal.id.0)
+            .select((
+                goals::status,
+                goals::status_source,
+                goals::updated_at,
+                goals::status_override,
+            ))
+            .first(&mut *conn)
+            .expect("goal to exist");
+        assert_eq!(status, "off_track");
+        assert_eq!(source, "computed");
+        // The writer must not bump updated_at or touch the override.
+        assert_eq!(updated_at, at(1, 1));
+        assert_eq!(override_status, None);
+    }
+
+    // Repeating the current value writes nothing.
+    assert!(
+        !repo
+            .set_automatic_status(goal.id, Status::OffTrack)
+            .await
+            .unwrap()
+    );
+
+    let unknown = GoalId::new();
+    assert!(matches!(
+        repo.set_automatic_status(unknown, Status::OnTrack).await,
+        Err(RepositoryError::NotFound)
+    ));
+
+    repo.delete(goal.id).await.unwrap();
+}
+
+/// Roadmap 3.13: the automatic-status writer never clears a manual override —
+/// the effective status stays the override's, and the legacy source column
+/// keeps reporting it.
+#[tokio::test]
+async fn set_automatic_status_leaves_an_override_in_place() {
+    let Some(pool) = pool() else { return };
+    let goals_repo = PostgresGoalRepository::new(pool.clone());
+    let milestones_repo = PostgresMilestoneRepository::new(pool.clone());
+
+    let goal = test_goal();
+    let milestone = test_milestone();
+    goals_repo.create(goal.clone()).await.unwrap();
+    milestones_repo.create(milestone.clone()).await.unwrap();
+
+    goals_repo
+        .set_status_override(goal.id, Some(Status::Complete))
+        .await
+        .unwrap();
+    milestones_repo
+        .set_status_override(milestone.id, Some(Status::Complete))
+        .await
+        .unwrap();
+
+    assert!(
+        goals_repo
+            .set_automatic_status(goal.id, Status::OffTrack)
+            .await
+            .unwrap()
+    );
+    assert!(
+        milestones_repo
+            .set_automatic_status(milestone.id, Status::OffTrack)
+            .await
+            .unwrap()
+    );
+
+    let found_goal = goals_repo
+        .find_by_id(goal.id)
+        .await
+        .unwrap()
+        .expect("goal to exist");
+    assert_eq!(found_goal.status, Status::OffTrack);
+    assert_eq!(found_goal.status_override, Some(Status::Complete));
+    assert_eq!(found_goal.effective_status(), Status::Complete);
+
+    let found_milestone = milestones_repo
+        .find_by_id(milestone.id)
+        .await
+        .unwrap()
+        .expect("milestone to exist");
+    assert_eq!(found_milestone.status, Status::OffTrack);
+    assert_eq!(found_milestone.status_override, Some(Status::Complete));
+    assert_eq!(found_milestone.effective_status(), Status::Complete);
+
+    {
+        let mut conn = pool.get().expect("pool connection");
+        let goal_source: String = goals::table
+            .find(goal.id.0)
+            .select(goals::status_source)
+            .first(&mut *conn)
+            .expect("goal to exist");
+        assert_eq!(goal_source, "manual_override");
+        let milestone_source: String = milestones::table
+            .find(milestone.id.0)
+            .select(milestones::status_source)
+            .first(&mut *conn)
+            .expect("milestone to exist");
+        assert_eq!(milestone_source, "manual_override");
+    }
+
+    goals_repo.delete(goal.id).await.unwrap();
+    milestones_repo.delete(milestone.id).await.unwrap();
+}
+
+/// Roadmap 3.13: find_by_ids returns only the known ids, in id order —
+/// created_at is irrelevant to the ordering.
+#[tokio::test]
+async fn milestone_find_by_ids_skips_unknown_ids_and_orders_by_id() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresMilestoneRepository::new(pool);
+
+    // created_at runs opposite to id order to prove the ordering is by id.
+    let base = Uuid::new_v4().as_u128();
+    let a = milestone_on(base, None, at(1, 3));
+    let b = milestone_on(base + 1, None, at(1, 2));
+    let c = milestone_on(base + 2, None, at(1, 1));
+    repo.create(a.clone()).await.unwrap();
+    repo.create(b.clone()).await.unwrap();
+    repo.create(c.clone()).await.unwrap();
+
+    let found = repo
+        .find_by_ids(&[c.id, MilestoneId::new(), a.id, b.id])
+        .await
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|m| m.id.0).collect::<Vec<_>>(),
+        vec![a.id.0, b.id.0, c.id.0]
+    );
+
+    assert!(repo.find_by_ids(&[]).await.unwrap().is_empty());
+
+    repo.delete(a.id).await.unwrap();
+    repo.delete(b.id).await.unwrap();
+    repo.delete(c.id).await.unwrap();
+}
+
+/// Roadmap 3.13's sweep reads every id: both repositories list all of their
+/// ids in id order. Other tests may hold rows in the shared database while
+/// this one runs, so each triple is asserted as an increasing subsequence
+/// rather than the whole list.
+#[tokio::test]
+async fn list_all_ids_returns_every_id_in_id_order() {
+    let Some(pool) = pool() else { return };
+    let goals_repo = PostgresGoalRepository::new(pool.clone());
+    let milestones_repo = PostgresMilestoneRepository::new(pool);
+
+    // created_at runs opposite to id order to prove the ordering is by id.
+    let base = Uuid::new_v4().as_u128();
+    let goal_a = goal_on(base, None, at(1, 3));
+    let goal_b = goal_on(base + 1, None, at(1, 2));
+    let goal_c = goal_on(base + 2, None, at(1, 1));
+    goals_repo.create(goal_a.clone()).await.unwrap();
+    goals_repo.create(goal_b.clone()).await.unwrap();
+    goals_repo.create(goal_c.clone()).await.unwrap();
+
+    let milestone_a = milestone_on(base + 10, None, at(1, 3));
+    let milestone_b = milestone_on(base + 11, None, at(1, 2));
+    let milestone_c = milestone_on(base + 12, None, at(1, 1));
+    milestones_repo.create(milestone_a.clone()).await.unwrap();
+    milestones_repo.create(milestone_b.clone()).await.unwrap();
+    milestones_repo.create(milestone_c.clone()).await.unwrap();
+
+    let goal_ids = goals_repo.list_all_ids().await.unwrap();
+    let goal_positions: HashMap<GoalId, usize> = goal_ids
+        .iter()
+        .enumerate()
+        .map(|(position, id)| (*id, position))
+        .collect();
+    for pair in [goal_a.id, goal_b.id, goal_c.id].windows(2) {
+        assert!(
+            goal_positions[&pair[0]] < goal_positions[&pair[1]],
+            "expected {:?} before {:?} in the listed order",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    let milestone_ids = milestones_repo.list_all_ids().await.unwrap();
+    let milestone_positions: HashMap<MilestoneId, usize> = milestone_ids
+        .iter()
+        .enumerate()
+        .map(|(position, id)| (*id, position))
+        .collect();
+    for pair in [milestone_a.id, milestone_b.id, milestone_c.id].windows(2) {
+        assert!(
+            milestone_positions[&pair[0]] < milestone_positions[&pair[1]],
+            "expected {:?} before {:?} in the listed order",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    goals_repo.delete(goal_a.id).await.unwrap();
+    goals_repo.delete(goal_b.id).await.unwrap();
+    goals_repo.delete(goal_c.id).await.unwrap();
+    milestones_repo.delete(milestone_a.id).await.unwrap();
+    milestones_repo.delete(milestone_b.id).await.unwrap();
+    milestones_repo.delete(milestone_c.id).await.unwrap();
 }
 
 /// D17: the owner column round-trips — create persists it, an ordinary update

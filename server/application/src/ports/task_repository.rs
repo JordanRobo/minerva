@@ -1,5 +1,7 @@
 //! Persistence port for [`Task`]s.
 
+use std::collections::HashMap;
+
 use chrono::NaiveDate;
 use domain::{MilestoneId, Task, TaskId, TaskStatus, UserId};
 
@@ -31,6 +33,14 @@ pub struct TaskListFilter {
     pub assignee_id: Option<UserId>,
 }
 
+/// How many tasks a milestone has, and how many of them sit in the Done
+/// column (roadmap 3.13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskCounts {
+    pub total: u32,
+    pub done: u32,
+}
+
 #[async_trait::async_trait]
 pub trait TaskRepository: Send + Sync {
     async fn create(&self, task: Task) -> Result<Task, RepositoryError>;
@@ -41,6 +51,15 @@ pub trait TaskRepository: Send + Sync {
     /// The tasks with the given ids, in id order; ids with no matching task
     /// are skipped. An empty slice yields an empty list.
     async fn find_by_ids(&self, ids: &[TaskId]) -> Result<Vec<Task>, RepositoryError>;
+
+    /// The task counts for each of the given milestones (roadmap 3.13): how
+    /// many tasks each has and how many sit in the Done column. One lookup
+    /// for all of them; every requested id is present in the map, with zeros
+    /// when the milestone has no tasks. An empty slice yields an empty map.
+    async fn task_counts_for_milestones(
+        &self,
+        milestone_ids: &[MilestoneId],
+    ) -> Result<HashMap<MilestoneId, TaskCounts>, RepositoryError>;
 
     async fn update(&self, task: Task) -> Result<Task, RepositoryError>;
 
@@ -76,12 +95,13 @@ pub trait TaskRepository: Send + Sync {
 #[cfg(test)]
 pub mod fakes {
     use std::cmp::Ordering;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     use chrono::{DateTime, NaiveDate, Utc};
     use domain::{MilestoneId, Task, TaskId, TaskStatus, UserId};
 
-    use super::{TaskListFilter, TaskRepository};
+    use super::{TaskCounts, TaskListFilter, TaskRepository};
     use crate::pagination::{Page, PageRequest};
     use crate::ports::RepositoryError;
 
@@ -195,6 +215,32 @@ pub mod fakes {
                 .collect();
             found.sort_by_key(|task| task.id.0);
             Ok(found)
+        }
+
+        async fn task_counts_for_milestones(
+            &self,
+            milestone_ids: &[MilestoneId],
+        ) -> Result<HashMap<MilestoneId, TaskCounts>, RepositoryError> {
+            let tasks = self.tasks.lock().unwrap();
+            // Every requested id comes back, with zeros when the milestone
+            // has no tasks (mirroring the Postgres implementation).
+            let mut counts: HashMap<MilestoneId, TaskCounts> = milestone_ids
+                .iter()
+                .map(|id| (*id, TaskCounts { total: 0, done: 0 }))
+                .collect();
+            for task in tasks.iter() {
+                let Some(milestone_id) = task.milestone_id else {
+                    continue;
+                };
+                let Some(counts) = counts.get_mut(&milestone_id) else {
+                    continue;
+                };
+                counts.total += 1;
+                if task.status == TaskStatus::Done {
+                    counts.done += 1;
+                }
+            }
+            Ok(counts)
         }
 
         async fn update(&self, task: Task) -> Result<Task, RepositoryError> {
@@ -789,6 +835,52 @@ pub mod fakes {
                 .unwrap();
             assert!(page.items.is_empty());
             assert_eq!(page.total, 7);
+        }
+
+        #[tokio::test]
+        async fn task_counts_group_by_milestone_and_count_only_done_for_done() {
+            let milestone_a = MilestoneId(Uuid::from_u128(1));
+            let milestone_b = MilestoneId(Uuid::from_u128(2));
+            let repo = InMemoryTaskRepository::new();
+            for task in [
+                task(1, "a", TaskStatus::Backlog, Some(milestone_a), None, at(1)),
+                task(2, "b", TaskStatus::Done, Some(milestone_a), None, at(2)),
+                task(3, "c", TaskStatus::Done, Some(milestone_b), None, at(3)),
+                task(
+                    4,
+                    "d",
+                    TaskStatus::InProgress,
+                    Some(milestone_b),
+                    None,
+                    at(4),
+                ),
+                // Done but unassigned: counted for no milestone.
+                task(5, "e", TaskStatus::Done, None, None, at(5)),
+            ] {
+                repo.create(task).await.unwrap();
+            }
+
+            let counts = repo
+                .task_counts_for_milestones(&[milestone_a, milestone_b])
+                .await
+                .unwrap();
+            assert_eq!(counts[&milestone_a], TaskCounts { total: 2, done: 1 });
+            assert_eq!(counts[&milestone_b], TaskCounts { total: 2, done: 1 });
+
+            // A milestone with no tasks comes back as zeros...
+            let empty = MilestoneId::new();
+            let counts = repo.task_counts_for_milestones(&[empty]).await.unwrap();
+            assert_eq!(counts[&empty], TaskCounts { total: 0, done: 0 });
+            // ...and unrequested ids are absent.
+            assert_eq!(counts.len(), 1);
+
+            // An empty request yields an empty map.
+            assert!(
+                repo.task_counts_for_milestones(&[])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 }

@@ -12,10 +12,12 @@ use actix_web::web;
 use application::auth::SessionService;
 use application::goal_list::GoalListService;
 use application::milestone_list::MilestoneListService;
+use application::milestone_service::MilestoneService;
 use application::ports::{
-    GoalRepository, MilestoneRepository, NoopStatusSnapshotTrigger, SessionRepository,
-    UserRepository,
+    GoalRepository, MilestoneRepository, NoopStatusSnapshotTrigger, SessionRepository, SystemClock,
+    TaskRepository, UserRepository,
 };
+use application::status_computation::{StatusComputationService, StatusRecomputation};
 use application::status_override::StatusOverrideService;
 use chrono::Utc;
 use diesel::prelude::*;
@@ -23,8 +25,8 @@ use domain::{Goal, GoalId, Milestone, MilestoneId, Role, Status, User, UserId};
 use infrastructure::Sha256SessionTokens;
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{
-    PostgresGoalRepository, PostgresMilestoneRepository, PostgresSessionRepository,
-    PostgresUserRepository,
+    PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
+    PostgresSessionRepository, PostgresTaskRepository, PostgresUserRepository,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -75,19 +77,36 @@ macro_rules! test_app {
             Arc::new(Sha256SessionTokens),
             SessionService::DEFAULT_SESSION_TTL,
         );
-        // Snapshots are not built yet (roadmap 3.14): the no-op trigger keeps
-        // the service wired exactly as `main.rs` wires it today.
+        // Snapshots are not built yet (roadmap 3.14), so the trigger is
+        // the no-op, like `main.rs`.
+        // The override service recomputes the linked goals best-effort
+        // after each change (roadmap 3.13, step 4), so it gets the real
+        // computation service over the shared pool (mirrors `main.rs`).
+        let computation: Arc<dyn StatusRecomputation> = Arc::new(StatusComputationService::new(
+            Arc::new(PostgresGoalRepository::new(pool.clone())),
+            Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            Arc::new(SystemClock),
+        ));
         let overrides = StatusOverrideService::new(
             Arc::new(PostgresGoalRepository::new(pool.clone())),
             Arc::new(PostgresMilestoneRepository::new(pool.clone())),
             Arc::new(NoopStatusSnapshotTrigger),
+            computation.clone(),
         );
+        // The milestone handlers read task counts through the port (roadmap
+        // 3.13), so a trait-object registration sits beside the concrete one,
+        // like in `main.rs`.
+        let task_counts: Arc<dyn TaskRepository> =
+            Arc::new(PostgresTaskRepository::new(pool.clone()));
         init_service(
             App::new()
                 .app_data(web::Data::new(PostgresGoalRepository::new(pool.clone())))
                 .app_data(web::Data::new(PostgresMilestoneRepository::new(
                     pool.clone(),
                 )))
+                .app_data(web::Data::from(task_counts))
                 .app_data(users_data)
                 .app_data(web::Data::new(session_service))
                 .app_data(web::Data::new(overrides))
@@ -97,6 +116,11 @@ macro_rules! test_app {
                 .app_data(web::Data::new(MilestoneListService::new(Arc::new(
                     PostgresMilestoneRepository::new(pool.clone()),
                 ))))
+                .app_data(web::Data::new(MilestoneService::new(
+                    Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+                    Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+                    computation,
+                )))
                 .app_data(web::Data::new(CookieSettings { secure: false }))
                 .configure(routes::configure),
         )
@@ -732,6 +756,72 @@ async fn setting_the_same_milestone_override_twice_is_idempotent() {
         assert_eq!(res.status(), StatusCode::OK);
         assert_status(&json_of(res).await, "off_track", "manual");
     }
+
+    milestones
+        .delete(milestone.id)
+        .await
+        .expect("cleanup milestone");
+    delete_user(&pool, user.id);
+}
+
+#[actix_web::test]
+async fn a_milestone_override_reports_the_computed_status_alongside() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let pool = test_pool(&url);
+    let app = test_app!(&url);
+
+    let user = create_user(&pool, unique_email("milestone-auto"), Role::Staff).await;
+    let token = issue_token(&pool, user.id).await;
+    let milestones = PostgresMilestoneRepository::new(pool.clone());
+    // The stored automatic status is OffTrack (what a past-due milestone
+    // computes to), so the response can show both values at once.
+    let milestone = milestones
+        .create(test_milestone(Status::OffTrack))
+        .await
+        .expect("create milestone");
+
+    // A manual OnTrack wins as the effective status...
+    let set = request!(
+        &app,
+        Method::PUT,
+        format!("/api/milestones/{}/status-override", milestone.id.0),
+        Some(&token),
+        Some(&serde_json::json!({ "status": "on_track" }))
+    );
+    assert_eq!(set.status(), StatusCode::OK);
+    let json = json_of(set).await;
+    assert_status(&json, "on_track", "manual");
+    // ...while the computed value is reported underneath it (roadmap 3.13).
+    assert_eq!(json["automatic_status"], "off_track");
+
+    // A subsequent GET agrees on all three values.
+    let get = request!(
+        &app,
+        Method::GET,
+        format!("/api/milestones/{}", milestone.id.0),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(get.status(), StatusCode::OK);
+    let json = json_of(get).await;
+    assert_status(&json, "on_track", "manual");
+    assert_eq!(json["automatic_status"], "off_track");
+
+    // ...and clearing returns to the stored value.
+    let clear = request!(
+        &app,
+        Method::DELETE,
+        format!("/api/milestones/{}/status-override", milestone.id.0),
+        Some(&token),
+        None::<&serde_json::Value>
+    );
+    assert_eq!(clear.status(), StatusCode::OK);
+    let json = json_of(clear).await;
+    assert_status(&json, "off_track", "automatic");
+    assert_eq!(json["automatic_status"], "off_track");
 
     milestones
         .delete(milestone.id)

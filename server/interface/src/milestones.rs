@@ -7,11 +7,14 @@
 use actix_web::{HttpResponse, web};
 use application::assignment::AssignmentService;
 use application::milestone_list::MilestoneListService;
+use application::milestone_service::MilestoneService;
 use application::pagination::PageRequest;
-use application::ports::{MilestoneListFilter, MilestoneRepository, UserRepository};
+use application::ports::{
+    MilestoneListFilter, MilestoneRepository, TaskCounts, TaskRepository, UserRepository,
+};
 use application::status_override::StatusOverrideService;
 use chrono::{DateTime, NaiveDate, Utc};
-use domain::{Milestone, MilestoneId, Status, StatusSource, UserId};
+use domain::{Milestone, MilestoneId, Status, StatusSource, UserId, percent_complete};
 use infrastructure::repositories::PostgresMilestoneRepository;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -21,7 +24,8 @@ use uuid::Uuid;
 
 use crate::access::{EditAccess, ViewAccess};
 use crate::error::{
-    ApiError, assignment_error_response, repo_error_response, status_override_error_response,
+    ApiError, assignment_error_response, milestone_service_error_response, repo_error_response,
+    status_override_error_response,
 };
 use crate::goals::{
     StatusOverrideRequest, collect_list_query, parse_page_request, parse_q, parse_target_date,
@@ -43,7 +47,18 @@ pub struct MilestoneResponse {
     /// worked out by the system ("automatic").
     #[schema(value_type = StatusSourceDoc)]
     pub status_source: StatusSource,
+    /// The status the system works out from the milestone's tasks and target
+    /// date, reported even while a manual setting is active — so a client can
+    /// show "manually set to At Risk (automatic: On Track)" (roadmap 3.13).
+    #[schema(value_type = StatusDoc)]
+    pub automatic_status: Status,
     pub target_date: Option<NaiveDate>,
+    /// How many tasks the milestone has and how many sit in the Done column
+    /// (roadmap 3.13), resolved in one grouped lookup per response or page.
+    pub task_counts: MilestoneTaskCounts,
+    /// The share of the milestone's tasks that are done, as a percentage
+    /// from 0 to 100 (0 with no tasks).
+    pub percent_complete: u8,
     /// The person the milestone is owned by, or null when unowned (D17). A
     /// deactivated owner still appears, with `active` false.
     pub owner: Option<PersonSummary>,
@@ -51,23 +66,45 @@ pub struct MilestoneResponse {
     pub updated_at: DateTime<Utc>,
 }
 
+/// How many tasks a milestone has and how many sit in the Done column
+/// (roadmap 3.13).
+#[derive(Serialize, ToSchema)]
+pub struct MilestoneTaskCounts {
+    pub total: u32,
+    pub done: u32,
+}
+
 /// Build the response for one milestone, looking its owner up in the batch
-/// resolved by [`resolve_summaries`] — one user query per response or page,
-/// never one per row (D17). `pub(crate)` so the goal–milestone link lists
-/// reuse it.
+/// resolved by [`resolve_summaries`] and its task counts in the batch
+/// resolved by `task_counts_for_milestones` — one query each per response or
+/// page, never one per row (D17, roadmap 3.13). `pub(crate)` so the
+/// goal–milestone link lists reuse it.
 pub(crate) fn milestone_response(
     milestone: &Milestone,
     people: &HashMap<Uuid, PersonSummary>,
+    counts: &HashMap<MilestoneId, TaskCounts>,
 ) -> MilestoneResponse {
     // The wire shape reports the effective status and where it came
-    // from; the raw automatic value and override are domain-side.
+    // from, plus the automatic value underneath any manual setting. Every
+    // requested id is present in `counts` (zeros when taskless), but a
+    // missing entry degrades to zeros rather than failing the response.
+    let count = counts
+        .get(&milestone.id)
+        .copied()
+        .unwrap_or(TaskCounts { total: 0, done: 0 });
     let mut response = MilestoneResponse {
         id: milestone.id.0,
         title: milestone.title.clone(),
         description: milestone.description.clone(),
         status: milestone.effective_status(),
         status_source: milestone.status_source(),
+        automatic_status: milestone.status,
         target_date: milestone.target_date,
+        task_counts: MilestoneTaskCounts {
+            total: count.total,
+            done: count.done,
+        },
+        percent_complete: (percent_complete(count.total, count.done) * 100.0).round() as u8,
         owner: None,
         created_at: milestone.created_at,
         updated_at: milestone.updated_at,
@@ -224,9 +261,10 @@ fn parse_milestone_list_query(
     )
 )]
 pub async fn create_milestone(
-    milestones: web::Data<PostgresMilestoneRepository>,
+    service: web::Data<MilestoneService>,
     assignment: web::Data<AssignmentService>,
     users: web::Data<dyn UserRepository>,
+    tasks: web::Data<dyn TaskRepository>,
     _access: EditAccess,
     body: web::Json<CreateMilestoneRequest>,
 ) -> Result<HttpResponse, ApiError> {
@@ -257,14 +295,19 @@ pub async fn create_milestone(
         created_at: now,
         updated_at: now,
     };
-    match milestones.create(milestone).await {
+    match service.create(milestone).await {
         Ok(milestone) => {
             let people = resolve_summaries(users.as_ref(), [milestone.owner_id])
                 .await
                 .map_err(repo_error_response)?;
-            Ok(HttpResponse::Created().json(milestone_response(&milestone, &people)))
+            // One grouped lookup for the new milestone's task counts.
+            let counts = tasks
+                .task_counts_for_milestones(&[milestone.id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Created().json(milestone_response(&milestone, &people, &counts)))
         }
-        Err(err) => Err(repo_error_response(err)),
+        Err(err) => Err(milestone_service_error_response(err)),
     }
 }
 
@@ -297,23 +340,30 @@ pub async fn list_milestones(
     query: web::Query<MilestoneListQuery>,
     service: web::Data<MilestoneListService>,
     users: web::Data<dyn UserRepository>,
+    tasks: web::Data<dyn TaskRepository>,
     _access: ViewAccess,
 ) -> Result<HttpResponse, ApiError> {
     let (filter, page_request) = parse_milestone_list_query(&query.0)?;
     match service.list_page(&filter, &page_request).await {
         Ok(page) => {
-            // One user query for the whole page's owners (D17).
+            // One user query for the whole page's owners (D17), one grouped
+            // lookup for the whole page's task counts (roadmap 3.13).
             let people = resolve_summaries(
                 users.as_ref(),
                 page.items.iter().map(|milestone| milestone.owner_id),
             )
             .await
             .map_err(repo_error_response)?;
+            let ids: Vec<MilestoneId> = page.items.iter().map(|milestone| milestone.id).collect();
+            let counts = tasks
+                .task_counts_for_milestones(&ids)
+                .await
+                .map_err(repo_error_response)?;
             Ok(HttpResponse::Ok().json(MilestonePage {
                 items: page
                     .items
                     .iter()
-                    .map(|milestone| milestone_response(milestone, &people))
+                    .map(|milestone| milestone_response(milestone, &people, &counts))
                     .collect(),
                 total: page.total,
                 limit: page.limit,
@@ -342,6 +392,7 @@ pub async fn list_milestones(
 pub async fn get_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
     users: web::Data<dyn UserRepository>,
+    tasks: web::Data<dyn TaskRepository>,
     _access: ViewAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
@@ -350,7 +401,11 @@ pub async fn get_milestone(
             let people = resolve_summaries(users.as_ref(), [milestone.owner_id])
                 .await
                 .map_err(repo_error_response)?;
-            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people)))
+            let counts = tasks
+                .task_counts_for_milestones(&[milestone.id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people, &counts)))
         }
         Ok(None) => Err(ApiError::not_found()),
         Err(err) => Err(repo_error_response(err)),
@@ -378,7 +433,9 @@ pub async fn get_milestone(
 )]
 pub async fn update_milestone(
     milestones: web::Data<PostgresMilestoneRepository>,
+    service: web::Data<MilestoneService>,
     users: web::Data<dyn UserRepository>,
+    tasks: web::Data<dyn TaskRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<MilestoneRequest>,
@@ -400,14 +457,18 @@ pub async fn update_milestone(
                 updated_at: Utc::now(),
                 ..existing
             };
-            match milestones.update(updated).await {
+            match service.update(updated).await {
                 Ok(milestone) => {
                     let people = resolve_summaries(users.as_ref(), [milestone.owner_id])
                         .await
                         .map_err(repo_error_response)?;
-                    Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people)))
+                    let counts = tasks
+                        .task_counts_for_milestones(&[milestone.id])
+                        .await
+                        .map_err(repo_error_response)?;
+                    Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people, &counts)))
                 }
-                Err(err) => Err(repo_error_response(err)),
+                Err(err) => Err(milestone_service_error_response(err)),
             }
         }
         Ok(None) => Err(ApiError::not_found()),
@@ -433,13 +494,13 @@ pub async fn update_milestone(
     )
 )]
 pub async fn delete_milestone(
-    milestones: web::Data<PostgresMilestoneRepository>,
+    service: web::Data<MilestoneService>,
     _access: EditAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
-    match milestones.delete(MilestoneId(*path)).await {
+    match service.delete(MilestoneId(*path)).await {
         Ok(()) => Ok(HttpResponse::NoContent().finish()),
-        Err(err) => Err(repo_error_response(err)),
+        Err(err) => Err(milestone_service_error_response(err)),
     }
 }
 
@@ -467,6 +528,7 @@ pub async fn delete_milestone(
 pub async fn set_milestone_status_override(
     overrides: web::Data<StatusOverrideService>,
     users: web::Data<dyn UserRepository>,
+    tasks: web::Data<dyn TaskRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<StatusOverrideRequest>,
@@ -479,7 +541,11 @@ pub async fn set_milestone_status_override(
             let people = resolve_summaries(users.as_ref(), [milestone.owner_id])
                 .await
                 .map_err(repo_error_response)?;
-            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people)))
+            let counts = tasks
+                .task_counts_for_milestones(&[milestone.id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people, &counts)))
         }
         Err(err) => Err(status_override_error_response(err)),
     }
@@ -506,6 +572,7 @@ pub async fn set_milestone_status_override(
 pub async fn clear_milestone_status_override(
     overrides: web::Data<StatusOverrideService>,
     users: web::Data<dyn UserRepository>,
+    tasks: web::Data<dyn TaskRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
@@ -514,7 +581,11 @@ pub async fn clear_milestone_status_override(
             let people = resolve_summaries(users.as_ref(), [milestone.owner_id])
                 .await
                 .map_err(repo_error_response)?;
-            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people)))
+            let counts = tasks
+                .task_counts_for_milestones(&[milestone.id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people, &counts)))
         }
         Err(err) => Err(status_override_error_response(err)),
     }
@@ -547,6 +618,7 @@ pub async fn clear_milestone_status_override(
 pub async fn set_milestone_owner(
     assignment: web::Data<AssignmentService>,
     users: web::Data<dyn UserRepository>,
+    tasks: web::Data<dyn TaskRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
     body: web::Json<OwnerRequest>,
@@ -559,7 +631,11 @@ pub async fn set_milestone_owner(
             let people = resolve_summaries(users.as_ref(), [milestone.owner_id])
                 .await
                 .map_err(repo_error_response)?;
-            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people)))
+            let counts = tasks
+                .task_counts_for_milestones(&[milestone.id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people, &counts)))
         }
         Err(err) => Err(assignment_error_response(err)),
     }
@@ -585,6 +661,7 @@ pub async fn set_milestone_owner(
 pub async fn clear_milestone_owner(
     assignment: web::Data<AssignmentService>,
     users: web::Data<dyn UserRepository>,
+    tasks: web::Data<dyn TaskRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
@@ -593,7 +670,11 @@ pub async fn clear_milestone_owner(
             let people = resolve_summaries(users.as_ref(), [milestone.owner_id])
                 .await
                 .map_err(repo_error_response)?;
-            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people)))
+            let counts = tasks
+                .task_counts_for_milestones(&[milestone.id])
+                .await
+                .map_err(repo_error_response)?;
+            Ok(HttpResponse::Ok().json(milestone_response(&milestone, &people, &counts)))
         }
         Err(err) => Err(assignment_error_response(err)),
     }
