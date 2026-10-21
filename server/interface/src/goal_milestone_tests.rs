@@ -15,8 +15,13 @@ use actix_web::test::{TestRequest, init_service, read_body};
 use actix_web::web;
 use application::auth::SessionService;
 use application::goal_milestone_links::GoalMilestoneLinkService;
+use application::milestone_service::MilestoneService;
 use application::pagination::PageRequest;
-use application::ports::{GoalRepository, MilestoneRepository, SessionRepository, UserRepository};
+use application::ports::{
+    GoalRepository, MilestoneRepository, SessionRepository, SystemClock, TaskRepository,
+    UserRepository,
+};
+use application::status_computation::{StatusComputationService, StatusRecomputation};
 use chrono::{NaiveDate, Utc};
 use diesel::prelude::*;
 use domain::{Goal, GoalId, Milestone, MilestoneId, Role, Status, User, UserId};
@@ -24,7 +29,7 @@ use infrastructure::Sha256SessionTokens;
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
-    PostgresSessionRepository, PostgresUserRepository,
+    PostgresSessionRepository, PostgresTaskRepository, PostgresUserRepository,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -77,22 +82,42 @@ macro_rules! test_app {
             Arc::new(Sha256SessionTokens),
             SessionService::DEFAULT_SESSION_TTL,
         );
-        // The link service takes ports, so it gets its own repository
-        // instances over the shared pool (mirrors `main.rs`).
+        // The link service recomputes the goal best-effort after each
+        // change (roadmap 3.13, step 4), so it gets the real computation
+        // service over the shared pool (mirrors `main.rs`).
+        let computation: Arc<dyn StatusRecomputation> = Arc::new(StatusComputationService::new(
+            Arc::new(PostgresGoalRepository::new(pool.clone())),
+            Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            Arc::new(SystemClock),
+        ));
         let links = GoalMilestoneLinkService::new(
             Arc::new(PostgresGoalRepository::new(pool.clone())),
             Arc::new(PostgresMilestoneRepository::new(pool.clone())),
             Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+            computation.clone(),
         );
+        // The milestone handlers read task counts through the port (roadmap
+        // 3.13), so a trait-object registration sits beside the concrete one,
+        // like in `main.rs`.
+        let task_counts: Arc<dyn TaskRepository> =
+            Arc::new(PostgresTaskRepository::new(pool.clone()));
         init_service(
             App::new()
                 .app_data(web::Data::new(PostgresGoalRepository::new(pool.clone())))
                 .app_data(web::Data::new(PostgresMilestoneRepository::new(
                     pool.clone(),
                 )))
+                .app_data(web::Data::from(task_counts))
                 .app_data(users_data)
                 .app_data(web::Data::new(session_service))
                 .app_data(web::Data::new(links))
+                .app_data(web::Data::new(MilestoneService::new(
+                    Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+                    Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+                    computation,
+                )))
                 .app_data(web::Data::new(CookieSettings { secure: false }))
                 .configure(routes::configure),
         )

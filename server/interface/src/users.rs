@@ -290,11 +290,13 @@ mod tests {
     use application::auth::password::PasswordAuthProvider;
     use application::auth::provider::AuthProviders;
     use application::goal_list::GoalListService;
+    use application::goal_service::GoalService;
     use application::milestone_list::MilestoneListService;
     use application::ports::{
         GoalRepository, PasswordHasher, SessionRepository, SessionTokens, SsoGroupRuleRepository,
-        UserRepository,
+        SystemClock, UserRepository,
     };
+    use application::status_computation::{StatusComputationService, StatusRecomputation};
     use chrono::Utc;
     use diesel::prelude::*;
     use domain::{GoalId, SsoGroupRule, SsoGroupRuleId};
@@ -381,6 +383,17 @@ mod tests {
                 Arc::new(NoEmailSender),
                 String::new(),
             );
+            // The create-goal route goes through the goal service (roadmap 3.13,
+            // step 4), which recomputes best-effort after the write; like `main.rs`
+            // it gets its own repository instances over the shared pool.
+            let computation: Arc<dyn StatusRecomputation> =
+                Arc::new(StatusComputationService::new(
+                    Arc::new(PostgresGoalRepository::new(pool.clone())),
+                    Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+                    Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+                    Arc::new(PostgresTaskRepository::new(pool.clone())),
+                    Arc::new(SystemClock),
+                ));
             init_service(
                 App::new()
                     .app_data(web::Data::new(PostgresGoalRepository::new(pool.clone())))
@@ -403,6 +416,10 @@ mod tests {
                     .app_data(web::Data::new(GoalListService::new(Arc::new(
                         PostgresGoalRepository::new(pool.clone()),
                     ))))
+                    .app_data(web::Data::new(GoalService::new(
+                        Arc::new(PostgresGoalRepository::new(pool.clone())),
+                        computation,
+                    )))
                     .app_data(web::Data::new(MilestoneListService::new(Arc::new(
                         PostgresMilestoneRepository::new(pool.clone()),
                     ))))

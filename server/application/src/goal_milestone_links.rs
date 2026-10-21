@@ -5,9 +5,11 @@
 //! link or unlink (the goal is checked first), listing for an unknown goal
 //! or milestone is a typed not-found, and repeating a link or unlink never
 //! fails — it just reports that nothing changed. Linking and unlinking touch
-//! only the relation table: status computation is roadmap 3.13, and progress
-//! snapshots fire only on manual status changes (decision D5), so no
-//! snapshot hook is involved here.
+//! only the relation table, so no snapshot hook is involved (progress
+//! snapshots fire only on manual status changes, decision D5). But a link
+//! change moves the goal's rollup input, so when — and only when — the link
+//! actually changed, the goal's status is recomputed best-effort (roadmap
+//! 3.13).
 
 use std::sync::Arc;
 
@@ -15,6 +17,7 @@ use domain::{Goal, GoalId, GoalMilestone, Milestone, MilestoneId};
 
 use crate::pagination::{Page, PageRequest};
 use crate::ports::{GoalMilestoneRepository, GoalRepository, MilestoneRepository, RepositoryError};
+use crate::status_computation::StatusRecomputation;
 
 /// An error from linking or unlinking a goal and milestone.
 #[derive(Debug)]
@@ -40,11 +43,13 @@ impl std::fmt::Display for GoalMilestoneLinkError {
 impl std::error::Error for GoalMilestoneLinkError {}
 
 /// Links and unlinks milestones on goals (roadmap 3.4), and lists each side
-/// of the relation as full entities. Nothing here touches statuses.
+/// of the relation as full entities. A link change recomputes the goal's
+/// status best-effort (roadmap 3.13); nothing else here touches statuses.
 pub struct GoalMilestoneLinkService {
     goals: Arc<dyn GoalRepository>,
     milestones: Arc<dyn MilestoneRepository>,
     links: Arc<dyn GoalMilestoneRepository>,
+    computation: Arc<dyn StatusRecomputation>,
 }
 
 impl GoalMilestoneLinkService {
@@ -52,40 +57,54 @@ impl GoalMilestoneLinkService {
         goals: Arc<dyn GoalRepository>,
         milestones: Arc<dyn MilestoneRepository>,
         links: Arc<dyn GoalMilestoneRepository>,
+        computation: Arc<dyn StatusRecomputation>,
     ) -> Self {
         Self {
             goals,
             milestones,
             links,
+            computation,
         }
     }
 
     /// Link the milestone to the goal. Linking a pair that is already linked
-    /// is a no-op: it returns `false` instead of failing.
+    /// is a no-op: it returns `false` instead of failing, and recomputes
+    /// nothing.
     pub async fn link(
         &self,
         goal_id: GoalId,
         milestone_id: MilestoneId,
     ) -> Result<bool, GoalMilestoneLinkError> {
         self.require_pair(goal_id, milestone_id).await?;
-        self.links
+        let changed = self
+            .links
             .link(GoalMilestone::new(goal_id, milestone_id))
             .await
-            .map_err(GoalMilestoneLinkError::Repository)
+            .map_err(GoalMilestoneLinkError::Repository)?;
+        if changed {
+            self.recompute_goal(goal_id).await;
+        }
+        Ok(changed)
     }
 
     /// Unlink the milestone from the goal. Unlinking a pair that is not
-    /// linked is a no-op: it returns `false` instead of failing.
+    /// linked is a no-op: it returns `false` instead of failing, and
+    /// recomputes nothing.
     pub async fn unlink(
         &self,
         goal_id: GoalId,
         milestone_id: MilestoneId,
     ) -> Result<bool, GoalMilestoneLinkError> {
         self.require_pair(goal_id, milestone_id).await?;
-        self.links
+        let changed = self
+            .links
             .unlink(goal_id, milestone_id)
             .await
-            .map_err(GoalMilestoneLinkError::Repository)
+            .map_err(GoalMilestoneLinkError::Repository)?;
+        if changed {
+            self.recompute_goal(goal_id).await;
+        }
+        Ok(changed)
     }
 
     /// The milestones linked to the goal, ordered by target date (nulls
@@ -174,6 +193,18 @@ impl GoalMilestoneLinkService {
             None => Err(GoalMilestoneLinkError::MilestoneNotFound),
         }
     }
+
+    /// Best-effort: the link change already committed, so a recompute failure
+    /// only warns (roadmap 3.13's sweep heals any miss).
+    async fn recompute_goal(&self, goal_id: GoalId) {
+        if let Err(err) = self
+            .computation
+            .recompute_goals(std::slice::from_ref(&goal_id))
+            .await
+        {
+            eprintln!("warning: status recompute after a link change failed: {err}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +220,7 @@ mod tests {
     use crate::ports::goal_repository::fakes::{apply_goal_list_filter, page_goals};
     use crate::ports::milestone_repository::fakes::{apply_milestone_list_filter, page_milestones};
     use crate::ports::{GoalListFilter, MilestoneListFilter};
+    use crate::status_computation::fakes::{RecomputeCall, RecordingRecomputation};
 
     use super::*;
 
@@ -268,6 +300,12 @@ mod tests {
             Ok(self.goals.lock().unwrap().values().cloned().collect())
         }
 
+        async fn list_all_ids(&self) -> Result<Vec<GoalId>, RepositoryError> {
+            let mut ids: Vec<GoalId> = self.goals.lock().unwrap().keys().copied().collect();
+            ids.sort_by_key(|id| id.0);
+            Ok(ids)
+        }
+
         async fn update(&self, goal: Goal) -> Result<Goal, RepositoryError> {
             if self.goals.lock().unwrap().contains_key(&goal.id) {
                 Ok(goal)
@@ -287,6 +325,25 @@ mod tests {
             };
             goal.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_automatic_status(
+            &self,
+            id: GoalId,
+            status: Status,
+        ) -> Result<bool, RepositoryError> {
+            let mut goals = self.goals.lock().unwrap();
+            let Some(goal) = goals.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the automatic status;
+            // updated_at and the override are untouched, and an unchanged
+            // value writes nothing.
+            if goal.status == status {
+                return Ok(false);
+            }
+            goal.status = status;
+            Ok(true)
         }
 
         async fn set_owner(
@@ -341,8 +398,28 @@ mod tests {
             Ok(self.milestones.lock().unwrap().get(&id).cloned())
         }
 
+        async fn find_by_ids(
+            &self,
+            ids: &[MilestoneId],
+        ) -> Result<Vec<Milestone>, RepositoryError> {
+            let milestones = self.milestones.lock().unwrap();
+            let mut found: Vec<Milestone> = ids
+                .iter()
+                .filter_map(|id| milestones.get(id).cloned())
+                .collect();
+            found.sort_by_key(|milestone| milestone.id.0);
+            Ok(found)
+        }
+
         async fn list(&self) -> Result<Vec<Milestone>, RepositoryError> {
             Ok(self.milestones.lock().unwrap().values().cloned().collect())
+        }
+
+        async fn list_all_ids(&self) -> Result<Vec<MilestoneId>, RepositoryError> {
+            let mut ids: Vec<MilestoneId> =
+                self.milestones.lock().unwrap().keys().copied().collect();
+            ids.sort_by_key(|id| id.0);
+            Ok(ids)
         }
 
         async fn update(&self, milestone: Milestone) -> Result<Milestone, RepositoryError> {
@@ -364,6 +441,25 @@ mod tests {
             };
             milestone.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_automatic_status(
+            &self,
+            id: MilestoneId,
+            status: Status,
+        ) -> Result<bool, RepositoryError> {
+            let mut milestones = self.milestones.lock().unwrap();
+            let Some(milestone) = milestones.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the automatic status;
+            // updated_at and the override are untouched, and an unchanged
+            // value writes nothing.
+            if milestone.status == status {
+                return Ok(false);
+            }
+            milestone.status = status;
+            Ok(true)
         }
 
         async fn set_owner(
@@ -544,6 +640,7 @@ mod tests {
     fn setup() -> (
         Arc<InMemoryGoalRepository>,
         Arc<InMemoryMilestoneRepository>,
+        Arc<RecordingRecomputation>,
         GoalMilestoneLinkService,
     ) {
         let goals = Arc::new(InMemoryGoalRepository::default());
@@ -552,13 +649,19 @@ mod tests {
             goals.clone(),
             milestones.clone(),
         ));
-        let service = GoalMilestoneLinkService::new(goals.clone(), milestones.clone(), links);
-        (goals, milestones, service)
+        let computation = Arc::new(RecordingRecomputation::new());
+        let service = GoalMilestoneLinkService::new(
+            goals.clone(),
+            milestones.clone(),
+            links,
+            computation.clone(),
+        );
+        (goals, milestones, computation, service)
     }
 
     #[tokio::test]
     async fn link_creates_the_link_on_both_sides() {
-        let (goals, milestones, service) = setup();
+        let (goals, milestones, _computation, service) = setup();
         let goal = test_goal();
         goals.create(goal.clone()).await.unwrap();
         let mut milestone = test_milestone();
@@ -581,7 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn linking_twice_is_idempotent() {
-        let (goals, milestones, service) = setup();
+        let (goals, milestones, _computation, service) = setup();
         let goal = test_goal();
         goals.create(goal.clone()).await.unwrap();
         let milestone = test_milestone();
@@ -595,7 +698,7 @@ mod tests {
 
     #[tokio::test]
     async fn unlink_removes_the_link_and_is_idempotent() {
-        let (goals, milestones, service) = setup();
+        let (goals, milestones, _computation, service) = setup();
         let goal = test_goal();
         goals.create(goal.clone()).await.unwrap();
         let milestone = test_milestone();
@@ -623,7 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_ids_give_the_right_typed_errors() {
-        let (goals, milestones, service) = setup();
+        let (goals, milestones, _computation, service) = setup();
         let goal = test_goal();
         goals.create(goal.clone()).await.unwrap();
         let milestone = test_milestone();
@@ -672,7 +775,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_goal_can_link_to_several_milestones_and_a_milestone_to_several_goals() {
-        let (goals, milestones, service) = setup();
+        let (goals, milestones, _computation, service) = setup();
         let goal_one = goal_with(None, at(1, 1));
         goals.create(goal_one.clone()).await.unwrap();
         let goal_two = goal_with(None, at(1, 2));
@@ -700,7 +803,7 @@ mod tests {
 
     #[tokio::test]
     async fn milestones_for_goal_is_ordered_by_target_date_nulls_last_then_created_at() {
-        let (goals, milestones, service) = setup();
+        let (goals, milestones, _computation, service) = setup();
         let goal = test_goal();
         goals.create(goal.clone()).await.unwrap();
         // Dated first in date order, undated last in created_at order.
@@ -723,7 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn goals_for_milestone_is_ordered_the_same_way() {
-        let (goals, milestones, service) = setup();
+        let (goals, milestones, _computation, service) = setup();
         let milestone = test_milestone();
         milestones.create(milestone.clone()).await.unwrap();
         let g_undated = goal_with(None, at(1, 2));
@@ -744,7 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_paged_listings_count_only_linked_rows_and_page_in_order() {
-        let (goals, milestones, service) = setup();
+        let (goals, milestones, _computation, service) = setup();
         let goal = test_goal();
         goals.create(goal.clone()).await.unwrap();
         // Two of three milestones are linked; the third must not appear in
@@ -798,5 +901,87 @@ mod tests {
             listed.items.iter().map(|g| g.id).collect::<Vec<_>>(),
             vec![other_goal.id, goal.id]
         );
+    }
+
+    #[tokio::test]
+    async fn linking_recomputes_the_goal() {
+        let (goals, milestones, computation, service) = setup();
+        let goal = test_goal();
+        goals.create(goal.clone()).await.unwrap();
+        let milestone = test_milestone();
+        milestones.create(milestone.clone()).await.unwrap();
+
+        assert!(service.link(goal.id, milestone.id).await.unwrap());
+
+        assert_eq!(
+            computation.calls(),
+            vec![RecomputeCall::Goals(vec![goal.id])]
+        );
+    }
+
+    #[tokio::test]
+    async fn linking_an_already_linked_pair_recomputes_nothing() {
+        let (goals, milestones, computation, service) = setup();
+        let goal = test_goal();
+        goals.create(goal.clone()).await.unwrap();
+        let milestone = test_milestone();
+        milestones.create(milestone.clone()).await.unwrap();
+        service.link(goal.id, milestone.id).await.unwrap();
+
+        assert!(!service.link(goal.id, milestone.id).await.unwrap());
+
+        // Only the first link recomputed.
+        assert_eq!(
+            computation.calls(),
+            vec![RecomputeCall::Goals(vec![goal.id])]
+        );
+    }
+
+    #[tokio::test]
+    async fn unlinking_recomputes_the_goal() {
+        let (goals, milestones, computation, service) = setup();
+        let goal = test_goal();
+        goals.create(goal.clone()).await.unwrap();
+        let milestone = test_milestone();
+        milestones.create(milestone.clone()).await.unwrap();
+        service.link(goal.id, milestone.id).await.unwrap();
+
+        assert!(service.unlink(goal.id, milestone.id).await.unwrap());
+
+        // The link and the unlink each recomputed once.
+        assert_eq!(
+            computation.calls(),
+            vec![
+                RecomputeCall::Goals(vec![goal.id]),
+                RecomputeCall::Goals(vec![goal.id])
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unlinking_a_pair_that_is_not_linked_recomputes_nothing() {
+        let (goals, milestones, computation, service) = setup();
+        let goal = test_goal();
+        goals.create(goal.clone()).await.unwrap();
+        let milestone = test_milestone();
+        milestones.create(milestone.clone()).await.unwrap();
+
+        assert!(!service.unlink(goal.id, milestone.id).await.unwrap());
+
+        assert!(computation.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_recompute_does_not_fail_the_link_or_unlink() {
+        let (goals, milestones, computation, service) = setup();
+        computation.set_fail(true);
+        let goal = test_goal();
+        goals.create(goal.clone()).await.unwrap();
+        let milestone = test_milestone();
+        milestones.create(milestone.clone()).await.unwrap();
+
+        // The link changes committed; the recompute failures only warn.
+        assert!(service.link(goal.id, milestone.id).await.unwrap());
+        assert!(service.unlink(goal.id, milestone.id).await.unwrap());
     }
 }

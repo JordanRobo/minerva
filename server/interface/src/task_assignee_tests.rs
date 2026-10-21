@@ -18,10 +18,12 @@ use actix_web::web;
 use application::assignment::AssignmentService;
 use application::auth::SessionService;
 use application::ports::{
-    AccessChange, AccessChangeError, RepositoryError, SessionRepository, TaskRepository,
-    UserRepository,
+    AccessChange, AccessChangeError, RepositoryError, SessionRepository, SystemClock,
+    TaskRepository, UserRepository,
 };
+use application::status_computation::{StatusComputationService, StatusRecomputation};
 use application::task_list::TaskListService;
+use application::task_service::TaskService;
 use application::task_status::TaskStatusService;
 use async_trait::async_trait;
 use chrono::{NaiveDate, Utc};
@@ -30,8 +32,8 @@ use domain::{Role, Task, TaskId, TaskStatus, User, UserId, UserSummary};
 use infrastructure::Sha256SessionTokens;
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{
-    PostgresGoalRepository, PostgresMilestoneRepository, PostgresSessionRepository,
-    PostgresTaskRepository, PostgresUserRepository,
+    PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
+    PostgresSessionRepository, PostgresTaskRepository, PostgresUserRepository,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -91,14 +93,31 @@ macro_rules! test_app {
         });
         let users_data: web::Data<dyn UserRepository> = users.clone().into();
         // The services take ports, so they get their own repository
-        // instances over the shared pool (mirrors `main.rs`).
-        let status = TaskStatusService::new(Arc::new(PostgresTaskRepository::new(pool.clone())));
+        // instances over the shared pool (mirrors `main.rs`). The mutation
+        // services recompute statuses best-effort after each write (roadmap
+        // 3.13, step 4), so they share the real computation service.
+        let computation: Arc<dyn StatusRecomputation> = Arc::new(StatusComputationService::new(
+            Arc::new(PostgresGoalRepository::new(pool.clone())),
+            Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            Arc::new(SystemClock),
+        ));
+        let status = TaskStatusService::new(
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            computation.clone(),
+        );
+        let task_service = TaskService::new(
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            computation,
+        );
         init_service(
             App::new()
                 .app_data(web::Data::new(PostgresTaskRepository::new(pool.clone())))
                 .app_data(users_data)
                 .app_data(web::Data::new(session_service))
                 .app_data(web::Data::new(status))
+                .app_data(web::Data::new(task_service))
                 .app_data(web::Data::new(TaskListService::new(Arc::new(
                     PostgresTaskRepository::new(pool.clone()),
                 ))))

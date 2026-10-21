@@ -6,7 +6,10 @@
 //! (setting the value already set, clearing when none is set) still returns
 //! the entity without touching storage, and the snapshot hook (roadmap 3.14)
 //! fires exactly once after each successful write — a hook failure only
-//! warns, it never fails the override.
+//! warns, it never fails the override. A milestone override also moves the
+//! rollup input of the goals linked to that milestone, so those goals are
+//! recomputed best-effort after each real change (roadmap 3.13); a goal's own
+//! override changes nothing else, so it recomputes nothing.
 
 use std::sync::Arc;
 
@@ -15,6 +18,7 @@ use domain::{Goal, GoalId, Milestone, MilestoneId, Status};
 use crate::ports::{
     GoalRepository, MilestoneRepository, RepositoryError, StatusChangeTarget, StatusSnapshotTrigger,
 };
+use crate::status_computation::StatusRecomputation;
 
 /// An error from setting or clearing a manual status override.
 #[derive(Debug)]
@@ -43,6 +47,7 @@ pub struct StatusOverrideService {
     goals: Arc<dyn GoalRepository>,
     milestones: Arc<dyn MilestoneRepository>,
     snapshots: Arc<dyn StatusSnapshotTrigger>,
+    computation: Arc<dyn StatusRecomputation>,
 }
 
 impl StatusOverrideService {
@@ -50,11 +55,13 @@ impl StatusOverrideService {
         goals: Arc<dyn GoalRepository>,
         milestones: Arc<dyn MilestoneRepository>,
         snapshots: Arc<dyn StatusSnapshotTrigger>,
+        computation: Arc<dyn StatusRecomputation>,
     ) -> Self {
         Self {
             goals,
             milestones,
             snapshots,
+            computation,
         }
     }
 
@@ -132,6 +139,7 @@ impl StatusOverrideService {
             .await
             .map_err(StatusOverrideError::Repository)?;
         self.snapshot(StatusChangeTarget::Milestone(id)).await;
+        self.recompute_goals_for_milestone(id).await;
         match status {
             Some(status) => milestone.set_status_override(status),
             None => milestone.clear_status_override(),
@@ -162,6 +170,19 @@ impl StatusOverrideService {
             eprintln!("warning: status snapshot after an override change failed: {err}");
         }
     }
+
+    /// A milestone override changes the effective status the goals linked to
+    /// it roll up, so they are recomputed best-effort (roadmap 3.13): the
+    /// override write already committed, so a failure only warns.
+    async fn recompute_goals_for_milestone(&self, milestone_id: MilestoneId) {
+        if let Err(err) = self
+            .computation
+            .recompute_goals_for_milestones(std::slice::from_ref(&milestone_id))
+            .await
+        {
+            eprintln!("warning: status recompute after an override change failed: {err}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +197,7 @@ mod tests {
     use crate::ports::goal_repository::fakes::{apply_goal_list_filter, page_goals};
     use crate::ports::milestone_repository::fakes::{apply_milestone_list_filter, page_milestones};
     use crate::ports::{GoalListFilter, MilestoneListFilter, StatusSnapshotError};
+    use crate::status_computation::fakes::{RecomputeCall, RecordingRecomputation};
 
     use super::*;
 
@@ -248,6 +270,12 @@ mod tests {
             Ok(self.locked().values().cloned().collect())
         }
 
+        async fn list_all_ids(&self) -> Result<Vec<GoalId>, RepositoryError> {
+            let mut ids: Vec<GoalId> = self.locked().keys().copied().collect();
+            ids.sort_by_key(|id| id.0);
+            Ok(ids)
+        }
+
         async fn update(&self, goal: Goal) -> Result<Goal, RepositoryError> {
             let mut goals = self.locked();
             let Some(existing) = goals.get(&goal.id) else {
@@ -280,6 +308,25 @@ mod tests {
             };
             goal.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_automatic_status(
+            &self,
+            id: GoalId,
+            status: Status,
+        ) -> Result<bool, RepositoryError> {
+            let mut goals = self.locked();
+            let Some(goal) = goals.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the automatic status;
+            // updated_at and the override are untouched, and an unchanged
+            // value writes nothing.
+            if goal.status == status {
+                return Ok(false);
+            }
+            goal.status = status;
+            Ok(true)
         }
 
         async fn set_owner(
@@ -348,8 +395,27 @@ mod tests {
             Ok(self.locked().get(&id).cloned())
         }
 
+        async fn find_by_ids(
+            &self,
+            ids: &[MilestoneId],
+        ) -> Result<Vec<Milestone>, RepositoryError> {
+            let milestones = self.locked();
+            let mut found: Vec<Milestone> = ids
+                .iter()
+                .filter_map(|id| milestones.get(id).cloned())
+                .collect();
+            found.sort_by_key(|milestone| milestone.id.0);
+            Ok(found)
+        }
+
         async fn list(&self) -> Result<Vec<Milestone>, RepositoryError> {
             Ok(self.locked().values().cloned().collect())
+        }
+
+        async fn list_all_ids(&self) -> Result<Vec<MilestoneId>, RepositoryError> {
+            let mut ids: Vec<MilestoneId> = self.locked().keys().copied().collect();
+            ids.sort_by_key(|id| id.0);
+            Ok(ids)
         }
 
         async fn update(&self, milestone: Milestone) -> Result<Milestone, RepositoryError> {
@@ -384,6 +450,25 @@ mod tests {
             };
             milestone.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_automatic_status(
+            &self,
+            id: MilestoneId,
+            status: Status,
+        ) -> Result<bool, RepositoryError> {
+            let mut milestones = self.locked();
+            let Some(milestone) = milestones.get_mut(&id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the automatic status;
+            // updated_at and the override are untouched, and an unchanged
+            // value writes nothing.
+            if milestone.status == status {
+                return Ok(false);
+            }
+            milestone.status = status;
+            Ok(true)
         }
 
         async fn set_owner(
@@ -455,30 +540,44 @@ mod tests {
     fn goal_setup() -> (
         Arc<InMemoryGoalRepository>,
         Arc<RecordingSnapshotTrigger>,
+        Arc<RecordingRecomputation>,
         StatusOverrideService,
     ) {
         let goals = Arc::new(InMemoryGoalRepository::new());
         let milestones = Arc::new(InMemoryMilestoneRepository::new());
         let snapshots = Arc::new(RecordingSnapshotTrigger::new());
-        let service = StatusOverrideService::new(goals.clone(), milestones, snapshots.clone());
-        (goals, snapshots, service)
+        let computation = Arc::new(RecordingRecomputation::new());
+        let service = StatusOverrideService::new(
+            goals.clone(),
+            milestones,
+            snapshots.clone(),
+            computation.clone(),
+        );
+        (goals, snapshots, computation, service)
     }
 
     fn milestone_setup() -> (
         Arc<InMemoryMilestoneRepository>,
         Arc<RecordingSnapshotTrigger>,
+        Arc<RecordingRecomputation>,
         StatusOverrideService,
     ) {
         let goals = Arc::new(InMemoryGoalRepository::new());
         let milestones = Arc::new(InMemoryMilestoneRepository::new());
         let snapshots = Arc::new(RecordingSnapshotTrigger::new());
-        let service = StatusOverrideService::new(goals, milestones.clone(), snapshots.clone());
-        (milestones, snapshots, service)
+        let computation = Arc::new(RecordingRecomputation::new());
+        let service = StatusOverrideService::new(
+            goals,
+            milestones.clone(),
+            snapshots.clone(),
+            computation.clone(),
+        );
+        (milestones, snapshots, computation, service)
     }
 
     #[tokio::test]
     async fn set_goal_override_makes_it_the_effective_status() {
-        let (goals, _snapshots, service) = goal_setup();
+        let (goals, _snapshots, _computation, service) = goal_setup();
         let goal = test_goal(Status::OnTrack);
         goals.create(goal.clone()).await.unwrap();
 
@@ -495,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_goal_override_returns_to_the_automatic_status() {
-        let (goals, _snapshots, service) = goal_setup();
+        let (goals, _snapshots, _computation, service) = goal_setup();
         let goal = test_goal(Status::AtRisk);
         goals.create(goal.clone()).await.unwrap();
         service
@@ -511,7 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn setting_twice_and_clearing_twice_is_idempotent() {
-        let (goals, snapshots, service) = goal_setup();
+        let (goals, snapshots, computation, service) = goal_setup();
         let goal = test_goal(Status::OnTrack);
         goals.create(goal.clone()).await.unwrap();
 
@@ -538,11 +637,13 @@ mod tests {
                 StatusChangeTarget::Goal(goal.id)
             ]
         );
+        // A goal's override changes nothing a recompute would read.
+        assert!(computation.calls().is_empty());
     }
 
     #[tokio::test]
     async fn unknown_goal_id_is_a_not_found() {
-        let (_goals, _snapshots, service) = goal_setup();
+        let (_goals, _snapshots, _computation, service) = goal_setup();
 
         let set = service
             .set_goal_override(GoalId::new(), Status::OffTrack)
@@ -554,7 +655,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_repository_failure_surfaces_and_skips_the_snapshot() {
-        let (goals, snapshots, service) = goal_setup();
+        let (goals, snapshots, _computation, service) = goal_setup();
         goals.set_fail_overrides(true);
         let goal = test_goal(Status::OnTrack);
         goals.create(goal.clone()).await.unwrap();
@@ -570,7 +671,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_snapshot_hook_does_not_fail_the_goal_override() {
-        let (goals, snapshots, service) = goal_setup();
+        let (goals, snapshots, _computation, service) = goal_setup();
         snapshots.set_fail(true);
         let goal = test_goal(Status::OnTrack);
         goals.create(goal.clone()).await.unwrap();
@@ -586,7 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_override_survives_recomputation_and_save() {
-        let (goals, _snapshots, service) = goal_setup();
+        let (goals, _snapshots, _computation, service) = goal_setup();
         let goal = test_goal(Status::OnTrack);
         goals.create(goal.clone()).await.unwrap();
         let overridden = service
@@ -607,7 +708,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_milestone_override_makes_it_the_effective_status() {
-        let (milestones, _snapshots, service) = milestone_setup();
+        let (milestones, _snapshots, _computation, service) = milestone_setup();
         let milestone = test_milestone(Status::OnTrack);
         milestones.create(milestone.clone()).await.unwrap();
 
@@ -624,7 +725,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_milestone_override_returns_to_the_automatic_status() {
-        let (milestones, _snapshots, service) = milestone_setup();
+        let (milestones, _snapshots, _computation, service) = milestone_setup();
         let milestone = test_milestone(Status::AtRisk);
         milestones.create(milestone.clone()).await.unwrap();
         service
@@ -643,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn setting_twice_and_clearing_twice_is_idempotent_for_milestones() {
-        let (milestones, snapshots, service) = milestone_setup();
+        let (milestones, snapshots, computation, service) = milestone_setup();
         let milestone = test_milestone(Status::OnTrack);
         milestones.create(milestone.clone()).await.unwrap();
 
@@ -676,11 +777,20 @@ mod tests {
                 StatusChangeTarget::Milestone(milestone.id)
             ]
         );
+        // ...and each real change recomputed the linked goals once; the no-ops
+        // did not.
+        assert_eq!(
+            computation.calls(),
+            vec![
+                RecomputeCall::GoalsForMilestones(vec![milestone.id]),
+                RecomputeCall::GoalsForMilestones(vec![milestone.id])
+            ]
+        );
     }
 
     #[tokio::test]
     async fn unknown_milestone_id_is_a_not_found() {
-        let (_milestones, _snapshots, service) = milestone_setup();
+        let (_milestones, _snapshots, _computation, service) = milestone_setup();
 
         let set = service
             .set_milestone_override(MilestoneId::new(), Status::OffTrack)
@@ -692,7 +802,7 @@ mod tests {
 
     #[tokio::test]
     async fn milestone_repository_failure_surfaces_and_skips_the_snapshot() {
-        let (milestones, snapshots, service) = milestone_setup();
+        let (milestones, snapshots, _computation, service) = milestone_setup();
         milestones.set_fail_overrides(true);
         let milestone = test_milestone(Status::OnTrack);
         milestones.create(milestone.clone()).await.unwrap();
@@ -708,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_snapshot_hook_does_not_fail_the_milestone_override() {
-        let (milestones, snapshots, service) = milestone_setup();
+        let (milestones, snapshots, _computation, service) = milestone_setup();
         snapshots.set_fail(true);
         let milestone = test_milestone(Status::OnTrack);
         milestones.create(milestone.clone()).await.unwrap();
@@ -724,7 +834,7 @@ mod tests {
 
     #[tokio::test]
     async fn milestone_override_survives_recomputation_and_save() {
-        let (milestones, _snapshots, service) = milestone_setup();
+        let (milestones, _snapshots, _computation, service) = milestone_setup();
         let milestone = test_milestone(Status::OnTrack);
         milestones.create(milestone.clone()).await.unwrap();
         let overridden = service
@@ -748,8 +858,13 @@ mod tests {
         let goals = Arc::new(InMemoryGoalRepository::new());
         let milestones = Arc::new(InMemoryMilestoneRepository::new());
         let snapshots = Arc::new(RecordingSnapshotTrigger::new());
-        let service =
-            StatusOverrideService::new(goals.clone(), milestones.clone(), snapshots.clone());
+        let computation = Arc::new(RecordingRecomputation::new());
+        let service = StatusOverrideService::new(
+            goals.clone(),
+            milestones.clone(),
+            snapshots.clone(),
+            computation,
+        );
         let goal = test_goal(Status::OnTrack);
         goals.create(goal.clone()).await.unwrap();
         let milestone = test_milestone(Status::OnTrack);
@@ -778,5 +893,77 @@ mod tests {
                 StatusChangeTarget::Milestone(milestone.id),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn set_milestone_override_recomputes_the_linked_goals() {
+        let (milestones, _snapshots, computation, service) = milestone_setup();
+        let milestone = test_milestone(Status::OnTrack);
+        milestones.create(milestone.clone()).await.unwrap();
+
+        service
+            .set_milestone_override(milestone.id, Status::OffTrack)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            computation.calls(),
+            vec![RecomputeCall::GoalsForMilestones(vec![milestone.id])]
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_milestone_override_recomputes_the_linked_goals() {
+        let (milestones, _snapshots, computation, service) = milestone_setup();
+        let milestone = test_milestone(Status::OnTrack);
+        milestones.create(milestone.clone()).await.unwrap();
+        service
+            .set_milestone_override(milestone.id, Status::OffTrack)
+            .await
+            .unwrap();
+
+        service
+            .clear_milestone_override(milestone.id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            computation.calls(),
+            vec![
+                RecomputeCall::GoalsForMilestones(vec![milestone.id]),
+                RecomputeCall::GoalsForMilestones(vec![milestone.id])
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_overrides_never_recompute() {
+        let (goals, _snapshots, computation, service) = goal_setup();
+        let goal = test_goal(Status::OnTrack);
+        goals.create(goal.clone()).await.unwrap();
+
+        service
+            .set_goal_override(goal.id, Status::OffTrack)
+            .await
+            .unwrap();
+        service.clear_goal_override(goal.id).await.unwrap();
+
+        assert!(computation.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_recompute_does_not_fail_the_milestone_override() {
+        let (milestones, _snapshots, computation, service) = milestone_setup();
+        computation.set_fail(true);
+        let milestone = test_milestone(Status::OnTrack);
+        milestones.create(milestone.clone()).await.unwrap();
+
+        // The override write committed; the recompute failure only warns.
+        let updated = service
+            .set_milestone_override(milestone.id, Status::OffTrack)
+            .await
+            .expect("a recompute failure must not fail the override");
+
+        assert_eq!(updated.effective_status(), Status::OffTrack);
     }
 }

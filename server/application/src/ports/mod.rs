@@ -8,6 +8,7 @@
 
 pub mod account_email_sender;
 pub mod account_token_repository;
+pub mod clock;
 pub mod goal_milestone_repository;
 pub mod goal_repository;
 pub mod milestone_repository;
@@ -27,6 +28,7 @@ pub use account_email_sender::{AccountEmailSender, EmailSendError};
 pub use account_token_repository::{
     AcceptInviteOutcome, AccountTokenRepository, ResetPasswordOutcome,
 };
+pub use clock::{Clock, SystemClock};
 pub use goal_milestone_repository::GoalMilestoneRepository;
 pub use goal_repository::{GoalListFilter, GoalRepository};
 pub use milestone_repository::{MilestoneListFilter, MilestoneRepository};
@@ -40,7 +42,7 @@ pub use status_snapshot_trigger::{
     NoopStatusSnapshotTrigger, StatusChangeTarget, StatusSnapshotError, StatusSnapshotTrigger,
 };
 pub use task_relation_repository::{TaskRelationCreateError, TaskRelationRepository};
-pub use task_repository::{TaskListFilter, TaskRepository};
+pub use task_repository::{TaskCounts, TaskListFilter, TaskRepository};
 pub use user_identity_repository::UserIdentityRepository;
 pub use user_repository::{AccessChange, AccessChangeError, UserRepository};
 

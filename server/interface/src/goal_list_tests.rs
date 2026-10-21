@@ -278,14 +278,17 @@ async fn the_list_answers_with_the_page_envelope_and_standard_goal_items() {
     assert_eq!(json["offset"], 0);
 
     // ...and each item is the standard goal shape — no new fields. The status
-    // is the effective one, with its source alongside.
+    // is the effective one, with its source and the automatic value
+    // underneath alongside.
     let item = &json["items"][0];
     assert_eq!(item["id"], created.id.0.to_string());
     assert_eq!(item["status"], "on_track");
     assert_eq!(item["status_source"], "automatic");
+    assert_eq!(item["automatic_status"], "on_track");
     assert_eq!(
         keys(item),
         [
+            "automatic_status",
             "created_at",
             "description",
             "id",

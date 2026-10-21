@@ -9,6 +9,7 @@ use application::assignment::AssignmentService;
 use application::pagination::{PageRequest, PageRequestError};
 use application::ports::{TaskListFilter, TaskRepository, UserRepository};
 use application::task_list::TaskListService;
+use application::task_service::TaskService;
 use application::task_status::TaskStatusService;
 use chrono::{DateTime, NaiveDate, Utc};
 use domain::{MilestoneId, Task, TaskId, TaskStatus, UserId};
@@ -21,7 +22,8 @@ use uuid::Uuid;
 
 use crate::access::{EditAccess, ViewAccess};
 use crate::error::{
-    ApiError, assignment_error_response, repo_error_response, task_status_error_response,
+    ApiError, assignment_error_response, repo_error_response, task_service_error_response,
+    task_status_error_response,
 };
 use crate::openapi::TaskStatusDoc;
 use crate::people::{PersonSummary, resolve_summaries};
@@ -325,7 +327,7 @@ fn parse_target_date(raw: Option<&str>, param: &str) -> Result<Option<NaiveDate>
     )
 )]
 pub async fn create_task(
-    tasks: web::Data<PostgresTaskRepository>,
+    service: web::Data<TaskService>,
     assignment: web::Data<AssignmentService>,
     users: web::Data<dyn UserRepository>,
     _access: EditAccess,
@@ -358,14 +360,14 @@ pub async fn create_task(
         created_at: now,
         updated_at: now,
     };
-    match tasks.create(task).await {
+    match service.create(task).await {
         Ok(task) => {
             let people = resolve_summaries(users.as_ref(), [task.assignee_id])
                 .await
                 .map_err(repo_error_response)?;
             Ok(HttpResponse::Created().json(task_response(&task, &people)))
         }
-        Err(err) => Err(repo_error_response(err)),
+        Err(err) => Err(task_service_error_response(err)),
     }
 }
 
@@ -481,6 +483,7 @@ pub async fn get_task(
 )]
 pub async fn update_task(
     tasks: web::Data<PostgresTaskRepository>,
+    service: web::Data<TaskService>,
     users: web::Data<dyn UserRepository>,
     _access: EditAccess,
     path: web::Path<Uuid>,
@@ -504,14 +507,14 @@ pub async fn update_task(
                 updated_at: Utc::now(),
                 ..existing
             };
-            match tasks.update(updated).await {
+            match service.update(updated).await {
                 Ok(task) => {
                     let people = resolve_summaries(users.as_ref(), [task.assignee_id])
                         .await
                         .map_err(repo_error_response)?;
                     Ok(HttpResponse::Ok().json(task_response(&task, &people)))
                 }
-                Err(err) => Err(repo_error_response(err)),
+                Err(err) => Err(task_service_error_response(err)),
             }
         }
         Ok(None) => Err(ApiError::not_found()),
@@ -662,13 +665,13 @@ pub async fn clear_task_assignee(
     )
 )]
 pub async fn delete_task(
-    tasks: web::Data<PostgresTaskRepository>,
+    service: web::Data<TaskService>,
     _access: EditAccess,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, ApiError> {
-    match tasks.delete(TaskId(*path)).await {
+    match service.delete(TaskId(*path)).await {
         Ok(()) => Ok(HttpResponse::NoContent().finish()),
-        Err(err) => Err(repo_error_response(err)),
+        Err(err) => Err(task_service_error_response(err)),
     }
 }
 

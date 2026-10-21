@@ -34,6 +34,9 @@ pub trait GoalRepository: Send + Sync {
 
     async fn list(&self) -> Result<Vec<Goal>, RepositoryError>;
 
+    /// Every goal id, in id order (roadmap 3.13's sweep).
+    async fn list_all_ids(&self) -> Result<Vec<GoalId>, RepositoryError>;
+
     async fn update(&self, goal: Goal) -> Result<Goal, RepositoryError>;
 
     /// Set or clear the goal's manual status override; `None` clears it.
@@ -43,6 +46,18 @@ pub trait GoalRepository: Send + Sync {
         id: GoalId,
         status_override: Option<Status>,
     ) -> Result<(), RepositoryError>;
+
+    /// Record a freshly computed automatic status (roadmap 3.13): one
+    /// single-column write of the stored `status` (and the derived legacy
+    /// `status_source`) that cannot clobber a concurrent edit of any other
+    /// field. It leaves `updated_at` and the manual override untouched, and
+    /// writes nothing when the value is unchanged; returns whether anything
+    /// changed. An unknown id is a `NotFound`.
+    async fn set_automatic_status(
+        &self,
+        id: GoalId,
+        status: Status,
+    ) -> Result<bool, RepositoryError>;
 
     /// Set or clear the goal's owner; `None` clears it (D17). One single-column
     /// write of the owner and `updated_at` that cannot clobber a concurrent
@@ -180,6 +195,12 @@ pub mod fakes {
             Ok(self.goals.lock().unwrap().clone())
         }
 
+        async fn list_all_ids(&self) -> Result<Vec<GoalId>, RepositoryError> {
+            let mut ids: Vec<GoalId> = self.goals.lock().unwrap().iter().map(|g| g.id).collect();
+            ids.sort_by_key(|id| id.0);
+            Ok(ids)
+        }
+
         async fn update(&self, goal: Goal) -> Result<Goal, RepositoryError> {
             let mut goals = self.goals.lock().unwrap();
             match goals.iter_mut().find(|existing| existing.id == goal.id) {
@@ -202,6 +223,25 @@ pub mod fakes {
             };
             goal.status_override = status_override;
             Ok(())
+        }
+
+        async fn set_automatic_status(
+            &self,
+            id: GoalId,
+            status: Status,
+        ) -> Result<bool, RepositoryError> {
+            let mut goals = self.goals.lock().unwrap();
+            let Some(goal) = goals.iter_mut().find(|existing| existing.id == id) else {
+                return Err(RepositoryError::NotFound);
+            };
+            // Mirror Postgres: the write touches only the automatic status;
+            // updated_at and the override are untouched, and an unchanged
+            // value writes nothing.
+            if goal.status == status {
+                return Ok(false);
+            }
+            goal.status = status;
+            Ok(true)
         }
 
         async fn set_owner(
@@ -560,6 +600,77 @@ pub mod fakes {
                 .unwrap();
             assert!(page.items.is_empty());
             assert_eq!(page.total, 7);
+        }
+
+        #[tokio::test]
+        async fn set_automatic_status_writes_only_the_status_and_reports_change() {
+            let repo = InMemoryGoalRepository::new();
+            let goal = goal(1, "Alpha", Status::OnTrack, None, None, at(1));
+            repo.create(goal.clone()).await.unwrap();
+
+            assert!(
+                repo.set_automatic_status(goal.id, Status::AtRisk)
+                    .await
+                    .unwrap()
+            );
+            let stored = repo.find_by_id(goal.id).await.unwrap().unwrap();
+            assert_eq!(stored.status, Status::AtRisk);
+            // updated_at and the override are untouched.
+            assert_eq!(stored.updated_at, goal.updated_at);
+            assert_eq!(stored.status_override, None);
+
+            // A repeat is a reported no-op...
+            assert!(
+                !repo
+                    .set_automatic_status(goal.id, Status::AtRisk)
+                    .await
+                    .unwrap()
+            );
+            // ...and an unknown id is NotFound.
+            assert!(matches!(
+                repo.set_automatic_status(GoalId::new(), Status::OnTrack)
+                    .await,
+                Err(RepositoryError::NotFound)
+            ));
+        }
+
+        #[tokio::test]
+        async fn set_automatic_status_leaves_an_override_in_place() {
+            let repo = InMemoryGoalRepository::new();
+            let goal = goal(
+                1,
+                "Alpha",
+                Status::OnTrack,
+                Some(Status::Complete),
+                None,
+                at(1),
+            );
+            repo.create(goal.clone()).await.unwrap();
+
+            assert!(
+                repo.set_automatic_status(goal.id, Status::OffTrack)
+                    .await
+                    .unwrap()
+            );
+            let stored = repo.find_by_id(goal.id).await.unwrap().unwrap();
+            assert_eq!(stored.status, Status::OffTrack);
+            assert_eq!(stored.status_override, Some(Status::Complete));
+        }
+
+        #[tokio::test]
+        async fn list_all_ids_returns_every_id_in_id_order() {
+            let repo = InMemoryGoalRepository::new();
+            for id in [3u128, 1, 2] {
+                repo.create(goal(id, "g", Status::OnTrack, None, None, at(1)))
+                    .await
+                    .unwrap();
+            }
+
+            let ids = repo.list_all_ids().await.unwrap();
+            assert_eq!(
+                ids.iter().map(|id| id.0.as_u128()).collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
         }
     }
 }

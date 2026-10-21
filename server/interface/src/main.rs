@@ -44,6 +44,9 @@ mod rate_limit_tests;
 mod status_override_tests;
 
 #[cfg(test)]
+mod status_recompute_tests;
+
+#[cfg(test)]
 mod task_assignee_tests;
 
 #[cfg(test)]
@@ -66,19 +69,23 @@ use application::auth::provider::{AuthProviders, RedirectProvider};
 use application::bootstrap::{BootstrapAdmin, BootstrapOutcome, bootstrap_admin};
 use application::goal_list::GoalListService;
 use application::goal_milestone_links::GoalMilestoneLinkService;
+use application::goal_service::GoalService;
 use application::milestone_list::MilestoneListService;
+use application::milestone_service::MilestoneService;
 use application::oidc_login::LoginPolicy;
 use application::ports::{
     AccountEmailSender, AccountTokenRepository, NoopStatusSnapshotTrigger, OidcProvider,
-    PasswordHasher, SessionRepository, SessionTokens, StatusSnapshotTrigger,
-    UserIdentityRepository, UserRepository,
+    PasswordHasher, SessionRepository, SessionTokens, StatusSnapshotTrigger, SystemClock,
+    TaskRepository, UserIdentityRepository, UserRepository,
 };
 use application::rate_limit::{RateLimitService, RateLimiter};
 use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
+use application::status_computation::{StatusComputationService, StatusRecomputation};
 use application::status_override::StatusOverrideService;
 use application::task_list::TaskListService;
 use application::task_relations::TaskRelationService;
+use application::task_service::TaskService;
 use application::task_status::TaskStatusService;
 use application::user_admin::UserAdminService;
 use chrono::Utc;
@@ -148,6 +155,10 @@ async fn main() -> std::io::Result<()> {
     let milestones = web::Data::new(PostgresMilestoneRepository::new(pool.clone()));
     let goal_milestones = web::Data::new(PostgresGoalMilestoneRepository::new(pool.clone()));
     let tasks = web::Data::new(PostgresTaskRepository::new(pool.clone()));
+    // The milestone handlers read task counts through the port (roadmap
+    // 3.13), so a trait-object registration sits beside the concrete one
+    // above; tests can swap in a counting fake for it.
+    let task_counts: Arc<dyn TaskRepository> = Arc::new(PostgresTaskRepository::new(pool.clone()));
     let task_relations = web::Data::new(PostgresTaskRelationRepository::new(pool.clone()));
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
     // Manual status overrides (roadmap 3.2): set/clear go through the service
@@ -155,15 +166,45 @@ async fn main() -> std::io::Result<()> {
     // built yet (roadmap 3.14), so the trigger is the no-op; a real one swaps
     // in here without touching the handlers. The service takes ports, so it
     // gets its own repository instances over the shared pool (r2d2 handles).
-    // Built before the session match below, which moves the pool into the
-    // maintenance runner.
+    // Built before the maintenance runner below, which moves the pool.
     let status_snapshots: Arc<dyn StatusSnapshotTrigger> = Arc::new(NoopStatusSnapshotTrigger);
     let status_snapshots_data: web::Data<dyn StatusSnapshotTrigger> =
         status_snapshots.clone().into();
+    // Automatic status recomputation (roadmap 3.13, D12/D19): milestones from
+    // their task counts and dates, goals from their linked milestones'
+    // effective statuses. Built before the mutation services below because
+    // every one of them shares it as the `StatusRecomputation` port and
+    // recomputes best-effort after each write (roadmap 3.13, step 4). Like
+    // the status-override service it takes ports, over its own repository
+    // instances on the shared pool.
+    let status_computation = Arc::new(StatusComputationService::new(
+        Arc::new(PostgresGoalRepository::new(pool.clone())),
+        Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+        Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+        Arc::new(PostgresTaskRepository::new(pool.clone())),
+        Arc::new(SystemClock),
+    ));
+    let recomputation: Arc<dyn StatusRecomputation> = status_computation.clone();
+    // One full recompute at startup (roadmap 3.13, step 5): existing rows
+    // carry whatever statuses their last mutation left them — for a fresh
+    // database, the defaults — so refresh everything before serving.
+    // Best-effort like the per-mutation recomputes: a failure only warns and
+    // the hourly sweep below heals any miss. No advisory lock: the recompute
+    // writes nothing when nothing changed, so concurrent multi-node backfills
+    // are harmless.
+    match status_computation.recompute_all().await {
+        Ok(counts) if counts.milestones + counts.goals > 0 => println!(
+            "status backfill: refreshed {} milestone(s), {} goal(s)",
+            counts.milestones, counts.goals
+        ),
+        Ok(_) => {}
+        Err(err) => eprintln!("warning: startup status backfill failed: {err}"),
+    }
     let status_override_service = web::Data::new(StatusOverrideService::new(
         Arc::new(PostgresGoalRepository::new(pool.clone())),
         Arc::new(PostgresMilestoneRepository::new(pool.clone())),
         status_snapshots,
+        recomputation.clone(),
     ));
     // Goal–milestone linkage (roadmap 3.4): link/unlink/list go through the
     // service so the existence and idempotency rules live in one place. Like
@@ -173,6 +214,7 @@ async fn main() -> std::io::Result<()> {
         Arc::new(PostgresGoalRepository::new(pool.clone())),
         Arc::new(PostgresMilestoneRepository::new(pool.clone())),
         Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+        recomputation.clone(),
     ));
     // Task relations (roadmap 3.6, D4): create/delete/list go through the
     // service so the existence checks and canonicalisation live in one place.
@@ -186,9 +228,33 @@ async fn main() -> std::io::Result<()> {
     // the service so the no-op rule lives in one place; like the relation
     // service it takes ports, over its own repository instance on the shared
     // pool. No snapshot trigger: a board move is not a status change (D5).
-    let task_status_service = web::Data::new(TaskStatusService::new(Arc::new(
-        PostgresTaskRepository::new(pool.clone()),
-    )));
+    let task_status_service = web::Data::new(TaskStatusService::new(
+        Arc::new(PostgresTaskRepository::new(pool.clone())),
+        recomputation.clone(),
+    ));
+    // Task create/update/delete (roadmap 3.13, step 4): writes go through the
+    // service so the best-effort status recompute lives with the mutation;
+    // like the board-move service it takes ports over its own repository
+    // instance on the shared pool.
+    let task_service = web::Data::new(TaskService::new(
+        Arc::new(PostgresTaskRepository::new(pool.clone())),
+        recomputation.clone(),
+    ));
+    // Milestone create/update/delete: the same pattern; delete also
+    // recomputes the goals linked to the milestone, captured before the
+    // links cascade away with it.
+    let milestone_service = web::Data::new(MilestoneService::new(
+        Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+        Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+        recomputation.clone(),
+    ));
+    // Goal create: computes the goal's initial status. Goal update and delete
+    // are not triggers (a goal's status depends only on its linked
+    // milestones), so those handlers keep talking to the repository directly.
+    let goal_service = web::Data::new(GoalService::new(
+        Arc::new(PostgresGoalRepository::new(pool.clone())),
+        recomputation,
+    ));
     // Task list pagination & filtering (roadmap 3.10, 3.16, D16): the list
     // goes through the service so the handler never touches a repository.
     let task_list_service = web::Data::new(TaskListService::new(Arc::new(
@@ -242,12 +308,14 @@ async fn main() -> std::io::Result<()> {
     // login. It shares the rules repository with the user-admin service's
     // hand-edit lock, so both read the same committed rules.
     let sso_roles = SsoRoleService::new(sso_group_rules_repo.clone(), users.clone());
-    // Rate limiting (roadmap 2.8): fixed-window counters behind the same
-    // storage selection as sessions — Redis when redis.url is configured,
-    // Postgres otherwise. In-process counters are deliberately not an option:
-    // they break horizontal scaling. Built before the session match below
-    // because that one moves the pool into the maintenance runner.
-    let rate_limiter: Arc<dyn RateLimiter> = if config.redis.url.expose().trim().is_empty() {
+    // Redis when redis.url is configured, Postgres otherwise — one shared
+    // selection for rate-limit counters and sessions below. In-process
+    // counters are deliberately not an option: they break horizontal scaling.
+    let postgres_stores = config.redis.url.expose().trim().is_empty();
+    // Rate limiting (roadmap 2.8): fixed-window counters behind the shared
+    // storage selection above. Built before the maintenance runner below,
+    // which moves the pool.
+    let rate_limiter: Arc<dyn RateLimiter> = if postgres_stores {
         println!("redis not configured; using Postgres for rate-limit counters");
         Arc::new(PostgresRateLimiter::new(pool.clone()))
     } else {
@@ -257,37 +325,35 @@ async fn main() -> std::io::Result<()> {
                 .expect("redis.url is set but could not connect to Redis"),
         )
     };
-    // Sessions are the swappable storage: Redis when redis.url is configured,
-    // Postgres otherwise. A missing URL is not an error — it just means "use
-    // Postgres for sessions" (see docs/architecture.md). A present but
-    // unreachable one fails fast, like database.url does. The URL may carry
-    // credentials, so it stays out of the log line.
-    let sessions: Arc<dyn SessionRepository> = match config.redis.url.expose().trim() {
-        "" => {
-            println!("redis not configured; using Postgres for session storage");
-            let sessions = Arc::new(PostgresSessionRepository::new(pool.clone()));
-            // With Postgres as the session store, expired rows and stale
-            // rate-limit counters are only removed by these hourly
-            // maintenance jobs (with Redis, native TTLs evict keys instead).
-            // Every node runs them; their advisory locks mean exactly one of
-            // the nodes does the work per tick (roadmap 2.8).
-            maintenance::start(
-                pool,
-                vec![
-                    maintenance::purge_expired_sessions(sessions.clone()),
-                    maintenance::purge_rate_limit_counters(rate_limiter.clone()),
-                ],
-            );
-            sessions
-        }
-        redis_url => {
-            println!("using Redis for session storage");
-            Arc::new(
-                RedisSessionRepository::connect(redis_url)
-                    .expect("redis.url is set but could not connect to Redis"),
-            )
-        }
+    // Sessions are the swappable storage behind the shared selection above.
+    // A missing Redis URL is not an error — it just means "use Postgres for
+    // sessions" (see docs/architecture.md). A present but unreachable one
+    // fails fast, like database.url does. The URL may carry credentials, so
+    // it stays out of the log line.
+    let sessions: Arc<dyn SessionRepository> = if postgres_stores {
+        println!("redis not configured; using Postgres for session storage");
+        Arc::new(PostgresSessionRepository::new(pool.clone()))
+    } else {
+        println!("using Redis for session storage");
+        Arc::new(
+            RedisSessionRepository::connect(config.redis.url.expose())
+                .expect("redis.url is set but could not connect to Redis"),
+        )
     };
+    // The maintenance runner starts on every node (roadmap 3.13, step 5): the
+    // status recompute needs only Postgres and runs wherever the sessions
+    // live; with Redis, native TTLs evict expired sessions and stale
+    // rate-limit counters instead of the hourly purges, so those two jobs
+    // register only when Postgres holds the stores. Every node ticks every
+    // job it registers; the advisory locks mean exactly one node does each
+    // job's work per tick (roadmap 2.8).
+    maintenance::start(
+        pool,
+        maintenance::jobs_for(
+            status_computation.clone(),
+            postgres_stores.then(|| (sessions.clone(), rate_limiter.clone())),
+        ),
+    );
     // The raw repository stays registered alongside the service: handlers go
     // through the service (the TTL is the fixed 30 days), but code that needs
     // session storage directly can still extract the port.
@@ -442,6 +508,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(milestones.clone())
             .app_data(goal_milestones.clone())
             .app_data(tasks.clone())
+            .app_data(web::Data::from(task_counts.clone()))
             .app_data(task_relations.clone())
             .app_data(progress_snapshots.clone())
             .app_data(sso_group_rules.clone())
@@ -456,6 +523,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(goal_milestone_link_service.clone())
             .app_data(task_relation_service.clone())
             .app_data(task_status_service.clone())
+            .app_data(task_service.clone())
+            .app_data(milestone_service.clone())
+            .app_data(goal_service.clone())
             .app_data(assignment_service.clone())
             .app_data(task_list_service.clone())
             .app_data(goal_list_service.clone())

@@ -187,6 +187,7 @@ pub enum StatusSourceDoc {
         crate::milestones::MilestonePage,
         crate::milestones::MilestoneRequest,
         crate::milestones::MilestoneResponse,
+        crate::milestones::MilestoneTaskCounts,
         crate::tasks::TaskPage,
         crate::tasks::TaskRequest,
         crate::tasks::CreateTaskRequest,

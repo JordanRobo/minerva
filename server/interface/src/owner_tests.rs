@@ -18,11 +18,14 @@ use application::assignment::AssignmentService;
 use application::auth::SessionService;
 use application::goal_list::GoalListService;
 use application::goal_milestone_links::GoalMilestoneLinkService;
+use application::goal_service::GoalService;
 use application::milestone_list::MilestoneListService;
+use application::milestone_service::MilestoneService;
 use application::ports::{
-    GoalRepository, MilestoneRepository, NoopStatusSnapshotTrigger, SessionRepository,
-    UserRepository,
+    GoalRepository, MilestoneRepository, NoopStatusSnapshotTrigger, SessionRepository, SystemClock,
+    TaskRepository, UserRepository,
 };
+use application::status_computation::{StatusComputationService, StatusRecomputation};
 use application::status_override::StatusOverrideService;
 use chrono::Utc;
 use diesel::prelude::*;
@@ -93,18 +96,34 @@ macro_rules! test_app {
         });
         let users_data: web::Data<dyn UserRepository> = users.clone().into();
         // The services take ports, so they get their own repository
-        // instances over the shared pool (mirrors `main.rs`).
+        // instances over the shared pool (mirrors `main.rs`). The mutation
+        // services recompute statuses best-effort after each write (roadmap
+        // 3.13, step 4), so they share the real computation service.
+        let computation: Arc<dyn StatusRecomputation> = Arc::new(StatusComputationService::new(
+            Arc::new(PostgresGoalRepository::new(pool.clone())),
+            Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            Arc::new(SystemClock),
+        ));
         let overrides = StatusOverrideService::new(
             Arc::new(PostgresGoalRepository::new(pool.clone())),
             Arc::new(PostgresMilestoneRepository::new(pool.clone())),
             Arc::new(NoopStatusSnapshotTrigger),
+            computation.clone(),
         );
+        // The milestone handlers read task counts through the port (roadmap
+        // 3.13), so a trait-object registration sits beside the concrete one,
+        // like in `main.rs`.
+        let task_counts: Arc<dyn TaskRepository> =
+            Arc::new(PostgresTaskRepository::new(pool.clone()));
         init_service(
             App::new()
                 .app_data(web::Data::new(PostgresGoalRepository::new(pool.clone())))
                 .app_data(web::Data::new(PostgresMilestoneRepository::new(
                     pool.clone(),
                 )))
+                .app_data(web::Data::from(task_counts))
                 .app_data(users_data)
                 .app_data(web::Data::new(session_service))
                 .app_data(web::Data::new(overrides))
@@ -118,6 +137,16 @@ macro_rules! test_app {
                     Arc::new(PostgresGoalRepository::new(pool.clone())),
                     Arc::new(PostgresMilestoneRepository::new(pool.clone())),
                     Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+                    computation.clone(),
+                )))
+                .app_data(web::Data::new(GoalService::new(
+                    Arc::new(PostgresGoalRepository::new(pool.clone())),
+                    computation.clone(),
+                )))
+                .app_data(web::Data::new(MilestoneService::new(
+                    Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+                    Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+                    computation,
                 )))
                 .app_data(web::Data::new(AssignmentService::new(
                     Arc::new(PostgresTaskRepository::new(pool.clone())),

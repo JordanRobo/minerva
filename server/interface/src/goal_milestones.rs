@@ -5,7 +5,7 @@
 
 use actix_web::{HttpResponse, web};
 use application::goal_milestone_links::GoalMilestoneLinkService;
-use application::ports::UserRepository;
+use application::ports::{TaskRepository, UserRepository};
 use domain::{GoalId, MilestoneId};
 use serde::Deserialize;
 use serde::de::Deserializer;
@@ -142,6 +142,7 @@ impl<'de> Deserialize<'de> for LinkListQuery {
 pub async fn list_goal_milestones(
     links: web::Data<GoalMilestoneLinkService>,
     users: web::Data<dyn UserRepository>,
+    tasks: web::Data<dyn TaskRepository>,
     _access: ViewAccess,
     path: web::Path<Uuid>,
     query: web::Query<LinkListQuery>,
@@ -152,18 +153,24 @@ pub async fn list_goal_milestones(
         .await
     {
         Ok(page) => {
-            // One user query for the whole page's owners (D17).
+            // One user query for the whole page's owners (D17), one grouped
+            // lookup for the whole page's task counts (roadmap 3.13).
             let people = resolve_summaries(
                 users.as_ref(),
                 page.items.iter().map(|milestone| milestone.owner_id),
             )
             .await
             .map_err(repo_error_response)?;
+            let ids: Vec<MilestoneId> = page.items.iter().map(|milestone| milestone.id).collect();
+            let counts = tasks
+                .task_counts_for_milestones(&ids)
+                .await
+                .map_err(repo_error_response)?;
             Ok(HttpResponse::Ok().json(MilestonePage {
                 items: page
                     .items
                     .iter()
-                    .map(|milestone| milestone_response(milestone, &people))
+                    .map(|milestone| milestone_response(milestone, &people, &counts))
                     .collect(),
                 total: page.total,
                 limit: page.limit,

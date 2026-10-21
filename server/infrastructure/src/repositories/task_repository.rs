@@ -1,10 +1,12 @@
 //! Postgres implementation of [`TaskRepository`].
 
+use std::collections::HashMap;
+
 use application::pagination::{Page, PageRequest};
-use application::ports::{RepositoryError, TaskListFilter, TaskRepository};
+use application::ports::{RepositoryError, TaskCounts, TaskListFilter, TaskRepository};
 use chrono::Utc;
 use diesel::prelude::*;
-use domain::{Task, TaskId, TaskStatus, UserId};
+use domain::{MilestoneId, Task, TaskId, TaskStatus, UserId};
 use uuid::Uuid;
 
 use crate::db::{PgPool, run_on_postgres};
@@ -71,6 +73,44 @@ impl TaskRepository for PostgresTaskRepository {
                 .load(conn)
                 .map_err(map_diesel_error)?;
             rows.into_iter().map(task_from_row).collect()
+        })
+        .await
+    }
+
+    async fn task_counts_for_milestones(
+        &self,
+        milestone_ids: &[MilestoneId],
+    ) -> Result<HashMap<MilestoneId, TaskCounts>, RepositoryError> {
+        let pool = self.pool.clone();
+        let id_values: Vec<Uuid> = milestone_ids.iter().map(|id| id.0).collect();
+        run_on_postgres(pool, move |conn| {
+            // One read of every (milestone, status) pair; the counts are
+            // worked out in Rust because Diesel cannot express a conditional
+            // aggregate without raw SQL. Every requested id is pre-seeded
+            // with zeros so a milestone with no tasks still comes back
+            // (roadmap 3.13).
+            let mut counts: HashMap<MilestoneId, TaskCounts> = id_values
+                .iter()
+                .map(|id| (MilestoneId(*id), TaskCounts { total: 0, done: 0 }))
+                .collect();
+            let pairs: Vec<(Option<Uuid>, String)> = tasks::table
+                .filter(tasks::milestone_id.eq_any(id_values))
+                .select((tasks::milestone_id, tasks::status))
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            for (milestone_id, status) in pairs {
+                let Some(milestone_id) = milestone_id else {
+                    continue;
+                };
+                let Some(counts) = counts.get_mut(&MilestoneId(milestone_id)) else {
+                    continue;
+                };
+                counts.total += 1;
+                if status == task_status_to_db(TaskStatus::Done) {
+                    counts.done += 1;
+                }
+            }
+            Ok(counts)
         })
         .await
     }

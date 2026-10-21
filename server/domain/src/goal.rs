@@ -81,18 +81,19 @@ impl Goal {
     }
 
     /// Work out this goal's overall status from the statuses of its
-    /// associated milestones.
+    /// associated milestones (D19).
     ///
     /// The rule, in priority order:
     ///
-    /// 1. `Complete` if every milestone is complete (and there is at least
-    ///    one).
-    /// 2. `OffTrack` if any milestone is off track.
-    /// 3. `AtRisk` if any milestone is at risk.
-    /// 4. Otherwise `OnTrack`.
-    ///
-    /// A goal with no milestones yet is reported as `OnTrack`: there is
-    /// simply nothing behind schedule to speak of.
+    /// 1. `OnTrack` if there are no milestones at all: there is simply
+    ///    nothing behind schedule to speak of.
+    /// 2. `Complete` if every milestone is complete.
+    /// 3. Over the incomplete milestones, `OffTrack` when the off-track ones
+    ///    are half of them or more — a goal is off track when most of what
+    ///    remains is off track, not because of a single straggler.
+    /// 4. Otherwise `AtRisk` when any incomplete milestone is at risk or off
+    ///    track (an off-track minority still puts the goal at risk).
+    /// 5. Otherwise `OnTrack`.
     ///
     /// The rule looks only at each milestone's effective status (including
     /// any manual override), not at dates: a milestone that has passed its
@@ -105,22 +106,32 @@ impl Goal {
         if milestones.is_empty() {
             return Status::OnTrack;
         }
-        if milestones
-            .iter()
-            .all(|m| m.effective_status() == Status::Complete)
-        {
+        let mut incomplete = 0usize;
+        let mut off_track = 0usize;
+        let mut at_risk = 0usize;
+        for milestone in milestones {
+            match milestone.effective_status() {
+                Status::Complete => {}
+                Status::OffTrack => {
+                    incomplete += 1;
+                    off_track += 1;
+                }
+                Status::AtRisk => {
+                    incomplete += 1;
+                    at_risk += 1;
+                }
+                Status::OnTrack => incomplete += 1,
+            }
+        }
+        if incomplete == 0 {
             return Status::Complete;
         }
-        if milestones
-            .iter()
-            .any(|m| m.effective_status() == Status::OffTrack)
-        {
+        // Off track when the off-track milestones are half of the incomplete
+        // ones or more; the doubled comparison keeps it exact in integers.
+        if 2 * off_track >= incomplete {
             return Status::OffTrack;
         }
-        if milestones
-            .iter()
-            .any(|m| m.effective_status() == Status::AtRisk)
-        {
+        if off_track > 0 || at_risk > 0 {
             return Status::AtRisk;
         }
         Status::OnTrack
@@ -172,102 +183,117 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rollup_with_no_milestones_is_on_track() {
-        let goal = test_goal();
-        assert_eq!(goal.compute_status_from_milestones(&[]), Status::OnTrack);
+    fn milestone_with_effective_status(
+        status: Status,
+        override_status: Option<Status>,
+    ) -> Milestone {
+        let mut milestone = milestone_with_status(status);
+        if let Some(override_status) = override_status {
+            milestone.set_status_override(override_status);
+        }
+        milestone
     }
 
     #[test]
-    fn rollup_of_all_on_track_milestones_is_on_track() {
+    fn rollup_follows_the_d19_rules() {
         let goal = test_goal();
-        let milestones = [
-            milestone_with_status(Status::OnTrack),
-            milestone_with_status(Status::OnTrack),
+        // Each case is (name, milestones as (automatic status, override), expected).
+        let cases = [
+            (
+                "no milestones is on track",
+                Vec::<(Status, Option<Status>)>::new(),
+                Status::OnTrack,
+            ),
+            (
+                "all on-track milestones are on track",
+                vec![(Status::OnTrack, None), (Status::OnTrack, None)],
+                Status::OnTrack,
+            ),
+            (
+                "a single off-track straggler among three is at risk, not off track",
+                vec![
+                    (Status::OnTrack, None),
+                    (Status::OffTrack, None),
+                    (Status::OnTrack, None),
+                ],
+                Status::AtRisk,
+            ),
+            (
+                "one off-track milestone out of two is half and makes the goal off track",
+                vec![(Status::OffTrack, None), (Status::OnTrack, None)],
+                Status::OffTrack,
+            ),
+            (
+                "two off-track milestones out of three are more than half",
+                vec![
+                    (Status::OffTrack, None),
+                    (Status::OffTrack, None),
+                    (Status::OnTrack, None),
+                ],
+                Status::OffTrack,
+            ),
+            (
+                "an at-risk milestone with no off-track ones is at risk",
+                vec![
+                    (Status::OnTrack, None),
+                    (Status::AtRisk, None),
+                    (Status::Complete, None),
+                ],
+                Status::AtRisk,
+            ),
+            (
+                "an off-track minority alongside an at-risk milestone is at risk",
+                vec![
+                    (Status::OffTrack, None),
+                    (Status::AtRisk, None),
+                    (Status::OnTrack, None),
+                    (Status::OnTrack, None),
+                ],
+                Status::AtRisk,
+            ),
+            (
+                "off track wins over at risk at exactly half",
+                vec![(Status::AtRisk, None), (Status::OffTrack, None)],
+                Status::OffTrack,
+            ),
+            (
+                "all complete milestones are complete",
+                vec![(Status::Complete, None), (Status::Complete, None)],
+                Status::Complete,
+            ),
+            (
+                "complete milestones do not count until all are complete",
+                vec![(Status::Complete, None), (Status::OnTrack, None)],
+                Status::OnTrack,
+            ),
+            (
+                "an overridden milestone counts by its effective status",
+                vec![(Status::OnTrack, Some(Status::OffTrack))],
+                Status::OffTrack,
+            ),
+            (
+                "overrides can push the off-track count to half",
+                vec![
+                    (Status::OnTrack, Some(Status::OffTrack)),
+                    (Status::OnTrack, Some(Status::OffTrack)),
+                    (Status::OnTrack, None),
+                ],
+                Status::OffTrack,
+            ),
         ];
-        assert_eq!(
-            goal.compute_status_from_milestones(&milestones),
-            Status::OnTrack
-        );
-    }
-
-    #[test]
-    fn rollup_with_one_off_track_milestone_is_off_track() {
-        let goal = test_goal();
-        let milestones = [
-            milestone_with_status(Status::OnTrack),
-            milestone_with_status(Status::OffTrack),
-            milestone_with_status(Status::OnTrack),
-        ];
-        assert_eq!(
-            goal.compute_status_from_milestones(&milestones),
-            Status::OffTrack
-        );
-    }
-
-    #[test]
-    fn rollup_with_one_at_risk_milestone_and_no_off_track_is_at_risk() {
-        let goal = test_goal();
-        let milestones = [
-            milestone_with_status(Status::OnTrack),
-            milestone_with_status(Status::AtRisk),
-            milestone_with_status(Status::Complete),
-        ];
-        assert_eq!(
-            goal.compute_status_from_milestones(&milestones),
-            Status::AtRisk
-        );
-    }
-
-    #[test]
-    fn rollup_of_all_complete_milestones_is_complete() {
-        let goal = test_goal();
-        let milestones = [
-            milestone_with_status(Status::Complete),
-            milestone_with_status(Status::Complete),
-        ];
-        assert_eq!(
-            goal.compute_status_from_milestones(&milestones),
-            Status::Complete
-        );
-    }
-
-    #[test]
-    fn off_track_wins_over_at_risk() {
-        let goal = test_goal();
-        let milestones = [
-            milestone_with_status(Status::AtRisk),
-            milestone_with_status(Status::OffTrack),
-        ];
-        assert_eq!(
-            goal.compute_status_from_milestones(&milestones),
-            Status::OffTrack
-        );
-    }
-
-    #[test]
-    fn complete_milestones_do_not_count_as_done_until_all_are_complete() {
-        let goal = test_goal();
-        let milestones = [
-            milestone_with_status(Status::Complete),
-            milestone_with_status(Status::OnTrack),
-        ];
-        assert_eq!(
-            goal.compute_status_from_milestones(&milestones),
-            Status::OnTrack
-        );
-    }
-
-    #[test]
-    fn rollup_uses_the_milestones_effective_status() {
-        let goal = test_goal();
-        let mut overridden = milestone_with_status(Status::OnTrack);
-        overridden.set_status_override(Status::OffTrack);
-        let milestones = [overridden];
-        assert_eq!(
-            goal.compute_status_from_milestones(&milestones),
-            Status::OffTrack
-        );
+        for (name, specs, expected) in cases {
+            let milestones: Vec<Milestone> = specs
+                .into_iter()
+                .map(|(status, override_status)| {
+                    milestone_with_effective_status(status, override_status)
+                })
+                .collect();
+            assert_eq!(
+                goal.compute_status_from_milestones(&milestones),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]

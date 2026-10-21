@@ -10,9 +10,11 @@ use actix_web::{HttpResponse, ResponseError, http};
 use application::account_links::AccountLinkError;
 use application::assignment::AssignmentError;
 use application::goal_milestone_links::GoalMilestoneLinkError;
+use application::milestone_service::MilestoneServiceError;
 use application::ports::RepositoryError;
 use application::status_override::StatusOverrideError;
 use application::task_relations::TaskRelationError;
+use application::task_service::TaskServiceError;
 use application::task_status::TaskStatusError;
 use serde::Serialize;
 use std::time::Duration;
@@ -354,6 +356,25 @@ pub fn task_status_error_response(error: TaskStatusError) -> ApiError {
     match error {
         TaskStatusError::NotFound => ApiError::not_found(),
         TaskStatusError::Repository(err) => repo_error_response(err),
+    }
+}
+
+/// Translate a [`TaskServiceError`] into the [`ApiError`] it renders as:
+/// a missing task -> 404 (the generic `not_found` code the other task routes
+/// answer with), repository failures map like any other.
+pub fn task_service_error_response(error: TaskServiceError) -> ApiError {
+    match error {
+        TaskServiceError::NotFound => ApiError::not_found(),
+        TaskServiceError::Repository(err) => repo_error_response(err),
+    }
+}
+
+/// Translate a [`MilestoneServiceError`] into the [`ApiError`] it renders as:
+/// a missing milestone -> 404, repository failures map like any other.
+pub fn milestone_service_error_response(error: MilestoneServiceError) -> ApiError {
+    match error {
+        MilestoneServiceError::NotFound => ApiError::not_found(),
+        MilestoneServiceError::Repository(err) => repo_error_response(err),
     }
 }
 

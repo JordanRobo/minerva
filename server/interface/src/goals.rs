@@ -7,6 +7,7 @@
 use actix_web::{HttpResponse, web};
 use application::assignment::AssignmentService;
 use application::goal_list::GoalListService;
+use application::goal_service::GoalService;
 use application::pagination::{PageRequest, PageRequestError};
 use application::ports::{GoalListFilter, GoalRepository, UserRepository};
 use application::status_override::StatusOverrideService;
@@ -40,6 +41,11 @@ pub struct GoalResponse {
     /// out by the system ("automatic").
     #[schema(value_type = StatusSourceDoc)]
     pub status_source: StatusSource,
+    /// The status the system works out from the goal's linked milestones,
+    /// reported even while a manual setting is active — so a client can show
+    /// "manually set to At Risk (automatic: On Track)" (roadmap 3.13).
+    #[schema(value_type = StatusDoc)]
+    pub automatic_status: Status,
     pub target_date: Option<NaiveDate>,
     /// The person the goal is owned by, or null when unowned (D17). A
     /// deactivated owner still appears, with `active` false.
@@ -54,13 +60,14 @@ pub struct GoalResponse {
 /// reuse it.
 pub(crate) fn goal_response(goal: &Goal, people: &HashMap<Uuid, PersonSummary>) -> GoalResponse {
     // The wire shape reports the effective status and where it came
-    // from; the raw automatic value and override are domain-side.
+    // from, plus the automatic value underneath any manual setting.
     let mut response = GoalResponse {
         id: goal.id.0,
         title: goal.title.clone(),
         description: goal.description.clone(),
         status: goal.effective_status(),
         status_source: goal.status_source(),
+        automatic_status: goal.status,
         target_date: goal.target_date,
         owner: None,
         created_at: goal.created_at,
@@ -336,7 +343,7 @@ fn parse_goal_list_query(
     )
 )]
 pub async fn create_goal(
-    goals: web::Data<PostgresGoalRepository>,
+    service: web::Data<GoalService>,
     assignment: web::Data<AssignmentService>,
     users: web::Data<dyn UserRepository>,
     _access: EditAccess,
@@ -370,7 +377,7 @@ pub async fn create_goal(
         created_at: now,
         updated_at: now,
     };
-    match goals.create(goal).await {
+    match service.create(goal).await {
         Ok(goal) => {
             let people = resolve_summaries(users.as_ref(), [goal.owner_id])
                 .await
