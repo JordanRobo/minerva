@@ -33,6 +33,7 @@ use application::rate_limit::RateLimitService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_computation::{StatusComputationService, StatusRecomputation};
 use application::status_override::StatusOverrideService;
+use application::task_comments::TaskCommentService;
 use application::task_list::TaskListService;
 use application::task_relations::TaskRelationService;
 use application::task_service::TaskService;
@@ -45,8 +46,8 @@ use infrastructure::db::PgPool;
 use infrastructure::repositories::{
     PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
     PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
-    PostgresSsoGroupRuleRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
-    PostgresUserRepository,
+    PostgresSsoGroupRuleRepository, PostgresTaskCommentRepository, PostgresTaskRelationRepository,
+    PostgresTaskRepository, PostgresUserRepository,
 };
 use infrastructure::{Argon2PasswordHasher, NoEmailSender, Sha256SessionTokens};
 use std::sync::Arc;
@@ -195,6 +196,16 @@ macro_rules! test_app {
                 .app_data(web::Data::new(MilestoneService::new(
                     Arc::new(PostgresMilestoneRepository::new(pool.clone())),
                     Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+                    computation.clone(),
+                )))
+                // Task comments (roadmap 3.12, D20): the service takes the
+                // snapshot trigger and the recompute but never calls them;
+                // the noop stands in for the real trigger, like the other
+                // mutation services here.
+                .app_data(web::Data::new(TaskCommentService::new(
+                    Arc::new(PostgresTaskRepository::new(pool.clone())),
+                    Arc::new(PostgresTaskCommentRepository::new(pool.clone())),
+                    Arc::new(NoopStatusSnapshotTrigger),
                     computation.clone(),
                 )))
                 .app_data(web::Data::new(GoalService::new(
@@ -562,6 +573,31 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
         (
             Method::DELETE,
             format!("/api/tasks/{task}/relations/{debug_id}"),
+            Permission::EditContent,
+            None,
+        ),
+        // Task comments (roadmap 3.12, D20).
+        (
+            Method::GET,
+            format!("/api/tasks/{task}/comments"),
+            Permission::ViewContent,
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/tasks/{task}/comments"),
+            Permission::EditContent,
+            Some(serde_json::json!({ "body": "Access test" })),
+        ),
+        (
+            Method::PUT,
+            format!("/api/tasks/{task}/comments/{debug_id}"),
+            Permission::EditContent,
+            Some(serde_json::json!({ "body": "Access test" })),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/tasks/{task}/comments/{debug_id}"),
             Permission::EditContent,
             None,
         ),

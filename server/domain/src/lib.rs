@@ -18,6 +18,7 @@ pub mod session;
 pub mod sso_group_rule;
 pub mod status;
 pub mod task;
+pub mod task_comment;
 pub mod task_relation;
 pub mod user;
 pub mod user_identity;
@@ -35,6 +36,9 @@ pub use session::{Session, SessionId};
 pub use sso_group_rule::{SsoGroupRule, SsoGroupRuleId, resolve_role};
 pub use status::{Status, StatusSource};
 pub use task::{Task, TaskId, TaskStatus};
+pub use task_comment::{
+    CommentBodyError, MAX_COMMENT_BODY_CHARS, TaskComment, TaskCommentId, normalize_comment_body,
+};
 pub use task_relation::{TaskRelation, TaskRelationId, TaskRelationType};
 pub use user::{User, UserId, UserSummary};
 pub use user_identity::{UserIdentity, UserIdentityId};

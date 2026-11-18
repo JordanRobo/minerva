@@ -427,8 +427,8 @@ extractor and asking `authz` for its permission:
 
 | Extractor | Permission | Used by |
 |---|---|---|
-| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones`, `GET /api/milestones/{id}/goals`, `GET /api/tasks/{id}/relations` and `GET /api/people` |
-| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}`, plus `POST /api/tasks/{id}/relations` and `DELETE /api/tasks/{id}/relations/{relation_id}`, plus `PATCH /api/tasks/{id}/status`, plus `PUT`/`DELETE /api/tasks/{id}/assignee`, `PUT`/`DELETE /api/goals/{id}/owner` and `PUT`/`DELETE /api/milestones/{id}/owner` |
+| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones`, `GET /api/milestones/{id}/goals`, `GET /api/tasks/{id}/relations`, `GET /api/tasks/{id}/comments` and `GET /api/people` |
+| `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}`, plus `POST /api/tasks/{id}/relations` and `DELETE /api/tasks/{id}/relations/{relation_id}`, plus `PATCH /api/tasks/{id}/status`, plus `PUT`/`DELETE /api/tasks/{id}/assignee`, `PUT`/`DELETE /api/goals/{id}/owner` and `PUT`/`DELETE /api/milestones/{id}/owner`, plus the task-comment writes (`POST /api/tasks/{id}/comments`, `PUT`/`DELETE /api/tasks/{id}/comments/{comment_id}`) |
 | `AdminAccess` | `ManageUsers` | the `/api/users` routes, the invite and password-reset routes (`/api/invites`, `/api/users/{id}/password-reset`) and the temporary `/debug/*` routes (until their roadmap items replace them) |
 
 A missing or invalid session is a 401; a valid session whose role lacks the
@@ -731,9 +731,9 @@ and an unknown status string a 400 from JSON parsing before the handler runs.
 
 ### List pagination, filtering and ordering
 
-The five list endpoints — `GET /api/tasks`, `GET /api/goals`,
-`GET /api/milestones` and the two goal↔milestone link lists (roadmap 3.10,
-D16) — answer a shared envelope instead of a bare array:
+The six list endpoints — `GET /api/tasks`, `GET /api/goals`,
+`GET /api/milestones`, the two goal↔milestone link lists and a task's comments
+(roadmap 3.10/3.12, D16) — answer a shared envelope instead of a bare array:
 
 ```json
 { "items": [ … ], "total": 42, "limit": 50, "offset": 0 }
@@ -745,8 +745,8 @@ and defaults to 0. A malformed or out-of-range value is a 400 `invalid_query`
 naming the parameter — values are never clamped — and an offset past the end
 of the result is simply an empty page with the correct total. Every list goes
 through a small application service (`application::task_list`, `goal_list`,
-`milestone_list`, or the goal–milestone link service) so the handlers never
-touch a repository.
+`milestone_list`, `task_comments`, or the goal–milestone link service) so the
+handlers never touch a repository.
 
 Each endpoint's filters:
 
@@ -760,6 +760,9 @@ Each endpoint's filters:
   the automatic value; roadmap 3.2), which in Postgres is
   `COALESCE(status_override, status)`.
 - The link lists take only `limit` and `offset`: the path id is the filter.
+- A task's comments take only `limit` and `offset` too: the path task is the
+  filter, and the order is oldest first — `created_at`, then id — the shared
+  default without its target-date term, which a comment does not have.
 
 No filter can 404: an unmatched filter — including an unknown `milestone_id`
 or `assignee_id` — is a 200 empty page. (An unknown *path* id on the link
@@ -838,6 +841,51 @@ The task list filters on `assignee_id` (above); there is deliberately no owner
 filter and no "my tasks"/"unassigned" shortcut in v1 — roadmap 4.5 builds
 "My tasks" on `assignee_id` plus the caller's own id.
 
+### Task comments
+
+Tasks carry flat, plain-text **comments** (roadmap 3.12, D20) in the
+`task_comments` table (migration 20261118000001): one row per comment with a
+body, timestamps and an optional author. The task reference cascades — deleting
+a task removes its comments — and the author is a nullable user reference with
+`ON DELETE SET NULL`, like D17's assignees: a deleted author leaves their
+comments in place, rendered with `author: null`.
+
+The body is plain text, not markdown or HTML: surrounding whitespace is
+trimmed and the result must be 1–4000 characters (Unicode), interior newlines
+kept. A comment's `created_at` equals `updated_at` until the body is first
+edited; editing replaces the body in place, and re-submitting the stored body
+is an idempotent no-op that leaves `updated_at` alone. Deletion is a hard
+delete — no edit history is kept (D20).
+
+The ownership rules live in `application::authz`, with the existence checks in
+`application::task_comments::TaskCommentService`, not in the handlers:
+
+- Any Staff or Admin may comment on any task; the acting user is recorded as
+  the author.
+- Only the **author** may edit a comment, whatever their role — a Staff or
+  Admin who is not the author gets a 403.
+- The **author or any Admin** may delete one; anyone else gets a 403.
+
+The routes are `POST /api/tasks/{id}/comments` and
+`PUT`/`DELETE /api/tasks/{id}/comments/{comment_id}` — Staff or Admin
+(`EditAccess`) — plus `GET /api/tasks/{id}/comments`, open to any signed-in
+role (`ViewAccess`). Create answers 201 with the new comment, update 200 with
+the updated one, delete 204. The list is D16-paginated (above), ordered oldest
+first so the thread reads top to bottom, and takes only `limit` and `offset`.
+A comment that lives on another task is a 404 `comment_not_found` like an
+unknown id, so its existence is not leaked; an unknown task is a 404 on every
+route. Blank or over-long bodies are 400s.
+
+As with assignees, the author renders as a **person summary** (`{id,
+display_name, active}`, never the email) resolved in batch — one
+`summaries_by_ids` call per response or page — and a deactivated author still
+renders, flagged `active: false`.
+
+Commenting touches nothing but the comment row (D20): the task's `updated_at`
+and status are untouched, no snapshot trigger fires (D5) and no status
+recomputation runs (3.13). There is deliberately no mention or notification
+mechanism and no threading in v1 — comments are flat notes on a task.
+
 ## API documentation
 
 The `interface` crate generates an OpenAPI 3 document from code annotations
@@ -848,8 +896,9 @@ The `interface` crate generates an OpenAPI 3 document from code annotations
 
 Under Docker compose the API is mapped to host port 3010, so use
 http://localhost:3010/api-docs/swagger-ui/ there. All `/api/*` endpoints
-(auth, goals, goal–milestone links, milestones, tasks, task relations, people,
-users, invites and SSO group rules) are documented; the temporary
+(auth, goals, goal–milestone links, milestones, tasks, task relations, task
+comments, people, users, invites and SSO group rules) are documented; the
+temporary
 `/debug/*` routes are not. Protected endpoints declare the `session_cookie` security
 scheme (the session cookie as an API key, registered by a `utoipa::Modify`
 addon in `interface/src/openapi.rs`) so Swagger UI's Authorize button can

@@ -1,7 +1,8 @@
 //! OpenAPI document for the Minerva API, assembled from the
 //! `#[utoipa::path]` annotations on the handlers in `auth`, `goal_milestones`,
-//! `goals`, `milestones`, `people`, `redirect`, `sso_rules`, `task_relations`,
-//! `tasks`, and `users`. Served as JSON at `/api-docs/openapi.json` and
+//! `goals`, `milestones`, `people`, `redirect`, `sso_rules`, `task_comments`,
+//! `task_relations`, `tasks`, and `users`. Served as JSON at
+//! `/api-docs/openapi.json` and
 //! rendered by Swagger UI at `/api-docs/swagger-ui/` (wired up in `main.rs`).
 //!
 //! The `*Doc` schema types mirror the wire shape of domain status types:
@@ -108,6 +109,7 @@ pub enum StatusSourceDoc {
         (name = "milestones", description = "Milestones: dated checkpoints within a goal."),
         (name = "people", description = "People picker: the active accounts tasks can be assigned to. Any signed-in role may read."),
         (name = "sso", description = "SSO group-to-role rules: which IdP group maps to which role while any rule exists. Admin only."),
+        (name = "task-comments", description = "Task comments: flat notes on a task, listed oldest first. Any signed-in role may read; Staff and Admin may comment; only the author may edit, and the author or an Admin may delete."),
         (name = "task-relations", description = "Task relations: how one task connects to another — blocks, blocked_by and relates_to."),
         (name = "tasks", description = "Tasks: day-to-day work, optionally attached to a milestone."),
         (name = "users", description = "User administration: roles and active state. Admin only."),
@@ -159,6 +161,10 @@ pub enum StatusSourceDoc {
         crate::task_relations::create_task_relation,
         crate::task_relations::list_task_relations,
         crate::task_relations::delete_task_relation,
+        crate::task_comments::list_task_comments,
+        crate::task_comments::create_task_comment,
+        crate::task_comments::update_task_comment,
+        crate::task_comments::delete_task_comment,
         crate::users::list_users,
         crate::users::change_user_role,
         crate::users::deactivate_user,
@@ -198,6 +204,9 @@ pub enum StatusSourceDoc {
         crate::task_relations::RelationType,
         crate::task_relations::RelatedTaskResponse,
         crate::task_relations::TaskRelationResponse,
+        crate::task_comments::CommentRequest,
+        crate::task_comments::TaskCommentResponse,
+        crate::task_comments::TaskCommentPage,
         crate::sso_rules::SsoGroupRuleResponse,
         crate::sso_rules::GroupRuleRequest,
         crate::people::OwnerRequest,

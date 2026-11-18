@@ -12,7 +12,7 @@ use crate::error::ApiError;
 use crate::openapi::ApiDoc;
 use crate::{
     account_links, auth, debug, goal_milestones, goals, invites, milestones, people, redirect,
-    sso_rules, task_relations, tasks, users,
+    sso_rules, task_comments, task_relations, tasks, users,
 };
 
 async fn health() -> HttpResponse {
@@ -136,6 +136,24 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(
                     "/tasks/{id}/relations/{relation_id}",
                     web::delete().to(task_relations::delete_task_relation),
+                )
+                // Task comments (roadmap 3.12, D20): flat notes on a task;
+                // the thread reads top to bottom.
+                .route(
+                    "/tasks/{id}/comments",
+                    web::get().to(task_comments::list_task_comments),
+                )
+                .route(
+                    "/tasks/{id}/comments",
+                    web::post().to(task_comments::create_task_comment),
+                )
+                .route(
+                    "/tasks/{id}/comments/{comment_id}",
+                    web::put().to(task_comments::update_task_comment),
+                )
+                .route(
+                    "/tasks/{id}/comments/{comment_id}",
+                    web::delete().to(task_comments::delete_task_comment),
                 )
                 .route("/users", web::get().to(users::list_users))
                 // The people picker (roadmap 3.11, D17): active accounts any

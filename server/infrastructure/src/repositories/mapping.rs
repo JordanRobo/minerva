@@ -16,8 +16,8 @@ use application::ports::RepositoryError;
 use domain::{
     AccountToken, AccountTokenId, AccountTokenKind, Goal, GoalId, Milestone, MilestoneId,
     ProgressSnapshot, ProgressSnapshotId, ProgressTarget, Role, Session, SessionId, SsoGroupRule,
-    SsoGroupRuleId, Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId,
-    TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserIdentityId,
+    SsoGroupRuleId, Status, StatusSource, Task, TaskComment, TaskCommentId, TaskId, TaskRelation,
+    TaskRelationId, TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserIdentityId,
 };
 
 /// A row of the `goals` table: id, title, description, status,
@@ -190,6 +190,31 @@ pub fn task_from_row(row: TaskRow) -> Result<Task, RepositoryError> {
         status: task_status_from_db(&status)?,
         target_date,
         assignee_id: assignee_id.map(UserId),
+        created_at,
+        updated_at,
+    })
+}
+
+/// A row of the `task_comments` table: id, task_id, author_id, body,
+/// created_at, updated_at — in that order. `author_id` is `None` when the
+/// author's user has since been deleted (ON DELETE SET NULL, D20).
+pub type TaskCommentRow = (
+    Uuid,
+    Uuid,
+    Option<Uuid>,
+    String,
+    DateTime<Utc>,
+    DateTime<Utc>,
+);
+
+/// Build a [`TaskComment`] from a `task_comments` row.
+pub fn task_comment_from_row(row: TaskCommentRow) -> Result<TaskComment, RepositoryError> {
+    let (id, task_id, author_id, body, created_at, updated_at) = row;
+    Ok(TaskComment {
+        id: TaskCommentId(id),
+        task_id: TaskId(task_id),
+        author_id: author_id.map(UserId),
+        body,
         created_at,
         updated_at,
     })

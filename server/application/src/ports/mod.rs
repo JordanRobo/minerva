@@ -19,6 +19,7 @@ pub mod session_repository;
 pub mod session_tokens;
 pub mod sso_group_rule_repository;
 pub mod status_snapshot_trigger;
+pub mod task_comment_repository;
 pub mod task_relation_repository;
 pub mod task_repository;
 pub mod user_identity_repository;
@@ -41,6 +42,7 @@ pub use sso_group_rule_repository::SsoGroupRuleRepository;
 pub use status_snapshot_trigger::{
     NoopStatusSnapshotTrigger, StatusChangeTarget, StatusSnapshotError, StatusSnapshotTrigger,
 };
+pub use task_comment_repository::TaskCommentRepository;
 pub use task_relation_repository::{TaskRelationCreateError, TaskRelationRepository};
 pub use task_repository::{TaskCounts, TaskListFilter, TaskRepository};
 pub use user_identity_repository::UserIdentityRepository;

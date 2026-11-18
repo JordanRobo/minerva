@@ -15,6 +15,7 @@ mod people;
 mod redirect;
 mod routes;
 mod sso_rules;
+mod task_comments;
 mod task_relations;
 mod tasks;
 mod users;
@@ -50,6 +51,9 @@ mod status_recompute_tests;
 mod task_assignee_tests;
 
 #[cfg(test)]
+mod task_comment_tests;
+
+#[cfg(test)]
 mod task_list_tests;
 
 #[cfg(test)]
@@ -83,6 +87,7 @@ use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
 use application::status_computation::{StatusComputationService, StatusRecomputation};
 use application::status_override::StatusOverrideService;
+use application::task_comments::TaskCommentService;
 use application::task_list::TaskListService;
 use application::task_relations::TaskRelationService;
 use application::task_service::TaskService;
@@ -98,9 +103,9 @@ use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
 use infrastructure::repositories::{
     PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
     PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresRateLimiter,
-    PostgresSessionRepository, PostgresSsoGroupRuleRepository, PostgresTaskRelationRepository,
-    PostgresTaskRepository, PostgresUserIdentityRepository, PostgresUserRepository,
-    RedisRateLimiter, RedisSessionRepository,
+    PostgresSessionRepository, PostgresSsoGroupRuleRepository, PostgresTaskCommentRepository,
+    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserIdentityRepository,
+    PostgresUserRepository, RedisRateLimiter, RedisSessionRepository,
 };
 use std::sync::Arc;
 
@@ -203,7 +208,7 @@ async fn main() -> std::io::Result<()> {
     let status_override_service = web::Data::new(StatusOverrideService::new(
         Arc::new(PostgresGoalRepository::new(pool.clone())),
         Arc::new(PostgresMilestoneRepository::new(pool.clone())),
-        status_snapshots,
+        status_snapshots.clone(),
         recomputation.clone(),
     ));
     // Goal–milestone linkage (roadmap 3.4): link/unlink/list go through the
@@ -253,6 +258,19 @@ async fn main() -> std::io::Result<()> {
     // milestones), so those handlers keep talking to the repository directly.
     let goal_service = web::Data::new(GoalService::new(
         Arc::new(PostgresGoalRepository::new(pool.clone())),
+        recomputation.clone(),
+    ));
+    // Task comments (roadmap 3.12, D20): create/read/edit/delete go through
+    // the service so the existence checks and ownership rules live in one
+    // place; like the other task services it takes ports over its own
+    // repository instances on the shared pool. It also takes the snapshot
+    // trigger and the recompute — and never calls them: commenting touches
+    // nothing but the comment row (D5, D20), and the service tests pin that
+    // with counting fakes.
+    let task_comment_service = web::Data::new(TaskCommentService::new(
+        Arc::new(PostgresTaskRepository::new(pool.clone())),
+        Arc::new(PostgresTaskCommentRepository::new(pool.clone())),
+        status_snapshots,
         recomputation,
     ));
     // Task list pagination & filtering (roadmap 3.10, 3.16, D16): the list
@@ -526,6 +544,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(task_service.clone())
             .app_data(milestone_service.clone())
             .app_data(goal_service.clone())
+            .app_data(task_comment_service.clone())
             .app_data(assignment_service.clone())
             .app_data(task_list_service.clone())
             .app_data(goal_list_service.clone())

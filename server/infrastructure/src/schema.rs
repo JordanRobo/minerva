@@ -95,6 +95,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    task_comments (id) {
+        id -> Uuid,
+        task_id -> Uuid,
+        author_id -> Nullable<Uuid>,
+        body -> Text,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     task_relations (id) {
         id -> Uuid,
         source_task_id -> Uuid,
@@ -144,10 +155,6 @@ diesel::table! {
     }
 }
 
-// `account_tokens` has two foreign keys to `users` (`user_id` and
-// `created_by`), so `print-schema` omits the pair; the default join is on
-// `user_id`. See the note in `repositories/mod.rs`.
-diesel::joinable!(account_tokens -> users (user_id));
 diesel::joinable!(goal_milestones -> goals (goal_id));
 diesel::joinable!(goal_milestones -> milestones (milestone_id));
 diesel::joinable!(goals -> users (owner_id));
@@ -155,6 +162,8 @@ diesel::joinable!(milestones -> users (owner_id));
 diesel::joinable!(progress_snapshots -> goals (goal_id));
 diesel::joinable!(progress_snapshots -> milestones (milestone_id));
 diesel::joinable!(sessions -> users (user_id));
+diesel::joinable!(task_comments -> tasks (task_id));
+diesel::joinable!(task_comments -> users (author_id));
 diesel::joinable!(tasks -> milestones (milestone_id));
 diesel::joinable!(tasks -> users (assignee_id));
 diesel::joinable!(user_identities -> users (user_id));
@@ -168,6 +177,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     rate_limit_counters,
     sessions,
     sso_group_role_rules,
+    task_comments,
     task_relations,
     tasks,
     user_identities,

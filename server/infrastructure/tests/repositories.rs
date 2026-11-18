@@ -6,19 +6,20 @@
 use application::pagination::PageRequest;
 use application::ports::{
     AccessChange, GoalListFilter, GoalMilestoneRepository, GoalRepository, MilestoneListFilter,
-    MilestoneRepository, ProgressSnapshotRepository, RepositoryError, TaskCounts, TaskListFilter,
-    TaskRelationCreateError, TaskRelationRepository, TaskRepository, UserIdentityRepository,
-    UserRepository,
+    MilestoneRepository, ProgressSnapshotRepository, RepositoryError, TaskCommentRepository,
+    TaskCounts, TaskListFilter, TaskRelationCreateError, TaskRelationRepository, TaskRepository,
+    UserIdentityRepository, UserRepository,
 };
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
+use diesel::result::DatabaseErrorKind;
 use std::collections::HashMap;
 
 use domain::{
     Goal, GoalId, GoalMilestone, Milestone, MilestoneId, ProgressSnapshot, ProgressTarget, Role,
-    Status, StatusSource, Task, TaskId, TaskRelation, TaskRelationId, TaskRelationType, TaskStatus,
-    User, UserId, UserIdentity, UserSummary,
+    Status, StatusSource, Task, TaskComment, TaskCommentId, TaskId, TaskRelation, TaskRelationId,
+    TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserSummary,
 };
 
 /// `Utc::now()` has nanosecond precision but Postgres `timestamptz` only
@@ -31,8 +32,9 @@ use infrastructure::db::PgPool;
 use infrastructure::repositories::mapping::{TaskRelationRow, task_relation_from_row};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
-    PostgresProgressSnapshotRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
-    PostgresUserIdentityRepository, PostgresUserRepository,
+    PostgresProgressSnapshotRepository, PostgresTaskCommentRepository,
+    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserIdentityRepository,
+    PostgresUserRepository,
 };
 use infrastructure::schema::{goals, milestones, task_relations, tasks};
 use uuid::Uuid;
@@ -4003,4 +4005,231 @@ async fn role_managed_by_sso_change_writes_role_and_flag_under_the_lock() {
             .execute(&mut conn)
             .unwrap();
     }
+}
+
+/// A task comment with a fresh id and fixed timestamps (exact to the second,
+/// so Postgres round-trips them).
+fn test_comment(task_id: TaskId, body: &str) -> TaskComment {
+    let now = at(1, 1);
+    TaskComment {
+        id: TaskCommentId(Uuid::new_v4()),
+        task_id,
+        author_id: None,
+        body: body.to_owned(),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// D20: comments round-trip — create then find; `set_body` changes only the
+/// body and `updated_at` (a repeated body writes nothing); delete is a hard
+/// delete; deleting the task cascades the comments; deleting the author via
+/// direct SQL NULLs the reference and keeps the comment.
+#[tokio::test]
+async fn task_comment_round_trip() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskCommentRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool.clone());
+    let users = PostgresUserRepository::new(pool.clone());
+
+    // Any user may be an author; the repository only stores the reference.
+    let now = now();
+    let user = User {
+        id: UserId::new(),
+        email: format!("comment-author-{}@example.com", Uuid::new_v4()),
+        password_hash: None,
+        display_name: "Comment author test user".into(),
+        role: Role::Staff,
+        deactivated_at: None,
+        role_managed_by_sso: false,
+        sso_role_exempt: false,
+        created_at: now,
+        updated_at: now,
+    };
+    users.create(user.clone()).await.unwrap();
+
+    let task = test_task(None);
+    tasks.create(task.clone()).await.unwrap();
+
+    // create then find round-trips every field.
+    let mut comment = test_comment(task.id, "First pass notes.");
+    comment.author_id = Some(user.id);
+    repo.create(comment.clone()).await.unwrap();
+    assert_eq!(
+        repo.find_by_id(comment.id).await.unwrap(),
+        Some(comment.clone())
+    );
+
+    // set_body changes only the body and updated_at...
+    let edited = repo
+        .set_body(comment.id, "Edited notes.".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(edited.body, "Edited notes.");
+    assert_eq!(edited.task_id, task.id);
+    assert_eq!(edited.author_id, Some(user.id));
+    assert_eq!(edited.created_at, at(1, 1));
+    assert!(edited.updated_at > at(1, 1));
+    // ...and the stored row agrees with what the setter returned.
+    assert_eq!(
+        repo.find_by_id(comment.id).await.unwrap(),
+        Some(edited.clone())
+    );
+
+    // A repeated body writes nothing: the stored row is identical,
+    // updated_at included (D20).
+    let same = repo
+        .set_body(comment.id, "Edited notes.".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(same, edited);
+
+    // Unknown ids are a typed NotFound for set_body and delete.
+    assert!(matches!(
+        repo.set_body(TaskCommentId::new(), "x".to_owned()).await,
+        Err(RepositoryError::NotFound)
+    ));
+    assert!(matches!(
+        repo.delete(TaskCommentId::new()).await,
+        Err(RepositoryError::NotFound)
+    ));
+
+    // Delete is a hard delete.
+    repo.delete(comment.id).await.unwrap();
+    assert_eq!(repo.find_by_id(comment.id).await.unwrap(), None);
+
+    // Deleting the author via direct SQL NULLs the reference and keeps the
+    // comment (ON DELETE SET NULL, D20).
+    let mut second = test_comment(task.id, "Survives the author.");
+    second.author_id = Some(user.id);
+    repo.create(second.clone()).await.unwrap();
+    {
+        let mut conn = pool.get().expect("pool connection");
+        diesel::sql_query(format!("DELETE FROM users WHERE id = '{}'", user.id.0))
+            .execute(&mut conn)
+            .unwrap();
+    }
+    second.author_id = None;
+    assert_eq!(
+        repo.find_by_id(second.id).await.unwrap().as_ref(),
+        Some(&second)
+    );
+
+    // Deleting the task cascades its comments (ON DELETE CASCADE).
+    tasks.delete(task.id).await.unwrap();
+    assert_eq!(repo.find_by_id(second.id).await.unwrap(), None);
+}
+
+/// D20: a task's thread reads oldest first (created_at, then id), and the
+/// page total counts only that task's comments.
+#[tokio::test]
+async fn task_comment_list_page_orders_oldest_first_with_an_id_tie_break() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresTaskCommentRepository::new(pool.clone());
+    let tasks = PostgresTaskRepository::new(pool.clone());
+
+    let task_a = test_task(None);
+    let task_b = test_task(None);
+    tasks.create(task_a.clone()).await.unwrap();
+    tasks.create(task_b.clone()).await.unwrap();
+
+    // Six comments on task A, all with the same created_at and inserted in a
+    // shuffled order, so only the (created_at, id) order can explain the
+    // answer; one comment on task B at the same instant.
+    let base = Uuid::new_v4().as_u128();
+    for offset in [5u128, 3, 1, 4, 0, 2] {
+        let mut comment = test_comment(task_a.id, &format!("comment {offset}"));
+        comment.id = TaskCommentId(Uuid::from_u128(base + offset));
+        repo.create(comment).await.unwrap();
+    }
+    repo.create(test_comment(task_b.id, "other task"))
+        .await
+        .unwrap();
+
+    // A paging walk over the identical timestamps yields every row exactly
+    // once, in id order...
+    let mut seen = Vec::new();
+    for offset in [0i64, 3, 6] {
+        let page = repo
+            .list_page_for_task(task_a.id, &PageRequest::new(Some(3), Some(offset)).unwrap())
+            .await
+            .unwrap();
+        // ...and the total counts only task A's comments, ignoring paging.
+        assert_eq!(page.total, 6);
+        seen.extend(page.items.iter().map(|comment| comment.id.0.as_u128()));
+    }
+    assert_eq!(seen, (0..6).map(|i| base + i).collect::<Vec<_>>());
+
+    // An offset past the end is an empty page with the total intact...
+    let page = repo
+        .list_page_for_task(task_a.id, &PageRequest::new(None, Some(100)).unwrap())
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(page.total, 6);
+
+    // ...another task's thread is independent, and an unknown task is an
+    // empty page, not an error (D16).
+    let page = repo
+        .list_page_for_task(task_b.id, &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(page.total, 1);
+    let page = repo
+        .list_page_for_task(TaskId::new(), &PageRequest::new(None, None).unwrap())
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(page.total, 0);
+
+    // Deleting the tasks cascades their comments.
+    tasks.delete(task_a.id).await.unwrap();
+    tasks.delete(task_b.id).await.unwrap();
+}
+
+/// D20: the body rule holds at the database level too — a blank body (any
+/// whitespace, including newlines) and a 4001-character body are rejected by
+/// the CHECK constraint even when inserted directly, while exactly 4000
+/// characters is accepted.
+#[tokio::test]
+async fn task_comment_body_check_rejects_blank_and_overlong_bodies() {
+    let Some(pool) = pool() else { return };
+    let mut conn = pool.get().expect("pool connection");
+
+    let task_id = Uuid::new_v4();
+    diesel::sql_query(format!(
+        "INSERT INTO tasks (id, title, status, created_at, updated_at) \
+         VALUES ('{task_id}', 't', 'backlog', now(), now())"
+    ))
+    .execute(&mut conn)
+    .unwrap();
+
+    let mut insert = |id: Uuid, body_sql: &str| {
+        diesel::sql_query(format!(
+            "INSERT INTO task_comments (id, task_id, body, created_at, updated_at) \
+             VALUES ('{id}', '{task_id}', {body_sql}, now(), now())"
+        ))
+        .execute(&mut conn)
+    };
+
+    // Blank after trimming whitespace, including newlines and tabs.
+    let err = insert(Uuid::new_v4(), "E'   \\n\\t  '").unwrap_err();
+    assert!(matches!(
+        err,
+        diesel::result::Error::DatabaseError(DatabaseErrorKind::CheckViolation, _)
+    ));
+    // One character over the limit.
+    let err = insert(Uuid::new_v4(), &format!("'{}'", "a".repeat(4001))).unwrap_err();
+    assert!(matches!(
+        err,
+        diesel::result::Error::DatabaseError(DatabaseErrorKind::CheckViolation, _)
+    ));
+    // Exactly 4000 characters, with padding that trims away, is accepted.
+    insert(Uuid::new_v4(), &format!("' {} \n'", "a".repeat(4000)))
+        .expect("a 4000-character body satisfies the CHECK");
+
+    // Cleanup: deleting the task cascades the one stored comment.
+    diesel::sql_query(format!("DELETE FROM tasks WHERE id = '{task_id}'"))
+        .execute(&mut conn)
+        .unwrap();
 }

@@ -22,6 +22,7 @@ pub mod sso_roles;
 pub mod sso_rules;
 pub mod status_computation;
 pub mod status_override;
+pub mod task_comments;
 pub mod task_list;
 pub mod task_relations;
 pub mod task_service;

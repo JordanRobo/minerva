@@ -13,6 +13,7 @@ use application::goal_milestone_links::GoalMilestoneLinkError;
 use application::milestone_service::MilestoneServiceError;
 use application::ports::RepositoryError;
 use application::status_override::StatusOverrideError;
+use application::task_comments::TaskCommentError;
 use application::task_relations::TaskRelationError;
 use application::task_service::TaskServiceError;
 use application::task_status::TaskStatusError;
@@ -131,6 +132,17 @@ impl ApiError {
     pub fn relation_not_found(message: impl Into<String>) -> Self {
         Self {
             code: "relation_not_found".to_owned(),
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    /// 404 — no comment with the referenced id exists on the task named in
+    /// the path. A comment that lives on another task is reported the same
+    /// way, so its existence is not leaked (D20).
+    pub fn comment_not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: "comment_not_found".to_owned(),
             message: message.into(),
             retry_after: None,
         }
@@ -273,6 +285,7 @@ impl ResponseError for ApiError {
             | "goal_not_found"
             | "milestone_not_found"
             | "relation_not_found"
+            | "comment_not_found"
             | "user_not_found" => http::StatusCode::NOT_FOUND,
             "rate_limited" => http::StatusCode::TOO_MANY_REQUESTS,
             "conflict"
@@ -420,5 +433,21 @@ pub fn task_relation_error_response(error: TaskRelationError) -> ApiError {
             ApiError::reverse_relation_exists("the opposite blocking relationship already exists")
         }
         TaskRelationError::Repository(err) => repo_error_response(err),
+    }
+}
+
+/// Translate a [`TaskCommentError`] into the [`ApiError`] it renders as:
+/// a missing task -> 404 (the generic `not_found` code the other task routes
+/// answer with, the message says which id was missing), a missing or
+/// off-task comment -> 404 `comment_not_found`, an ownership refusal -> 403,
+/// a blank or over-long body -> 400 (the same validation code the SSO
+/// group-rule name uses). Repository failures map like any other.
+pub fn task_comment_error_response(error: TaskCommentError) -> ApiError {
+    match error {
+        TaskCommentError::TaskNotFound => ApiError::task_not_found(error.to_string()),
+        TaskCommentError::CommentNotFound => ApiError::comment_not_found(error.to_string()),
+        TaskCommentError::InvalidBody(_) => ApiError::bad_request(error.to_string()),
+        TaskCommentError::Forbidden => ApiError::forbidden(),
+        TaskCommentError::Repository(err) => repo_error_response(err),
     }
 }
