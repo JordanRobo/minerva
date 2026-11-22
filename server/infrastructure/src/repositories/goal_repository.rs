@@ -70,6 +70,20 @@ impl GoalRepository for PostgresGoalRepository {
         .await
     }
 
+    async fn find_by_ids(&self, ids: &[GoalId]) -> Result<Vec<Goal>, RepositoryError> {
+        let pool = self.pool.clone();
+        let id_values: Vec<Uuid> = ids.iter().map(|id| id.0).collect();
+        run_on_postgres(pool, move |conn| {
+            let rows: Vec<GoalRow> = goals::table
+                .filter(goals::id.eq_any(id_values))
+                .order_by(goals::id.asc())
+                .load(conn)
+                .map_err(map_diesel_error)?;
+            rows.into_iter().map(goal_from_row).collect()
+        })
+        .await
+    }
+
     async fn list(&self) -> Result<Vec<Goal>, RepositoryError> {
         let pool = self.pool.clone();
         run_on_postgres(pool, |conn| {

@@ -11,8 +11,8 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::error::ApiError;
 use crate::openapi::ApiDoc;
 use crate::{
-    account_links, auth, debug, goal_milestones, goals, invites, milestones, people, redirect,
-    sso_rules, task_comments, task_relations, tasks, users,
+    account_links, auth, dashboard, debug, goal_milestones, goals, invites, milestones, people,
+    redirect, sso_rules, task_comments, task_relations, tasks, users,
 };
 
 async fn health() -> HttpResponse {
@@ -159,6 +159,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 // The people picker (roadmap 3.11, D17): active accounts any
                 // signed-in role may read.
                 .route("/people", web::get().to(people::list_people))
+                // Dashboard (roadmap 3.15, D22): read-only status summaries,
+                // trends and the timeline for any signed-in role.
+                .route("/dashboard/summary", web::get().to(dashboard::summary))
+                .route("/dashboard/trends", web::get().to(dashboard::trends))
+                .route("/dashboard/timeline", web::get().to(dashboard::timeline))
                 .route("/users/{id}/role", web::put().to(users::change_user_role))
                 .route(
                     "/users/{id}/deactivate",

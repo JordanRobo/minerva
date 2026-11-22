@@ -5,21 +5,23 @@
 
 use application::pagination::PageRequest;
 use application::ports::{
-    AccessChange, GoalListFilter, GoalMilestoneRepository, GoalRepository, MilestoneListFilter,
-    MilestoneRepository, ProgressSnapshotRepository, RepositoryError, TaskCommentRepository,
+    AccessChange, DashboardEntityId, DashboardKind, DashboardRepository, GoalListFilter,
+    GoalMilestoneRepository, GoalRepository, MilestoneListFilter, MilestoneRepository,
+    ProgressSnapshotRepository, RepositoryError, StatusCount, StatusRollup, TaskCommentRepository,
     TaskCounts, TaskListFilter, TaskRelationCreateError, TaskRelationRepository, TaskRepository,
-    UserIdentityRepository, UserRepository,
+    TimelineFilter, TrendRow, UserIdentityRepository, UserRepository,
 };
-use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::result::DatabaseErrorKind;
 use std::collections::HashMap;
 
 use domain::{
-    Goal, GoalId, GoalMilestone, Milestone, MilestoneId, ProgressSnapshot, ProgressTarget, Role,
-    Status, StatusSource, Task, TaskComment, TaskCommentId, TaskId, TaskRelation, TaskRelationId,
-    TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserSummary,
+    Goal, GoalId, GoalMilestone, Milestone, MilestoneId, NewSnapshot, ProgressSnapshotId,
+    ProgressTarget, Role, SnapshotReason, Status, StatusSource, Task, TaskComment, TaskCommentId,
+    TaskId, TaskRelation, TaskRelationId, TaskRelationType, TaskStatus, User, UserId, UserIdentity,
+    UserSummary,
 };
 
 /// `Utc::now()` has nanosecond precision but Postgres `timestamptz` only
@@ -31,8 +33,8 @@ fn now() -> DateTime<Utc> {
 use infrastructure::db::PgPool;
 use infrastructure::repositories::mapping::{TaskRelationRow, task_relation_from_row};
 use infrastructure::repositories::{
-    PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
-    PostgresProgressSnapshotRepository, PostgresTaskCommentRepository,
+    PostgresDashboardRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
+    PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresTaskCommentRepository,
     PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserIdentityRepository,
     PostgresUserRepository,
 };
@@ -3423,6 +3425,32 @@ struct Exists {
     exists: bool,
 }
 
+/// One backfilled legacy snapshot row, read back by raw SQL.
+#[derive(diesel::QueryableByName, PartialEq, Debug)]
+struct SnapshotBackfillRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    reason: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    status_source: String,
+    #[diesel(sql_type = diesel::sql_types::Date)]
+    snapshot_date: NaiveDate,
+    #[diesel(sql_type = diesel::sql_types::Int2)]
+    percent_complete: i16,
+}
+
+/// A legacy snapshot row read back after the revert: the columns the down
+/// migration keeps or recreates, proving the rows survive it. The dropped
+/// `note` cannot come back — a destructive revert drops its data.
+#[derive(diesel::QueryableByName, PartialEq, Debug)]
+struct SnapshotRevertedRow {
+    #[diesel(sql_type = diesel::sql_types::Timestamptz)]
+    recorded_at: DateTime<Utc>,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    status: String,
+    #[diesel(sql_type = diesel::sql_types::Int2)]
+    percent_complete: i16,
+}
+
 fn constraint_exists(conn: &mut diesel::PgConnection, name: &str) -> bool {
     let Exists { exists } = diesel::sql_query(format!(
         "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{name}') AS exists"
@@ -3438,6 +3466,16 @@ fn index_exists(conn: &mut diesel::PgConnection, name: &str) -> bool {
     ))
     .get_result(conn)
     .expect("could not probe pg_indexes");
+    exists
+}
+
+fn column_exists(conn: &mut diesel::PgConnection, table: &str, column: &str) -> bool {
+    let Exists { exists } = diesel::sql_query(format!(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_name = '{table}' AND column_name = '{column}') AS exists"
+    ))
+    .get_result(conn)
+    .expect("could not probe information_schema.columns");
     exists
 }
 
@@ -3654,52 +3692,335 @@ async fn progress_snapshot_repository_round_trip() {
     goals.create(goal.clone()).await.unwrap();
     milestones.create(milestone.clone()).await.unwrap();
 
-    // Two snapshots for the goal, a second one recorded later, so the
-    // listing order (oldest-to-newest) is observable.
-    let first = ProgressSnapshot::new(
+    // Two of the goal's snapshots share a taken_at, so the listing order is
+    // taken_at first and id second: the pinned ids put 1 before 3.
+    let mut first = NewSnapshot::new(
         ProgressTarget::Goal(goal.id),
-        now(),
         Status::OnTrack,
-        42,
+        StatusSource::Computed,
+        at(1, 15),
+        SnapshotReason::ManualChange,
         None,
     )
     .unwrap();
-    let second = ProgressSnapshot::new(
+    first.id = ProgressSnapshotId(Uuid::from_u128(1));
+    let mut second = NewSnapshot::new(
         ProgressTarget::Goal(goal.id),
-        first.recorded_at + Duration::seconds(1),
         Status::AtRisk,
-        75,
-        Some("slipping".into()),
-    )
-    .unwrap();
-    repo.create(first.clone()).await.unwrap();
-    repo.create(second.clone()).await.unwrap();
-
-    let for_goal = repo
-        .list_for_target(ProgressTarget::Goal(goal.id))
-        .await
-        .unwrap();
-    assert_eq!(for_goal, vec![first, second]);
-
-    // Snapshots of one target never leak into another target's listing.
-    let for_milestone = ProgressSnapshot::new(
-        ProgressTarget::Milestone(milestone.id),
-        now(),
-        Status::Complete,
-        100,
+        StatusSource::Computed,
+        at(1, 16),
+        SnapshotReason::Daily,
         None,
     )
     .unwrap();
-    repo.create(for_milestone.clone()).await.unwrap();
+    second.id = ProgressSnapshotId(Uuid::from_u128(2));
+    let mut third = NewSnapshot::new(
+        ProgressTarget::Goal(goal.id),
+        Status::OffTrack,
+        StatusSource::ManualOverride,
+        at(1, 15),
+        SnapshotReason::Daily,
+        None,
+    )
+    .unwrap();
+    third.id = ProgressSnapshotId(Uuid::from_u128(3));
+
+    let stored_first = repo.record(first).await.unwrap();
+    let stored_second = repo.record(second).await.unwrap();
+    let stored_third = repo.record(third).await.unwrap();
     assert_eq!(
-        repo.list_for_target(ProgressTarget::Milestone(milestone.id))
+        repo.list_for_goal(goal.id).await.unwrap(),
+        vec![stored_first, stored_third, stored_second]
+    );
+
+    // A milestone snapshot carries the 0-100 percentage the API reports; a
+    // goal's is None. One target's snapshots never leak into the other's.
+    let for_milestone = NewSnapshot::new(
+        ProgressTarget::Milestone(milestone.id),
+        Status::Complete,
+        StatusSource::Computed,
+        at(1, 17),
+        SnapshotReason::ManualChange,
+        Some(100),
+    )
+    .unwrap();
+    let stored_milestone = repo.record(for_milestone).await.unwrap();
+    assert_eq!(stored_milestone.percent_complete(), Some(100));
+    assert_eq!(repo.list_for_goal(goal.id).await.unwrap().len(), 3);
+    assert_eq!(
+        repo.list_for_milestone(milestone.id).await.unwrap(),
+        vec![stored_milestone]
+    );
+
+    // Deleting the entities cascades their snapshot history.
+    goals.delete(goal.id).await.unwrap();
+    milestones.delete(milestone.id).await.unwrap();
+    assert!(repo.list_for_goal(goal.id).await.unwrap().is_empty());
+    assert!(
+        repo.list_for_milestone(milestone.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn record_daily_batch_inserts_once_per_entity_per_day() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresProgressSnapshotRepository::new(pool.clone());
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+
+    let goal = test_goal();
+    let milestone = test_milestone();
+    goals.create(goal.clone()).await.unwrap();
+    milestones.create(milestone.clone()).await.unwrap();
+
+    fn daily(target: ProgressTarget, taken_at: DateTime<Utc>) -> NewSnapshot {
+        NewSnapshot::new(
+            target,
+            Status::OnTrack,
+            StatusSource::Computed,
+            taken_at,
+            SnapshotReason::Daily,
+            None,
+        )
+        .unwrap()
+    }
+
+    let goal_row = daily(ProgressTarget::Goal(goal.id), at(3, 10));
+    let milestone_row = daily(ProgressTarget::Milestone(milestone.id), at(3, 10));
+
+    // One statement for a mixed batch: one row per entity kind.
+    assert_eq!(
+        repo.record_daily_batch(&[goal_row.clone(), milestone_row.clone()])
             .await
             .unwrap(),
-        vec![for_milestone]
+        2
     );
+    // The daily unique index: the same entities on the same day insert
+    // nothing, even re-sent as a whole batch...
+    assert_eq!(
+        repo.record_daily_batch(&[goal_row.clone(), milestone_row.clone()])
+            .await
+            .unwrap(),
+        0
+    );
+    // ...while a new day for one of them still inserts, in a mixed batch.
+    let next_day = daily(ProgressTarget::Goal(goal.id), at(3, 11));
+    assert_eq!(
+        repo.record_daily_batch(&[next_day, goal_row])
+            .await
+            .unwrap(),
+        1
+    );
+    // An empty batch makes no database call and reports zero.
+    assert_eq!(repo.record_daily_batch(&[]).await.unwrap(), 0);
 
     goals.delete(goal.id).await.unwrap();
     milestones.delete(milestone.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn manual_change_snapshots_never_block_the_daily_row() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresProgressSnapshotRepository::new(pool.clone());
+    let goals = PostgresGoalRepository::new(pool);
+
+    let goal = test_goal();
+    goals.create(goal.clone()).await.unwrap();
+
+    fn snapshot(
+        target: ProgressTarget,
+        taken_at: DateTime<Utc>,
+        reason: SnapshotReason,
+    ) -> NewSnapshot {
+        NewSnapshot::new(
+            target,
+            Status::OnTrack,
+            StatusSource::Computed,
+            taken_at,
+            reason,
+            None,
+        )
+        .unwrap()
+    }
+
+    let target = ProgressTarget::Goal(goal.id);
+    // Two manual-change snapshots for the same day are both kept — they are
+    // never unique-constrained...
+    repo.record(snapshot(target, at(4, 1), SnapshotReason::ManualChange))
+        .await
+        .unwrap();
+    repo.record(snapshot(target, at(4, 2), SnapshotReason::ManualChange))
+        .await
+        .unwrap();
+    // ...so the day's daily row still lands alongside them...
+    assert_eq!(
+        repo.record_daily_batch(&[snapshot(target, at(4, 3), SnapshotReason::Daily)])
+            .await
+            .unwrap(),
+        1
+    );
+    // ...and a manual change after the daily one is kept too.
+    repo.record(snapshot(target, at(4, 4), SnapshotReason::ManualChange))
+        .await
+        .unwrap();
+
+    let listed = repo.list_for_goal(goal.id).await.unwrap();
+    assert_eq!(
+        listed.iter().map(|s| s.taken_at).collect::<Vec<_>>(),
+        vec![at(4, 1), at(4, 2), at(4, 3), at(4, 4)]
+    );
+
+    goals.delete(goal.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn entity_ids_missing_daily_lists_only_entities_without_a_daily_row() {
+    let Some(pool) = pool() else { return };
+    let repo = PostgresProgressSnapshotRepository::new(pool.clone());
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let milestones = PostgresMilestoneRepository::new(pool);
+
+    // A random base keeps the fixed ids clear of the other tests' rows.
+    let base = Uuid::new_v4().as_u128();
+    let g1 = goal_on(base + 1, None, at(5, 1));
+    let g2 = goal_on(base + 2, None, at(5, 1));
+    let g3 = goal_on(base + 3, None, at(5, 1));
+    let g4 = goal_on(base + 4, None, at(5, 1));
+    for goal in [&g1, &g2, &g3, &g4] {
+        goals.create(goal.clone()).await.unwrap();
+    }
+    let m1 = milestone_on(base + 10, None, at(5, 1));
+    let m2 = milestone_on(base + 11, None, at(5, 1));
+    for milestone in [&m1, &m2] {
+        milestones.create(milestone.clone()).await.unwrap();
+    }
+
+    fn snapshot(
+        target: ProgressTarget,
+        taken_at: DateTime<Utc>,
+        reason: SnapshotReason,
+    ) -> NewSnapshot {
+        NewSnapshot::new(
+            target,
+            Status::OnTrack,
+            StatusSource::Computed,
+            taken_at,
+            reason,
+            None,
+        )
+        .unwrap()
+    }
+
+    // g1 has its daily row for the day; g2 only a manual one; g3 nothing;
+    // g4 a daily row for another day. m1 daily, m2 manual-only.
+    repo.record(snapshot(
+        ProgressTarget::Goal(g1.id),
+        at(5, 2),
+        SnapshotReason::Daily,
+    ))
+    .await
+    .unwrap();
+    repo.record(snapshot(
+        ProgressTarget::Goal(g2.id),
+        at(5, 2),
+        SnapshotReason::ManualChange,
+    ))
+    .await
+    .unwrap();
+    repo.record(snapshot(
+        ProgressTarget::Goal(g4.id),
+        at(5, 1),
+        SnapshotReason::Daily,
+    ))
+    .await
+    .unwrap();
+    repo.record(snapshot(
+        ProgressTarget::Milestone(m1.id),
+        at(5, 2),
+        SnapshotReason::Daily,
+    ))
+    .await
+    .unwrap();
+    repo.record(snapshot(
+        ProgressTarget::Milestone(m2.id),
+        at(5, 2),
+        SnapshotReason::ManualChange,
+    ))
+    .await
+    .unwrap();
+
+    let (missing_goals, missing_milestones) =
+        repo.entity_ids_missing_daily(date(5, 2)).await.unwrap();
+
+    // The work list covers every entity in the database, so rows from other
+    // tests may appear alongside; assert this test's own entities instead. A
+    // daily row for the day excludes (g1, m1); a manual-only one does not
+    // (g2, m2); neither does a daily row for another day (g4); nothing at all
+    // includes (g3).
+    assert!(!missing_goals.contains(&g1.id));
+    assert!(missing_goals.contains(&g2.id));
+    assert!(missing_goals.contains(&g3.id));
+    assert!(missing_goals.contains(&g4.id));
+    assert!(!missing_milestones.contains(&m1.id));
+    assert!(missing_milestones.contains(&m2.id));
+
+    // Each list is in id order, as the sweep expects.
+    let mut ordered = missing_goals.clone();
+    ordered.sort_by_key(|id| id.0);
+    assert_eq!(missing_goals, ordered);
+    let mut ordered = missing_milestones.clone();
+    ordered.sort_by_key(|id| id.0);
+    assert_eq!(missing_milestones, ordered);
+
+    for goal in [&g1, &g2, &g3, &g4] {
+        goals.delete(goal.id).await.unwrap();
+    }
+    milestones.delete(m1.id).await.unwrap();
+    milestones.delete(m2.id).await.unwrap();
+}
+
+/// D5: the status and reason rules hold at the database level too — unknown
+/// values are rejected by the CHECK constraints even when inserted directly,
+/// and a goal snapshot's NULL percent complete is accepted now.
+#[tokio::test]
+async fn progress_snapshot_checks_reject_unknown_status_and_reason() {
+    let Some(pool) = pool() else { return };
+    let goals = PostgresGoalRepository::new(pool.clone());
+    let goal = test_goal();
+    goals.create(goal.clone()).await.unwrap();
+
+    let mut conn = pool.get().expect("pool connection");
+    let id = Uuid::new_v4();
+    let goal_id = goal.id.0;
+    let mut insert = |status: &str, reason: &str| {
+        diesel::sql_query(format!(
+            "INSERT INTO progress_snapshots \
+             (id, goal_id, taken_at, snapshot_date, status, status_source, reason, percent_complete) \
+             VALUES ('{id}', '{goal_id}', now(), (now() AT TIME ZONE 'UTC')::date, {status}, 'computed', {reason}, NULL)"
+        ))
+        .execute(&mut conn)
+    };
+    // An unknown status...
+    let err = insert("'bogus'", "'daily'").unwrap_err();
+    assert!(matches!(
+        err,
+        diesel::result::Error::DatabaseError(DatabaseErrorKind::CheckViolation, _)
+    ));
+    // ...and an unknown reason are rejected.
+    let err = insert("'on_track'", "'weekly'").unwrap_err();
+    assert!(matches!(
+        err,
+        diesel::result::Error::DatabaseError(DatabaseErrorKind::CheckViolation, _)
+    ));
+    // A goal row with a NULL percent complete is accepted.
+    insert("'on_track'", "'manual_change'")
+        .expect("a goal snapshot may leave percent_complete NULL");
+
+    drop(conn);
+    goals.delete(goal.id).await.unwrap();
 }
 
 #[tokio::test]
@@ -4232,4 +4553,976 @@ async fn task_comment_body_check_rejects_blank_and_overlong_bodies() {
     diesel::sql_query(format!("DELETE FROM tasks WHERE id = '{task_id}'"))
         .execute(&mut conn)
         .unwrap();
+}
+
+#[tokio::test]
+async fn progress_snapshot_migration_backfills_legacy_rows_and_reverts() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip Postgres tests in CI");
+        }
+        return;
+    };
+
+    // This test drops and re-adds the 3.14 columns, so it runs on a scratch
+    // database instead of sharing the schema with the other (parallel) tests.
+    // A scratch database left behind by a crashed run is dropped again here.
+    let db_name = "minerva_progress_snapshot_migration_test";
+    let admin_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create admin test pool");
+    {
+        let mut conn = admin_pool.get().expect("admin pool connects");
+        conn.batch_execute(format!("DROP DATABASE IF EXISTS {db_name}").as_str())
+            .expect("could not drop a stale scratch database");
+        conn.batch_execute(format!("CREATE DATABASE {db_name}").as_str())
+            .expect("could not create the scratch database");
+    }
+
+    let slash = url.rfind('/').expect("DATABASE_URL names a database");
+    let scratch_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(
+            diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(
+                url[..slash + 1].to_owned() + db_name,
+            ),
+        )
+        .expect("could not create scratch test pool");
+
+    // Fresh database: the embedded migrations apply cleanly, including the
+    // 3.14 one.
+    infrastructure::migrations::run_migrations(&scratch_pool)
+        .expect("migrations failed on a fresh database");
+
+    {
+        let mut conn = scratch_pool.get().expect("scratch pool connects");
+        // Back to the schema this migration started from...
+        conn.batch_execute(include_str!(
+            "../../migrations/20261119000001_reshape_progress_snapshots/down.sql"
+        ))
+        .expect("could not reset to the pre-migration schema");
+
+        // ...with legacy rows: one per entity kind, in the old shape.
+        let goal_id = Uuid::new_v4();
+        let milestone_id = Uuid::new_v4();
+        diesel::insert_into(goals::table)
+            .values((
+                goals::id.eq(goal_id),
+                goals::title.eq("Migration test goal"),
+                goals::status.eq("on_track"),
+                goals::status_source.eq("computed"),
+                goals::created_at.eq(&at(1, 1)),
+                goals::updated_at.eq(&at(1, 1)),
+            ))
+            .execute(&mut conn)
+            .expect("could not seed a goal");
+        diesel::insert_into(milestones::table)
+            .values((
+                milestones::id.eq(milestone_id),
+                milestones::title.eq("Migration test milestone"),
+                milestones::status.eq("on_track"),
+                milestones::status_source.eq("computed"),
+                milestones::created_at.eq(&at(1, 1)),
+                milestones::updated_at.eq(&at(1, 1)),
+            ))
+            .execute(&mut conn)
+            .expect("could not seed a milestone");
+
+        let legacy_goal = Uuid::new_v4();
+        conn.batch_execute(
+            format!(
+                "INSERT INTO progress_snapshots \
+                 (id, goal_id, recorded_at, status, percent_complete, note) \
+                 VALUES ('{legacy_goal}', '{goal_id}', '2026-01-15T23:30:00Z', 'on_track', 42, 'legacy note')"
+            )
+            .as_str(),
+        )
+        .expect("could not seed a legacy goal snapshot");
+        let legacy_milestone = Uuid::new_v4();
+        conn.batch_execute(
+            format!(
+                "INSERT INTO progress_snapshots \
+                 (id, milestone_id, recorded_at, status, percent_complete, note) \
+                 VALUES ('{legacy_milestone}', '{milestone_id}', '2026-01-16T00:30:00Z', 'complete', 100, NULL)"
+            )
+            .as_str(),
+        )
+        .expect("could not seed a legacy milestone snapshot");
+
+        // The migration applies over the legacy data and backfills it...
+        conn.batch_execute(include_str!(
+            "../../migrations/20261119000001_reshape_progress_snapshots/up.sql"
+        ))
+        .expect("up migration failed on a database with legacy rows");
+
+        // ...as manual-change rows of system-computed status, dated by the
+        // UTC calendar day of taken_at (23:30Z stays on the 15th).
+        let row: SnapshotBackfillRow = diesel::sql_query(format!(
+            "SELECT reason, status_source, snapshot_date, percent_complete \
+             FROM progress_snapshots WHERE id = '{legacy_goal}'"
+        ))
+        .get_result(&mut conn)
+        .expect("could not read the backfilled goal row");
+        assert_eq!(
+            row,
+            SnapshotBackfillRow {
+                reason: "manual_change".into(),
+                status_source: "computed".into(),
+                snapshot_date: date(1, 15),
+                percent_complete: 42,
+            }
+        );
+        let row: SnapshotBackfillRow = diesel::sql_query(format!(
+            "SELECT reason, status_source, snapshot_date, percent_complete \
+             FROM progress_snapshots WHERE id = '{legacy_milestone}'"
+        ))
+        .get_result(&mut conn)
+        .expect("could not read the backfilled milestone row");
+        assert_eq!(
+            row,
+            SnapshotBackfillRow {
+                reason: "manual_change".into(),
+                status_source: "computed".into(),
+                snapshot_date: date(1, 16),
+                percent_complete: 100,
+            }
+        );
+
+        // The new indexes are in place and the old single-column ones gone.
+        assert!(index_exists(&mut conn, "idx_progress_snapshots_daily_goal"));
+        assert!(index_exists(
+            &mut conn,
+            "idx_progress_snapshots_daily_milestone"
+        ));
+        assert!(index_exists(
+            &mut conn,
+            "idx_progress_snapshots_goal_taken_at"
+        ));
+        assert!(index_exists(
+            &mut conn,
+            "idx_progress_snapshots_milestone_taken_at"
+        ));
+        assert!(index_exists(
+            &mut conn,
+            "idx_progress_snapshots_snapshot_date"
+        ));
+        assert!(!index_exists(&mut conn, "idx_progress_snapshots_goal_id"));
+        assert!(!index_exists(
+            &mut conn,
+            "idx_progress_snapshots_milestone_id"
+        ));
+
+        // And the migration reverts cleanly over the backfilled rows.
+        conn.batch_execute(include_str!(
+            "../../migrations/20261119000001_reshape_progress_snapshots/down.sql"
+        ))
+        .expect("down migration failed");
+        assert!(column_exists(
+            &mut conn,
+            "progress_snapshots",
+            "recorded_at"
+        ));
+        assert!(column_exists(&mut conn, "progress_snapshots", "note"));
+        assert!(!column_exists(&mut conn, "progress_snapshots", "taken_at"));
+        assert!(!column_exists(
+            &mut conn,
+            "progress_snapshots",
+            "snapshot_date"
+        ));
+        assert!(!column_exists(&mut conn, "progress_snapshots", "reason"));
+        assert!(!column_exists(
+            &mut conn,
+            "progress_snapshots",
+            "status_source"
+        ));
+        assert!(index_exists(&mut conn, "idx_progress_snapshots_goal_id"));
+        assert!(index_exists(
+            &mut conn,
+            "idx_progress_snapshots_milestone_id"
+        ));
+        // The rows survive the revert with their surviving data intact.
+        let row: SnapshotRevertedRow = diesel::sql_query(format!(
+            "SELECT recorded_at, status, percent_complete \
+             FROM progress_snapshots WHERE id = '{legacy_goal}'"
+        ))
+        .get_result(&mut conn)
+        .expect("could not read the reverted row");
+        assert_eq!(
+            row,
+            SnapshotRevertedRow {
+                recorded_at: Utc.with_ymd_and_hms(2026, 1, 15, 23, 30, 0).unwrap(),
+                status: "on_track".into(),
+                percent_complete: 42,
+            }
+        );
+    }
+
+    drop(scratch_pool);
+    let mut conn = admin_pool.get().expect("admin pool connects");
+    conn.batch_execute(format!("DROP DATABASE {db_name}").as_str())
+        .expect("could not drop the scratch database");
+}
+
+/// Dashboard read model (roadmap 3.15, D22): on a fresh database the rollups
+/// are all zeros and the manually-set list empty; with seeded rows the counts
+/// follow the effective status (the override when set), flag only overridden
+/// rows as manual, keep goals and milestones separate, and list the manually
+/// set items goals first in the shared default order. A scratch database, like
+/// the migration test above: the assertions are exact, so the tables must not
+/// be shared with the parallel tests.
+#[tokio::test]
+async fn dashboard_rollup_counts_effective_status_and_lists_manually_set_items() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip Postgres tests in CI");
+        }
+        return;
+    };
+
+    let db_name = "minerva_dashboard_test";
+    let admin_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create admin test pool");
+    {
+        let mut conn = admin_pool.get().expect("admin pool connects");
+        conn.batch_execute(format!("DROP DATABASE IF EXISTS {db_name}").as_str())
+            .expect("could not drop a stale scratch database");
+        conn.batch_execute(format!("CREATE DATABASE {db_name}").as_str())
+            .expect("could not create the scratch database");
+    }
+
+    let slash = url.rfind('/').expect("DATABASE_URL names a database");
+    let scratch_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(
+            diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(
+                url[..slash + 1].to_owned() + db_name,
+            ),
+        )
+        .expect("could not create scratch test pool");
+    infrastructure::migrations::run_migrations(&scratch_pool)
+        .expect("migrations failed on a fresh database");
+
+    let dashboard = PostgresDashboardRepository::new(scratch_pool.clone());
+
+    // An empty database: all four statuses present, zero when none.
+    let goals = dashboard
+        .status_rollup(DashboardKind::Goal)
+        .await
+        .expect("goal rollup");
+    assert_eq!(goals, StatusRollup::default());
+    assert_eq!(goals.total(), 0);
+    assert_eq!(goals.manual(), 0);
+    let milestones = dashboard
+        .status_rollup(DashboardKind::Milestone)
+        .await
+        .expect("milestone rollup");
+    assert_eq!(milestones, StatusRollup::default());
+    assert!(
+        dashboard
+            .manually_set_items()
+            .await
+            .expect("items")
+            .is_empty()
+    );
+
+    // Seed rows with known statuses and overrides.
+    let base = Uuid::new_v4().as_u128();
+    let goals_repo = PostgresGoalRepository::new(scratch_pool.clone());
+    let g1 = goal_row(base + 1, "dash-g1", Status::OnTrack, None, None, at(1, 1));
+    // The override moves this row from at_risk to complete.
+    let g2 = goal_row(
+        base + 2,
+        "dash-g2",
+        Status::AtRisk,
+        Some(Status::Complete),
+        None,
+        at(1, 2),
+    );
+    let g3 = goal_row(
+        base + 3,
+        "dash-g3",
+        Status::OffTrack,
+        None,
+        Some(date(5, 5)),
+        at(1, 3),
+    );
+    let g4 = goal_row(
+        base + 4,
+        "dash-g4",
+        Status::Complete,
+        None,
+        Some(date(1, 1)),
+        at(1, 4),
+    );
+    // An override equal to the automatic value is still manual.
+    let g5 = goal_row(
+        base + 5,
+        "dash-g5",
+        Status::OnTrack,
+        Some(Status::OnTrack),
+        Some(date(3, 1)),
+        at(1, 5),
+    );
+    for goal in [&g1, &g2, &g3, &g4, &g5] {
+        goals_repo.create(goal.clone()).await.expect("create goal");
+    }
+    let milestones_repo = PostgresMilestoneRepository::new(scratch_pool.clone());
+    // The override moves this row from on_track to off_track.
+    let m1 = milestone_row(
+        base + 10,
+        "dash-m1",
+        Status::OnTrack,
+        Some(Status::OffTrack),
+        None,
+        at(1, 6),
+    );
+    let m2 = milestone_row(
+        base + 11,
+        "dash-m2",
+        Status::AtRisk,
+        None,
+        Some(date(2, 2)),
+        at(1, 7),
+    );
+    for milestone in [&m1, &m2] {
+        milestones_repo
+            .create(milestone.clone())
+            .await
+            .expect("create milestone");
+    }
+
+    // The counts follow the effective status; only overridden rows are manual.
+    let goals = dashboard
+        .status_rollup(DashboardKind::Goal)
+        .await
+        .expect("goal rollup");
+    assert_eq!(
+        goals.on_track,
+        StatusCount {
+            count: 2,
+            manual: 1
+        }
+    );
+    assert_eq!(goals.at_risk, StatusCount::default());
+    assert_eq!(
+        goals.off_track,
+        StatusCount {
+            count: 1,
+            manual: 0
+        }
+    );
+    assert_eq!(
+        goals.complete,
+        StatusCount {
+            count: 2,
+            manual: 1
+        }
+    );
+    assert_eq!(goals.total(), 5);
+    assert_eq!(goals.manual(), 2);
+    // The milestones are counted separately.
+    let milestones = dashboard
+        .status_rollup(DashboardKind::Milestone)
+        .await
+        .expect("milestone rollup");
+    assert_eq!(milestones.on_track, StatusCount::default());
+    assert_eq!(
+        milestones.at_risk,
+        StatusCount {
+            count: 1,
+            manual: 0
+        }
+    );
+    assert_eq!(
+        milestones.off_track,
+        StatusCount {
+            count: 1,
+            manual: 1
+        }
+    );
+    assert_eq!(milestones.complete, StatusCount::default());
+    assert_eq!(milestones.total(), 2);
+    assert_eq!(milestones.manual(), 1);
+
+    // The manually set items: goals before milestones, each in the shared
+    // default order — target date ascending NULLS LAST, then created_at, id.
+    let items = dashboard.manually_set_items().await.expect("items");
+    let expected = [
+        (
+            DashboardEntityId::Goal(g5.id),
+            Status::OnTrack,
+            Status::OnTrack,
+            Some(date(3, 1)),
+        ),
+        (
+            DashboardEntityId::Goal(g2.id),
+            Status::Complete,
+            Status::AtRisk,
+            None,
+        ),
+        (
+            DashboardEntityId::Milestone(m1.id),
+            Status::OffTrack,
+            Status::OnTrack,
+            None,
+        ),
+    ];
+    assert_eq!(items.len(), expected.len());
+    for (item, (entity, status, automatic_status, target_date)) in items.iter().zip(expected) {
+        assert_eq!(item.entity, entity);
+        assert_eq!(item.status, status);
+        assert_eq!(item.automatic_status, automatic_status);
+        assert_eq!(item.target_date, target_date);
+    }
+
+    // The repositories hold their own handles on the pool; drop them first,
+    // or a connection to the scratch database stays open and Postgres refuses
+    // to drop it.
+    drop(dashboard);
+    drop(goals_repo);
+    drop(milestones_repo);
+    drop(scratch_pool);
+    let mut conn = admin_pool.get().expect("admin pool connects");
+    conn.batch_execute(format!("DROP DATABASE {db_name}").as_str())
+        .expect("could not drop the scratch database");
+}
+
+/// One instant in 2026 at a given hour, for same-day taken_at ordering.
+fn at_hour(month: u32, day: u32, hour: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, month, day, hour, 0, 0).unwrap()
+}
+
+#[tokio::test]
+async fn dashboard_status_trend_reads_the_latest_snapshot_per_entity_per_day() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip Postgres tests in CI");
+        }
+        return;
+    };
+
+    let db_name = "minerva_dashboard_trend_test";
+    let admin_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create admin test pool");
+    {
+        let mut conn = admin_pool.get().expect("admin pool connects");
+        conn.batch_execute(format!("DROP DATABASE IF EXISTS {db_name}").as_str())
+            .expect("could not drop a stale scratch database");
+        conn.batch_execute(format!("CREATE DATABASE {db_name}").as_str())
+            .expect("could not create the scratch database");
+    }
+
+    let slash = url.rfind('/').expect("DATABASE_URL names a database");
+    let scratch_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(
+            diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(
+                url[..slash + 1].to_owned() + db_name,
+            ),
+        )
+        .expect("could not create scratch test pool");
+    infrastructure::migrations::run_migrations(&scratch_pool)
+        .expect("migrations failed on a fresh database");
+
+    let dashboard = PostgresDashboardRepository::new(scratch_pool.clone());
+    let snapshots = PostgresProgressSnapshotRepository::new(scratch_pool.clone());
+    let goals_repo = PostgresGoalRepository::new(scratch_pool.clone());
+    let milestones_repo = PostgresMilestoneRepository::new(scratch_pool.clone());
+
+    let base = Uuid::new_v4().as_u128();
+    let g_a = goal_row(base + 1, "trend-ga", Status::OnTrack, None, None, at(3, 1));
+    let g_b = goal_row(base + 2, "trend-gb", Status::OnTrack, None, None, at(3, 1));
+    let m_a = milestone_row(base + 11, "trend-ma", Status::OnTrack, None, None, at(3, 1));
+    let m_b = milestone_row(base + 12, "trend-mb", Status::OnTrack, None, None, at(3, 1));
+    for goal in [&g_a, &g_b] {
+        goals_repo.create(goal.clone()).await.expect("create goal");
+    }
+    for milestone in [&m_a, &m_b] {
+        milestones_repo
+            .create(milestone.clone())
+            .await
+            .expect("create milestone");
+    }
+
+    async fn record(
+        snapshots: &PostgresProgressSnapshotRepository,
+        target: ProgressTarget,
+        status: Status,
+        source: StatusSource,
+        taken_at: DateTime<Utc>,
+        reason: SnapshotReason,
+        percent: Option<u8>,
+    ) {
+        let snapshot = NewSnapshot::new(target, status, source, taken_at, reason, percent)
+            .expect("a valid snapshot");
+        snapshots.record(snapshot).await.expect("record");
+    }
+
+    // gA on March 1: a daily row in the morning and a manual change later in
+    // the day — only the latest counts for that day.
+    record(
+        &snapshots,
+        ProgressTarget::Goal(g_a.id),
+        Status::OnTrack,
+        StatusSource::Computed,
+        at_hour(3, 1, 8),
+        SnapshotReason::Daily,
+        None,
+    )
+    .await;
+    record(
+        &snapshots,
+        ProgressTarget::Goal(g_a.id),
+        Status::Complete,
+        StatusSource::ManualOverride,
+        at_hour(3, 1, 14),
+        SnapshotReason::ManualChange,
+        None,
+    )
+    .await;
+    // gA on March 2.
+    record(
+        &snapshots,
+        ProgressTarget::Goal(g_a.id),
+        Status::AtRisk,
+        StatusSource::Computed,
+        at_hour(3, 2, 9),
+        SnapshotReason::Daily,
+        None,
+    )
+    .await;
+    // gA on March 4: two rows share a taken_at — the later id wins.
+    let mut tie_first = NewSnapshot::new(
+        ProgressTarget::Goal(g_a.id),
+        Status::OnTrack,
+        StatusSource::Computed,
+        at_hour(3, 4, 9),
+        SnapshotReason::ManualChange,
+        None,
+    )
+    .unwrap();
+    tie_first.id = ProgressSnapshotId(Uuid::from_u128(base + 100));
+    let mut tie_second = NewSnapshot::new(
+        ProgressTarget::Goal(g_a.id),
+        Status::OffTrack,
+        StatusSource::Computed,
+        at_hour(3, 4, 9),
+        SnapshotReason::ManualChange,
+        None,
+    )
+    .unwrap();
+    tie_second.id = ProgressSnapshotId(Uuid::from_u128(base + 101));
+    snapshots.record(tie_first).await.expect("record");
+    snapshots.record(tie_second).await.expect("record");
+    // gB: one row on March 2 (a second entity, same day) plus rows outside
+    // the window on both sides.
+    record(
+        &snapshots,
+        ProgressTarget::Goal(g_b.id),
+        Status::OnTrack,
+        StatusSource::Computed,
+        at_hour(3, 2, 10),
+        SnapshotReason::Daily,
+        None,
+    )
+    .await;
+    record(
+        &snapshots,
+        ProgressTarget::Goal(g_b.id),
+        Status::Complete,
+        StatusSource::Computed,
+        at_hour(2, 28, 9),
+        SnapshotReason::Daily,
+        None,
+    )
+    .await;
+    record(
+        &snapshots,
+        ProgressTarget::Goal(g_b.id),
+        Status::OnTrack,
+        StatusSource::Computed,
+        at_hour(3, 5, 9),
+        SnapshotReason::Daily,
+        None,
+    )
+    .await;
+    // mA carries a percent on both days; mB's March 2 row has none.
+    record(
+        &snapshots,
+        ProgressTarget::Milestone(m_a.id),
+        Status::OnTrack,
+        StatusSource::Computed,
+        at_hour(3, 1, 9),
+        SnapshotReason::Daily,
+        Some(50),
+    )
+    .await;
+    record(
+        &snapshots,
+        ProgressTarget::Milestone(m_a.id),
+        Status::OffTrack,
+        StatusSource::Computed,
+        at_hour(3, 2, 9),
+        SnapshotReason::Daily,
+        Some(100),
+    )
+    .await;
+    record(
+        &snapshots,
+        ProgressTarget::Milestone(m_b.id),
+        Status::OnTrack,
+        StatusSource::Computed,
+        at_hour(3, 2, 11),
+        SnapshotReason::Daily,
+        None,
+    )
+    .await;
+
+    // Goals: exactly the three days that have snapshots — March 3 has none,
+    // so it never appears (no carry-forward). Dates ascending.
+    let goals = dashboard
+        .status_trend(DashboardKind::Goal, date(3, 1), date(3, 4))
+        .await
+        .expect("goal trend");
+    assert_eq!(goals.len(), 3);
+    assert_eq!(
+        goals[0],
+        TrendRow {
+            date: date(3, 1),
+            on_track: 0,
+            at_risk: 0,
+            off_track: 0,
+            complete: 1,
+            manual: 1,
+            percent_sum: 0,
+            percent_count: 0,
+        }
+    );
+    // March 2 counts the two entities independently under their own statuses.
+    assert_eq!(
+        goals[1],
+        TrendRow {
+            date: date(3, 2),
+            on_track: 1,
+            at_risk: 1,
+            off_track: 0,
+            complete: 0,
+            manual: 0,
+            percent_sum: 0,
+            percent_count: 0,
+        }
+    );
+    // March 4: the later id won the taken_at tie.
+    assert_eq!(
+        goals[2],
+        TrendRow {
+            date: date(3, 4),
+            on_track: 0,
+            at_risk: 0,
+            off_track: 1,
+            complete: 0,
+            manual: 0,
+            percent_sum: 0,
+            percent_count: 0,
+        }
+    );
+
+    // The window is inclusive on both ends and excludes rows outside it: the
+    // February 28 and March 5 rows never appear.
+    let narrow = dashboard
+        .status_trend(DashboardKind::Goal, date(3, 2), date(3, 3))
+        .await
+        .expect("goal trend");
+    assert_eq!(narrow.len(), 1);
+    assert_eq!(narrow[0].date, date(3, 2));
+
+    // Milestones: a separate series that never mixes in the goal rows. The
+    // percent sum and count cover only the rows that carry a percent.
+    let milestones = dashboard
+        .status_trend(DashboardKind::Milestone, date(3, 1), date(3, 4))
+        .await
+        .expect("milestone trend");
+    assert_eq!(milestones.len(), 2);
+    assert_eq!(
+        milestones[0],
+        TrendRow {
+            date: date(3, 1),
+            on_track: 1,
+            at_risk: 0,
+            off_track: 0,
+            complete: 0,
+            manual: 0,
+            percent_sum: 50,
+            percent_count: 1,
+        }
+    );
+    assert_eq!(
+        milestones[1],
+        TrendRow {
+            date: date(3, 2),
+            on_track: 1,
+            at_risk: 0,
+            off_track: 1,
+            complete: 0,
+            manual: 0,
+            percent_sum: 100,
+            percent_count: 1,
+        }
+    );
+
+    // Deleting an entity takes its history with it: gA was the only goal row
+    // on March 1 and March 4, so those days disappear.
+    goals_repo.delete(g_a.id).await.expect("delete goal");
+    let after = dashboard
+        .status_trend(DashboardKind::Goal, date(3, 1), date(3, 4))
+        .await
+        .expect("goal trend");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].date, date(3, 2));
+
+    // The repositories hold their own handles on the pool; drop them first,
+    // or a connection to the scratch database stays open and Postgres refuses
+    // to drop it.
+    drop(dashboard);
+    drop(snapshots);
+    drop(goals_repo);
+    drop(milestones_repo);
+    drop(scratch_pool);
+    let mut conn = admin_pool.get().expect("admin pool connects");
+    conn.batch_execute(format!("DROP DATABASE {db_name}").as_str())
+        .expect("could not drop the scratch database");
+}
+
+#[tokio::test]
+async fn dashboard_timeline_orders_filters_and_lists_links() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        // In CI these tests must run: a green build that skipped them proves nothing.
+        if std::env::var_os("CI").is_some() {
+            panic!("DATABASE_URL is not set; refusing to skip Postgres tests in CI");
+        }
+        return;
+    };
+
+    let db_name = "minerva_dashboard_timeline_test";
+    let admin_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(&url))
+        .expect("could not create admin test pool");
+    {
+        let mut conn = admin_pool.get().expect("admin pool connects");
+        conn.batch_execute(format!("DROP DATABASE IF EXISTS {db_name}").as_str())
+            .expect("could not drop a stale scratch database");
+        conn.batch_execute(format!("CREATE DATABASE {db_name}").as_str())
+            .expect("could not create the scratch database");
+    }
+
+    let slash = url.rfind('/').expect("DATABASE_URL names a database");
+    let scratch_pool = diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .build(
+            diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new(
+                url[..slash + 1].to_owned() + db_name,
+            ),
+        )
+        .expect("could not create scratch test pool");
+    infrastructure::migrations::run_migrations(&scratch_pool)
+        .expect("migrations failed on a fresh database");
+
+    let dashboard = PostgresDashboardRepository::new(scratch_pool.clone());
+    let goals_repo = PostgresGoalRepository::new(scratch_pool.clone());
+    let milestones_repo = PostgresMilestoneRepository::new(scratch_pool.clone());
+    let links = PostgresGoalMilestoneRepository::new(scratch_pool.clone());
+
+    // An empty database: both arrays and the links are empty.
+    let empty = dashboard
+        .timeline(TimelineFilter::default())
+        .await
+        .expect("timeline");
+    assert!(empty.goals.is_empty());
+    assert!(empty.milestones.is_empty());
+    assert!(empty.links.is_empty());
+
+    let base = Uuid::new_v4().as_u128();
+    // Two goals share a target date: created_at breaks the tie. g2 is undated
+    // and sorts last; g1 carries an override so the row reports both values.
+    let g1 = goal_row(
+        base + 1,
+        "tl-g1",
+        Status::OnTrack,
+        Some(Status::Complete),
+        Some(date(5, 5)),
+        at(1, 1),
+    );
+    let g2 = goal_row(base + 2, "tl-g2", Status::AtRisk, None, None, at(1, 2));
+    let g3 = goal_row(
+        base + 3,
+        "tl-g3",
+        Status::OffTrack,
+        None,
+        Some(date(5, 5)),
+        at(1, 3),
+    );
+    let g4 = goal_row(
+        base + 4,
+        "tl-g4",
+        Status::Complete,
+        None,
+        Some(date(2, 2)),
+        at(1, 4),
+    );
+    for goal in [&g1, &g2, &g3, &g4] {
+        goals_repo.create(goal.clone()).await.expect("create goal");
+    }
+    let m1 = milestone_row(
+        base + 10,
+        "tl-m1",
+        Status::OnTrack,
+        None,
+        Some(date(5, 5)),
+        at(1, 5),
+    );
+    let m2 = milestone_row(base + 11, "tl-m2", Status::AtRisk, None, None, at(1, 6));
+    let m3 = milestone_row(
+        base + 12,
+        "tl-m3",
+        Status::OffTrack,
+        None,
+        Some(date(2, 2)),
+        at(1, 7),
+    );
+    let m4 = milestone_row(
+        base + 13,
+        "tl-m4",
+        Status::Complete,
+        None,
+        Some(date(6, 6)),
+        at(1, 8),
+    );
+    for milestone in [&m1, &m2, &m3, &m4] {
+        milestones_repo
+            .create(milestone.clone())
+            .await
+            .expect("create milestone");
+    }
+    // g1 links to three milestones, g4 to two; m2 is shared by both goals.
+    for (goal, milestone) in [(&g1, &m1), (&g1, &m3), (&g1, &m2), (&g4, &m4), (&g4, &m2)] {
+        links
+            .link(GoalMilestone::new(goal.id, milestone.id))
+            .await
+            .expect("link");
+    }
+
+    // No bound: every row, in the shared default order — target date
+    // ascending NULLS LAST, then created_at, then id.
+    let all = dashboard
+        .timeline(TimelineFilter::default())
+        .await
+        .expect("timeline");
+    assert_eq!(
+        all.goals.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![g4.id, g1.id, g3.id, g2.id]
+    );
+    assert_eq!(
+        all.milestones.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![m3.id, m1.id, m4.id, m2.id]
+    );
+    // The stored pair passes through untouched; the service derives the
+    // effective status from it.
+    let g1_row = &all.goals[1];
+    assert_eq!(g1_row.automatic_status, Status::OnTrack);
+    assert_eq!(g1_row.status_override, Some(Status::Complete));
+
+    // Every link of the returned goals, grouped per goal (goal id ascending),
+    // each group in the linked milestone's default order — so a goal's ids
+    // are stable and a shared milestone appears under both goals.
+    assert_eq!(
+        all.links,
+        vec![
+            (g1.id, m3.id),
+            (g1.id, m1.id),
+            (g1.id, m2.id),
+            (g4.id, m4.id),
+            (g4.id, m2.id),
+        ]
+    );
+
+    // An inclusive lower bound: rows on the bound stay, undated rows never
+    // match, and a goal still lists links to milestones outside the window.
+    let after = dashboard
+        .timeline(TimelineFilter {
+            target_after: Some(date(5, 5)),
+            target_before: None,
+        })
+        .await
+        .expect("timeline");
+    assert_eq!(
+        after.goals.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![g1.id, g3.id]
+    );
+    assert_eq!(
+        after
+            .milestones
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![m1.id, m4.id]
+    );
+    // Only the returned goals' links — including the out-of-window ones.
+    assert_eq!(
+        after.links,
+        vec![(g1.id, m3.id), (g1.id, m1.id), (g1.id, m2.id)]
+    );
+
+    // An inclusive upper bound: the same rows on the bound, from below.
+    let before = dashboard
+        .timeline(TimelineFilter {
+            target_after: None,
+            target_before: Some(date(5, 5)),
+        })
+        .await
+        .expect("timeline");
+    assert_eq!(
+        before.goals.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![g4.id, g1.id, g3.id]
+    );
+    assert_eq!(
+        before
+            .milestones
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![m3.id, m1.id]
+    );
+
+    // An inverted range matches nothing and is not an error.
+    let inverted = dashboard
+        .timeline(TimelineFilter {
+            target_after: Some(date(6, 6)),
+            target_before: Some(date(2, 2)),
+        })
+        .await
+        .expect("timeline");
+    assert!(inverted.goals.is_empty());
+    assert!(inverted.milestones.is_empty());
+    assert!(inverted.links.is_empty());
+
+    // The repositories hold their own handles on the pool; drop them first,
+    // or a connection to the scratch database stays open and Postgres refuses
+    // to drop it.
+    drop(dashboard);
+    drop(links);
+    drop(goals_repo);
+    drop(milestones_repo);
+    drop(scratch_pool);
+    let mut conn = admin_pool.get().expect("admin pool connects");
+    conn.batch_execute(format!("DROP DATABASE {db_name}").as_str())
+        .expect("could not drop the scratch database");
 }

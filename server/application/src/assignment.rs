@@ -477,6 +477,15 @@ mod tests {
             Ok(self.locked().get(&id).cloned())
         }
 
+        async fn find_by_ids(&self, ids: &[GoalId]) -> Result<Vec<Goal>, RepositoryError> {
+            let mut found: Vec<Goal> = ids
+                .iter()
+                .filter_map(|id| self.locked().get(id).cloned())
+                .collect();
+            found.sort_by_key(|goal| goal.id.0);
+            Ok(found)
+        }
+
         async fn list(&self) -> Result<Vec<Goal>, RepositoryError> {
             Ok(self.locked().values().cloned().collect())
         }

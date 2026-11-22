@@ -17,6 +17,7 @@
 //! `created_by` must spell out its `ON` clause.
 
 pub mod account_token_repository;
+pub mod dashboard_repository;
 pub mod goal_milestone_repository;
 pub mod goal_repository;
 pub mod mapping;
@@ -34,6 +35,7 @@ pub mod user_identity_repository;
 pub mod user_repository;
 
 pub use account_token_repository::PostgresAccountTokenRepository;
+pub use dashboard_repository::PostgresDashboardRepository;
 pub use goal_milestone_repository::PostgresGoalMilestoneRepository;
 pub use goal_repository::PostgresGoalRepository;
 pub use milestone_repository::PostgresMilestoneRepository;

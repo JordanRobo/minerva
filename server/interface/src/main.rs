@@ -3,6 +3,7 @@ mod account_links;
 mod auth;
 mod client_ip;
 mod config;
+mod dashboard;
 mod debug;
 mod error;
 mod goal_milestones;
@@ -24,6 +25,9 @@ mod users;
 mod access_tests;
 
 #[cfg(test)]
+mod dashboard_tests;
+
+#[cfg(test)]
 mod goal_list_tests;
 
 #[cfg(test)]
@@ -34,6 +38,9 @@ mod milestone_list_tests;
 
 #[cfg(test)]
 mod owner_tests;
+
+#[cfg(test)]
+mod progress_snapshot_tests;
 
 #[cfg(test)]
 mod public_routes;
@@ -71,6 +78,7 @@ use application::auth::oidc::OidcAuthProvider;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::{AuthProviders, RedirectProvider};
 use application::bootstrap::{BootstrapAdmin, BootstrapOutcome, bootstrap_admin};
+use application::dashboard::DashboardService;
 use application::goal_list::GoalListService;
 use application::goal_milestone_links::GoalMilestoneLinkService;
 use application::goal_service::GoalService;
@@ -78,10 +86,11 @@ use application::milestone_list::MilestoneListService;
 use application::milestone_service::MilestoneService;
 use application::oidc_login::LoginPolicy;
 use application::ports::{
-    AccountEmailSender, AccountTokenRepository, NoopStatusSnapshotTrigger, OidcProvider,
-    PasswordHasher, SessionRepository, SessionTokens, StatusSnapshotTrigger, SystemClock,
-    TaskRepository, UserIdentityRepository, UserRepository,
+    AccountEmailSender, AccountTokenRepository, OidcProvider, PasswordHasher, SessionRepository,
+    SessionTokens, StatusSnapshotTrigger, SystemClock, TaskRepository, UserIdentityRepository,
+    UserRepository,
 };
+use application::progress_snapshots::{ProgressSnapshotService, RecordingStatusSnapshotTrigger};
 use application::rate_limit::{RateLimitService, RateLimiter};
 use application::sso_roles::SsoRoleService;
 use application::sso_rules::SsoGroupRuleService;
@@ -101,11 +110,12 @@ use infrastructure::db::build_pool;
 use infrastructure::migrations::run_migrations;
 use infrastructure::oidc::{OidcConfig, OpenIdConnectProvider};
 use infrastructure::repositories::{
-    PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
-    PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresRateLimiter,
-    PostgresSessionRepository, PostgresSsoGroupRuleRepository, PostgresTaskCommentRepository,
-    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserIdentityRepository,
-    PostgresUserRepository, RedisRateLimiter, RedisSessionRepository,
+    PostgresAccountTokenRepository, PostgresDashboardRepository, PostgresGoalMilestoneRepository,
+    PostgresGoalRepository, PostgresMilestoneRepository, PostgresProgressSnapshotRepository,
+    PostgresRateLimiter, PostgresSessionRepository, PostgresSsoGroupRuleRepository,
+    PostgresTaskCommentRepository, PostgresTaskRelationRepository, PostgresTaskRepository,
+    PostgresUserIdentityRepository, PostgresUserRepository, RedisRateLimiter,
+    RedisSessionRepository,
 };
 use std::sync::Arc;
 
@@ -166,15 +176,6 @@ async fn main() -> std::io::Result<()> {
     let task_counts: Arc<dyn TaskRepository> = Arc::new(PostgresTaskRepository::new(pool.clone()));
     let task_relations = web::Data::new(PostgresTaskRelationRepository::new(pool.clone()));
     let progress_snapshots = web::Data::new(PostgresProgressSnapshotRepository::new(pool.clone()));
-    // Manual status overrides (roadmap 3.2): set/clear go through the service
-    // so the no-op and snapshot rules live in one place. Snapshots are not
-    // built yet (roadmap 3.14), so the trigger is the no-op; a real one swaps
-    // in here without touching the handlers. The service takes ports, so it
-    // gets its own repository instances over the shared pool (r2d2 handles).
-    // Built before the maintenance runner below, which moves the pool.
-    let status_snapshots: Arc<dyn StatusSnapshotTrigger> = Arc::new(NoopStatusSnapshotTrigger);
-    let status_snapshots_data: web::Data<dyn StatusSnapshotTrigger> =
-        status_snapshots.clone().into();
     // Automatic status recomputation (roadmap 3.13, D12/D19): milestones from
     // their task counts and dates, goals from their linked milestones'
     // effective statuses. Built before the mutation services below because
@@ -190,6 +191,26 @@ async fn main() -> std::io::Result<()> {
         Arc::new(SystemClock),
     ));
     let recomputation: Arc<dyn StatusRecomputation> = status_computation.clone();
+    // Progress snapshots (roadmap 3.14): the trigger records a manual-change
+    // snapshot per real override set/clear, and the service's daily sweep is
+    // registered with the maintenance runner below. Like every other service
+    // it takes ports, so it gets its own repository instances over the shared
+    // pool (r2d2 handles), plus the recompute port so the sweep can refresh
+    // stale statuses before recording. Built before the maintenance runner,
+    // which moves the pool.
+    let progress_snapshot_service = Arc::new(ProgressSnapshotService::new(
+        Arc::new(PostgresGoalRepository::new(pool.clone())),
+        Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+        Arc::new(PostgresTaskRepository::new(pool.clone())),
+        Arc::new(PostgresProgressSnapshotRepository::new(pool.clone())),
+        recomputation.clone(),
+        Arc::new(SystemClock),
+    ));
+    let status_snapshots: Arc<dyn StatusSnapshotTrigger> = Arc::new(
+        RecordingStatusSnapshotTrigger::new(progress_snapshot_service.clone()),
+    );
+    let status_snapshots_data: web::Data<dyn StatusSnapshotTrigger> =
+        status_snapshots.clone().into();
     // One full recompute at startup (roadmap 3.13, step 5): existing rows
     // carry whatever statuses their last mutation left them — for a fresh
     // database, the defaults — so refresh everything before serving.
@@ -287,6 +308,17 @@ async fn main() -> std::io::Result<()> {
     let milestone_list_service = web::Data::new(MilestoneListService::new(Arc::new(
         PostgresMilestoneRepository::new(pool.clone()),
     )));
+    // Dashboard (roadmap 3.15, D22): the read-only summary, trends and
+    // timeline go through the service over its own repository instances on
+    // the shared pool — the timeline resolves owners and percents through
+    // the user and task ports, one batched call of each; it reads only, no
+    // snapshots, no recomputation.
+    let dashboard_service = web::Data::new(DashboardService::new(
+        Arc::new(PostgresDashboardRepository::new(pool.clone())),
+        Arc::new(PostgresUserRepository::new(pool.clone())),
+        Arc::new(PostgresTaskRepository::new(pool.clone())),
+        Arc::new(SystemClock),
+    ));
     // SSO group rules (roadmap 2.7, D15): the admin-only API goes through the
     // service so name validation and the duplicate-name conflict live in one
     // place (see application::sso_rules).
@@ -358,17 +390,18 @@ async fn main() -> std::io::Result<()> {
                 .expect("redis.url is set but could not connect to Redis"),
         )
     };
-    // The maintenance runner starts on every node (roadmap 3.13, step 5): the
-    // status recompute needs only Postgres and runs wherever the sessions
-    // live; with Redis, native TTLs evict expired sessions and stale
-    // rate-limit counters instead of the hourly purges, so those two jobs
-    // register only when Postgres holds the stores. Every node ticks every
-    // job it registers; the advisory locks mean exactly one node does each
-    // job's work per tick (roadmap 2.8).
+    // The maintenance runner starts on every node (roadmap 2.8, 3.13, 3.14):
+    // the status recompute and the daily snapshot sweep need only Postgres
+    // and run wherever the sessions live; with Redis, native TTLs evict
+    // expired sessions and stale rate-limit counters instead of the hourly
+    // purges, so those two jobs register only when Postgres holds the stores.
+    // Every node ticks every job it registers; the advisory locks mean
+    // exactly one node does each job's work per tick (roadmap 2.8).
     maintenance::start(
         pool,
         maintenance::jobs_for(
             status_computation.clone(),
+            progress_snapshot_service,
             postgres_stores.then(|| (sessions.clone(), rate_limiter.clone())),
         ),
     );
@@ -549,6 +582,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(task_list_service.clone())
             .app_data(goal_list_service.clone())
             .app_data(milestone_list_service.clone())
+            .app_data(dashboard_service.clone())
             .app_data(status_snapshots_data.clone())
             .app_data(account_link_service.clone())
             .app_data(auth_providers.clone())

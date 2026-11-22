@@ -9,6 +9,7 @@
 pub mod account_email_sender;
 pub mod account_token_repository;
 pub mod clock;
+pub mod dashboard_repository;
 pub mod goal_milestone_repository;
 pub mod goal_repository;
 pub mod milestone_repository;
@@ -30,6 +31,10 @@ pub use account_token_repository::{
     AcceptInviteOutcome, AccountTokenRepository, ResetPasswordOutcome,
 };
 pub use clock::{Clock, SystemClock};
+pub use dashboard_repository::{
+    DashboardEntityId, DashboardKind, DashboardRepository, ManuallySetItem, StatusCount,
+    StatusRollup, TimelineData, TimelineFilter, TimelineGoal, TimelineMilestone, TrendRow,
+};
 pub use goal_milestone_repository::GoalMilestoneRepository;
 pub use goal_repository::{GoalListFilter, GoalRepository};
 pub use milestone_repository::{MilestoneListFilter, MilestoneRepository};

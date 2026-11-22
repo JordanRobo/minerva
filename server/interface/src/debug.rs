@@ -11,7 +11,7 @@ use actix_web::{HttpResponse, web};
 use application::ports::{
     GoalMilestoneRepository, ProgressSnapshotRepository, TaskRelationRepository,
 };
-use domain::{GoalId, MilestoneId, ProgressTarget, TaskId};
+use domain::{GoalId, MilestoneId, TaskId};
 use infrastructure::repositories::{
     PostgresGoalMilestoneRepository, PostgresProgressSnapshotRepository,
     PostgresTaskRelationRepository,
@@ -51,15 +51,19 @@ pub async fn list_progress_snapshots(
     snapshots: web::Data<PostgresProgressSnapshotRepository>,
 ) -> HttpResponse {
     // A snapshot is for exactly one of a goal or a milestone.
-    let target = match (query.goal_id, query.milestone_id) {
-        (Some(goal_id), None) => ProgressTarget::Goal(GoalId(goal_id)),
-        (None, Some(milestone_id)) => ProgressTarget::Milestone(MilestoneId(milestone_id)),
+    let listed = match (query.goal_id, query.milestone_id) {
+        (Some(goal_id), None) => snapshots.list_for_goal(GoalId(goal_id)).await,
+        (None, Some(milestone_id)) => {
+            snapshots
+                .list_for_milestone(MilestoneId(milestone_id))
+                .await
+        }
         _ => {
             return HttpResponse::BadRequest()
                 .body("provide exactly one of goal_id or milestone_id");
         }
     };
-    match snapshots.list_for_target(target).await {
+    match listed {
         Ok(snapshots) => HttpResponse::Ok().json(snapshots),
         Err(err) => HttpResponse::InternalServerError().body(err.to_string()),
     }

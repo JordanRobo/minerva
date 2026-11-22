@@ -15,9 +15,10 @@ use uuid::Uuid;
 use application::ports::RepositoryError;
 use domain::{
     AccountToken, AccountTokenId, AccountTokenKind, Goal, GoalId, Milestone, MilestoneId,
-    ProgressSnapshot, ProgressSnapshotId, ProgressTarget, Role, Session, SessionId, SsoGroupRule,
-    SsoGroupRuleId, Status, StatusSource, Task, TaskComment, TaskCommentId, TaskId, TaskRelation,
-    TaskRelationId, TaskRelationType, TaskStatus, User, UserId, UserIdentity, UserIdentityId,
+    NewSnapshot, ProgressSnapshot, ProgressSnapshotId, ProgressTarget, Role, Session, SessionId,
+    SnapshotReason, SsoGroupRule, SsoGroupRuleId, Status, StatusSource, Task, TaskComment,
+    TaskCommentId, TaskId, TaskRelation, TaskRelationId, TaskRelationType, TaskStatus, User,
+    UserId, UserIdentity, UserIdentityId,
 };
 
 /// A row of the `goals` table: id, title, description, status,
@@ -55,6 +56,19 @@ pub fn status_source_to_db(source: StatusSource) -> &'static str {
     match source {
         StatusSource::Computed => "computed",
         StatusSource::ManualOverride => "manual_override",
+    }
+}
+
+/// The [`StatusSource`] stored in a `status_source` column. Unknown values
+/// are reported like [`status_from_db`]'s: the CHECK constraints should make
+/// them impossible.
+pub fn status_source_from_db(source: &str) -> Result<StatusSource, RepositoryError> {
+    match source {
+        "computed" => Ok(StatusSource::Computed),
+        "manual_override" => Ok(StatusSource::ManualOverride),
+        other => Err(RepositoryError::Unexpected(format!(
+            "unknown status_source value {other:?} in database"
+        ))),
     }
 }
 
@@ -267,27 +281,51 @@ pub fn task_relation_from_row(row: TaskRelationRow) -> Result<TaskRelation, Repo
     })
 }
 
+/// The value stored in a `reason` column for [`SnapshotReason`].
+pub fn snapshot_reason_to_db(reason: SnapshotReason) -> &'static str {
+    match reason {
+        SnapshotReason::Daily => "daily",
+        SnapshotReason::ManualChange => "manual_change",
+    }
+}
+
+/// The [`SnapshotReason`] stored in a `reason` column. Unknown values are
+/// reported like [`status_from_db`]'s: the CHECK constraints should make
+/// them impossible.
+pub fn snapshot_reason_from_db(reason: &str) -> Result<SnapshotReason, RepositoryError> {
+    match reason {
+        "daily" => Ok(SnapshotReason::Daily),
+        "manual_change" => Ok(SnapshotReason::ManualChange),
+        other => Err(RepositoryError::Unexpected(format!(
+            "unknown reason value {other:?} in database"
+        ))),
+    }
+}
+
 /// A row of the `progress_snapshots` table: id, goal_id, milestone_id,
-/// recorded_at, status, percent_complete, note — in that order.
+/// taken_at, status, status_source, reason, percent_complete — in that
+/// order. The stored `snapshot_date` is a pure function of `taken_at` (its
+/// UTC calendar day), so it is not selected: the domain re-derives it.
 pub type ProgressSnapshotRow = (
     Uuid,
     Option<Uuid>,
     Option<Uuid>,
     DateTime<Utc>,
     String,
-    i16,
-    Option<String>,
+    String,
+    String,
+    Option<i16>,
 );
 
 /// Build a [`ProgressSnapshot`] from a `progress_snapshots` row.
 ///
-/// The row is reconstructed through [`ProgressSnapshot::new`] so the
-/// 0..=100 `percent_complete` invariant is enforced in Rust as well as by
-/// the database CHECK constraint.
+/// The row is reconstructed through [`NewSnapshot::new`] so the 0..=100
+/// `percent_complete` invariant is enforced in Rust as well as by the
+/// database CHECK constraint.
 pub fn progress_snapshot_from_row(
     row: ProgressSnapshotRow,
 ) -> Result<ProgressSnapshot, RepositoryError> {
-    let (id, goal_id, milestone_id, recorded_at, status, percent_complete, note) = row;
+    let (id, goal_id, milestone_id, taken_at, status, source, reason, percent_complete) = row;
     // The CHECK constraint says exactly one of the two is set; a row that
     // violates it is a data-integrity problem, not something to guess at.
     let target = match (goal_id, milestone_id) {
@@ -299,18 +337,24 @@ pub fn progress_snapshot_from_row(
             ));
         }
     };
-    let percent_complete = u8::try_from(percent_complete).map_err(|_| {
-        RepositoryError::Unexpected(format!("percent_complete out of range: {percent_complete}"))
-    })?;
-    // `new` mints a fresh id; restore the row's own.
-    let mut snapshot = ProgressSnapshot::new(
+    let percent_complete = match percent_complete {
+        Some(value) => Some(u8::try_from(value).map_err(|_| {
+            RepositoryError::Unexpected(format!("percent_complete out of range: {value}"))
+        })?),
+        None => None,
+    };
+    // `new` mints a fresh id and re-derives the stored snapshot_date from
+    // taken_at; restore the row's own id.
+    let new = NewSnapshot::new(
         target,
-        recorded_at,
         status_from_db(&status)?,
+        status_source_from_db(&source)?,
+        taken_at,
+        snapshot_reason_from_db(&reason)?,
         percent_complete,
-        note,
     )
     .map_err(|err| RepositoryError::Unexpected(err.to_string()))?;
+    let mut snapshot = ProgressSnapshot::from_new(new);
     snapshot.id = ProgressSnapshotId(id);
     Ok(snapshot)
 }

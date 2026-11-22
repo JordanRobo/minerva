@@ -32,6 +32,10 @@ pub trait GoalRepository: Send + Sync {
     /// Returns `None` if no goal has this id.
     async fn find_by_id(&self, id: GoalId) -> Result<Option<Goal>, RepositoryError>;
 
+    /// The goals with the given ids, in id order; ids with no matching goal
+    /// are skipped. An empty slice yields an empty list.
+    async fn find_by_ids(&self, ids: &[GoalId]) -> Result<Vec<Goal>, RepositoryError>;
+
     async fn list(&self) -> Result<Vec<Goal>, RepositoryError>;
 
     /// Every goal id, in id order (roadmap 3.13's sweep).
@@ -189,6 +193,16 @@ pub mod fakes {
                 .iter()
                 .find(|goal| goal.id == id)
                 .cloned())
+        }
+
+        async fn find_by_ids(&self, ids: &[GoalId]) -> Result<Vec<Goal>, RepositoryError> {
+            let goals = self.goals.lock().unwrap();
+            let mut found: Vec<Goal> = ids
+                .iter()
+                .filter_map(|id| goals.iter().find(|g| g.id == *id).cloned())
+                .collect();
+            found.sort_by_key(|goal| goal.id.0);
+            Ok(found)
         }
 
         async fn list(&self) -> Result<Vec<Goal>, RepositoryError> {

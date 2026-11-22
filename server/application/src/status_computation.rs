@@ -45,6 +45,12 @@ pub trait StatusRecomputation: Send + Sync {
         &self,
         milestone_ids: &[MilestoneId],
     ) -> Result<usize, StatusComputationError>;
+
+    /// Recompute everything: all milestones first (a goal's rollup depends
+    /// on its linked milestones' effective statuses), then all goals — the
+    /// freshness pass behind the hourly sweep and the daily snapshot sweep.
+    /// Returns how many rows each phase changed.
+    async fn recompute_all(&self) -> Result<RecomputedCounts, StatusComputationError>;
 }
 
 /// An error from recomputing automatic statuses. Unknown ids are not an
@@ -78,9 +84,10 @@ pub struct RecomputedCounts {
     pub goals: usize,
 }
 
-/// How many ids one recompute batch holds (roadmap 3.13's sweep): each batch
-/// is one milestone fetch and one grouped task-count lookup.
-const BATCH_SIZE: usize = 200;
+/// How many ids one sweep batch holds (roadmap 3.13's recompute sweep and
+/// roadmap 3.14's daily snapshot sweep): each batch is one entity fetch and,
+/// for milestones, one grouped task-count lookup.
+pub const BATCH_SIZE: usize = 200;
 
 /// Recomputes the automatic status of milestones and goals (roadmap 3.13).
 /// Milestones come from their task counts and dates; goals roll up their
@@ -243,6 +250,10 @@ impl StatusRecomputation for StatusComputationService {
     ) -> Result<usize, StatusComputationError> {
         Self::recompute_goals_for_milestones(self, milestone_ids).await
     }
+
+    async fn recompute_all(&self) -> Result<RecomputedCounts, StatusComputationError> {
+        Self::recompute_all(self).await
+    }
 }
 
 #[cfg(test)]
@@ -258,7 +269,9 @@ pub mod fakes {
     use domain::{GoalId, MilestoneId};
 
     use crate::ports::RepositoryError;
-    use crate::status_computation::{StatusComputationError, StatusRecomputation};
+    use crate::status_computation::{
+        RecomputedCounts, StatusComputationError, StatusRecomputation,
+    };
 
     /// Which recompute a call asked for, with the ids it was given.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +279,7 @@ pub mod fakes {
         Milestones(Vec<MilestoneId>),
         Goals(Vec<GoalId>),
         GoalsForMilestones(Vec<MilestoneId>),
+        All,
     }
 
     #[derive(Default)]
@@ -325,6 +339,14 @@ pub mod fakes {
             self.record(RecomputeCall::GoalsForMilestones(milestone_ids.to_vec()))?;
             Ok(0)
         }
+
+        async fn recompute_all(&self) -> Result<RecomputedCounts, StatusComputationError> {
+            self.record(RecomputeCall::All)?;
+            Ok(RecomputedCounts {
+                milestones: 0,
+                goals: 0,
+            })
+        }
     }
 
     /// A [`StatusRecomputation`] that does nothing and never fails — the
@@ -360,6 +382,13 @@ pub mod fakes {
         ) -> Result<usize, StatusComputationError> {
             Ok(0)
         }
+
+        async fn recompute_all(&self) -> Result<RecomputedCounts, StatusComputationError> {
+            Ok(RecomputedCounts {
+                milestones: 0,
+                goals: 0,
+            })
+        }
     }
 
     /// The no-op as the trait object every service's `new` takes.
@@ -394,12 +423,13 @@ mod tests {
     }
 
     /// A fixed clock: "today" is whatever the test says it is (D19's UTC
-    /// date, injectable for determinism).
+    /// date, injectable for determinism). The instant sits at 09:00 of that
+    /// date, far enough from midnight that `today()` stays on it.
     struct FixedClock(NaiveDate);
 
     impl Clock for FixedClock {
-        fn today(&self) -> NaiveDate {
-            self.0
+        fn now(&self) -> DateTime<Utc> {
+            at(self.0)
         }
     }
 

@@ -293,14 +293,17 @@ no maintenance: the keys' native TTLs evict expired sessions, so
 
 The maintenance runner in `interface` (`src/maintenance.rs`) starts on every
 node regardless of the session store (roadmap 3.13, step 5). It always
-registers the status-recomputation sweep: automatic statuses depend on
-today's date, so they go stale when a target date passes even if nobody edits
-anything, and `recompute_all` refreshes every milestone and goal. When
-Postgres holds the sessions it also registers the expired-session purge (with
-Redis, native TTLs evict them instead), and when Postgres holds the rate-limit
-counters the counter purge joins as well — each job is a `MaintenanceJob`
-(name + advisory lock key + async fn) with its own lock key, so the jobs tick
-independently. Each tick first takes a session-level Postgres advisory lock
+registers the two Postgres-only jobs: the status-recomputation sweep
+(automatic statuses depend on today's date, so they go stale when a target
+date passes even if nobody edits anything, and `recompute_all` refreshes every
+milestone and goal) and the daily snapshot sweep (roadmap 3.14 — it ensures
+every goal and milestone has one `daily` snapshot for the current UTC date;
+see "Progress snapshots" below). When Postgres holds the sessions it also
+registers the expired-session purge (with Redis, native TTLs evict them
+instead), and when Postgres holds the rate-limit counters the counter purge
+joins as well — so a node runs two jobs with Redis-backed stores and four
+with Postgres-backed ones. Each job is a `MaintenanceJob` (name + advisory
+lock key + async fn) with its own lock key, so the jobs tick independently. Each tick first takes a session-level Postgres advisory lock
 with a try-lock — when another node holds it the tick skips silently, so
 however many API nodes run, exactly one does each job's work per tick; the
 first tick lands about 30 seconds after startup. While holding the lock it
@@ -427,7 +430,7 @@ extractor and asking `authz` for its permission:
 
 | Extractor | Permission | Used by |
 |---|---|---|
-| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones`, `GET /api/milestones/{id}/goals`, `GET /api/tasks/{id}/relations`, `GET /api/tasks/{id}/comments` and `GET /api/people` |
+| `ViewAccess` | `ViewContent` | the GET goal/milestone/task routes, plus `GET /api/goals/{id}/milestones`, `GET /api/milestones/{id}/goals`, `GET /api/tasks/{id}/relations`, `GET /api/tasks/{id}/comments`, the three dashboard reads (`GET /api/dashboard/summary`, `/trends` and `/timeline`) and `GET /api/people` |
 | `EditAccess` | `EditContent` | the POST/PUT/DELETE goal/milestone/task routes, plus `PUT`/`DELETE /api/goals/{id}/status-override` and the milestone equivalent, plus `PUT`/`DELETE /api/goals/{goal_id}/milestones/{milestone_id}`, plus `POST /api/tasks/{id}/relations` and `DELETE /api/tasks/{id}/relations/{relation_id}`, plus `PATCH /api/tasks/{id}/status`, plus `PUT`/`DELETE /api/tasks/{id}/assignee`, `PUT`/`DELETE /api/goals/{id}/owner` and `PUT`/`DELETE /api/milestones/{id}/owner`, plus the task-comment writes (`POST /api/tasks/{id}/comments`, `PUT`/`DELETE /api/tasks/{id}/comments/{comment_id}`) |
 | `AdminAccess` | `ManageUsers` | the `/api/users` routes, the invite and password-reset routes (`/api/invites`, `/api/users/{id}/password-reset`) and the temporary `/debug/*` routes (until their roadmap items replace them) |
 
@@ -618,11 +621,97 @@ idempotent no-op) live in
 `application::status_override::StatusOverrideService`, not in the handlers.
 
 After every successful set or clear the service calls the
-`StatusSnapshotTrigger` port with a `StatusChangeTarget::{Goal, Milestone}`,
-so 3.14 can attach real progress snapshots without touching the endpoints. The
-hook is best-effort like email delivery: a failure logs a warning and the
-override still succeeds. `NoopStatusSnapshotTrigger` is the current
-implementation.
+`StatusSnapshotTrigger` port with a `StatusChangeTarget::{Goal, Milestone}`;
+the real implementation (roadmap 3.14) records a `manual_change` progress
+snapshot of the changed entity — see "Progress snapshots" below. The hook is
+best-effort like email delivery: a failure logs a warning and the override
+still succeeds. `NoopStatusSnapshotTrigger` remains as a test double for the
+handler suites that do not exercise snapshots.
+
+### Progress snapshots
+
+A progress snapshot records ONE goal's or milestone's effective status at a
+moment (roadmap 3.14, D21). The `progress_snapshots` table — reshaped by
+migration 20261119000001 — stores the entity reference (the M1 foreign keys,
+still `ON DELETE CASCADE`), the effective `status` plus its `status_source`
+(`computed` or `manual_override`), the `taken_at` instant, the UTC
+`snapshot_date`, a `reason` of `daily` or `manual_change`, and — for
+milestones only — the percent complete. There are no per-task-edit snapshots
+and no goal percentage (D21).
+
+Two things write rows. **Manual changes:** after each successful override
+set/clear, the trigger implementation calls
+`ProgressSnapshotService::record_manual_change`, which records one snapshot of
+the changed entity only — idempotent no-ops write nothing, and a milestone
+override does not snapshot its linked goals: their rollup change is derived,
+and the daily sweep records it. **The daily sweep:** an hourly maintenance
+job (`interface::maintenance::record_daily_snapshots`, advisory lock key
+`MNVRSNAP`) calls `ProgressSnapshotService::ensure_daily_snapshots()`, which
+asks the repository for every goal and milestone missing a `daily` row for
+today's UTC date, returns immediately when none are missing, otherwise runs
+`recompute_all` first so a stale automatic status is refreshed before it is
+recorded, loads the missing entities fresh in batches of 200 (one grouped
+task-count lookup per milestone batch) and inserts one `daily` snapshot per
+entity. The sweep is idempotent by construction: partial unique indexes on
+(goal_id, snapshot_date) and (milestone_id, snapshot_date) restricted to
+`reason = 'daily'`, plus `ON CONFLICT DO NOTHING` on the batch insert, make a
+second insert — from the same node or another — a no-op, so catch-up after
+downtime or a mid-day creation needs no separate scheduler; days are UTC like
+D19.
+
+History rows cascade-delete with their entity; there is no retention policy in
+v1 (about one row per entity per day). Reading the history back belongs to
+3.15 (the dashboard API), which takes the latest snapshot per entity per day.
+
+### Dashboard API
+
+The dashboard (roadmap 3.15, D22) is three read-only endpoints under
+`/api/dashboard`, open to every signed-in role (`ViewAccess`), answering plain
+JSON documents: not paginated (small and bounded, like users and people), no
+caching (D11), no export (D10). They are served through a dedicated
+**read-model port** — `application::ports::DashboardRepository`, with the
+Postgres implementation in `infrastructure` — rather than the entity
+repositories: the dashboard's questions (counts by effective status, a per-day
+snapshot series, one ordered view of both entities plus their links) do not
+map onto any single entity repository's methods, and a read-model port keeps
+those shapes from leaking into the write-side ports.
+`DashboardService` (`application::dashboard`) assembles the responses: for
+the timeline it resolves owners with exactly one deduplicated
+`summaries_by_ids` call for both lists together and percent complete with one
+grouped `task_counts_for_milestones` lookup, like the other person-summary and
+task-count reads.
+
+- **`GET /api/dashboard/summary`** — live counts of goals and milestones by
+  **effective** status (D12: the override when set, else the stored value),
+  all four statuses always present with zeros filled in, each status carrying
+  how many of its items are manually set, plus the list of manually set items
+  with their automatic status alongside and an `as_of` timestamp. The counts
+  come from the stored statuses — the same values 3.13 persists — not
+  recomputed on read.
+- **`GET /api/dashboard/trends?from=&to=`** — the progress series, from the
+  snapshot history (D21) only, never live data: for each UTC day, each
+  entity's latest snapshot of that day regardless of reason, with no
+  carry-forward — a day without snapshots is omitted, not invented. Goals and
+  milestones are separate series; each day reports counts per status, a total
+  and a manual count, and milestone days additionally the average percent
+  complete (one decimal, null when none was recorded). The window is inclusive
+  UTC dates, defaulting to the last 90 days ending today, at most 366 days;
+  anything invalid is a 400 `invalid_query` naming the parameter.
+- **`GET /api/dashboard/timeline?target_after=&target_before=`** — every goal
+  and milestone in the shared default order (3.16), each with its start date
+  (the UTC calendar date of creation, D19), nullable target date, effective
+  status plus `status_source` and automatic status, owner as a person summary
+  or null (never the email), and — for milestones — percent complete; goals
+  additionally carry the ids of their linked milestones. The optional inclusive
+  `target_after`/`target_before` bounds follow the list-endpoint semantics:
+  with either bound present, undated rows never match; with neither, undated
+  rows are included last; an inverted range matches nothing rather than
+  erroring. A goal inside a window keeps the id of a linked milestone outside
+  it — the links are listed regardless of the bounds, so the UI can render the
+  link without a second request.
+
+All three are read-only: they write nothing, fire no snapshot trigger (D5) and
+run no status recomputation (3.13).
 
 ### Goal↔milestone links
 
@@ -782,8 +871,9 @@ row counts do not justify one, and the effective-status filter is an expression
 over two columns that a plain b-tree cannot serve.
 
 Deliberately **not** paginated: `GET /api/users`, `GET /api/invites`,
-`GET /api/sso/group-rules`, `GET /api/people` and
-`GET /api/tasks/{id}/relations` — each is small and bounded, so a bare array
+`GET /api/sso/group-rules`, `GET /api/people`, `GET /api/tasks/{id}/relations`
+and the three dashboard reads (`GET /api/dashboard/summary`, `/trends` and
+`/timeline`) — each is small and bounded, so a bare array or a single document
 stays the simpler contract.
 
 ### Assignees and owners
@@ -897,7 +987,7 @@ The `interface` crate generates an OpenAPI 3 document from code annotations
 Under Docker compose the API is mapped to host port 3010, so use
 http://localhost:3010/api-docs/swagger-ui/ there. All `/api/*` endpoints
 (auth, goals, goal–milestone links, milestones, tasks, task relations, task
-comments, people, users, invites and SSO group rules) are documented; the
+comments, dashboard, people, users, invites and SSO group rules) are documented; the
 temporary
 `/debug/*` routes are not. Protected endpoints declare the `session_cookie` security
 scheme (the session cookie as an API key, registered by a `utoipa::Modify`

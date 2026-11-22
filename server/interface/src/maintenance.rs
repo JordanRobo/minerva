@@ -4,6 +4,7 @@
 //! however many API nodes run, exactly one does the work per tick.
 
 use application::ports::{RepositoryError, SessionRepository};
+use application::progress_snapshots::{ProgressSnapshotError, ProgressSnapshotService};
 use application::rate_limit::{RateLimiter, longest_policy_window};
 use application::status_computation::{StatusComputationError, StatusComputationService};
 use chrono::Utc;
@@ -32,8 +33,12 @@ const PURGE_LOCK_KEY: i64 = 0x4D4E5652_50524745;
 const RATE_LIMIT_PURGE_LOCK_KEY: i64 = 0x4D4E5652_524C494D;
 
 /// Advisory lock key for the status-recomputation job; "MNVRRCMP" read as
-/// ASCII, distinct from the purge keys so all three jobs tick independently.
+/// ASCII, distinct from the other keys so all four jobs tick independently.
 const RECOMPUTE_LOCK_KEY: i64 = 0x4D4E5652_52434D50;
+
+/// Advisory lock key for the daily-snapshot job; "MNVRSNAP" read as ASCII,
+/// distinct from the other keys so all four jobs tick independently.
+const SNAPSHOT_LOCK_KEY: i64 = 0x4D4E5652_534E4150;
 
 /// The work a maintenance job does: how many items it processed, or the
 /// storage error that stopped it.
@@ -117,16 +122,43 @@ pub fn recompute_statuses(computation: Arc<StatusComputationService>) -> Mainten
     })
 }
 
-/// The maintenance jobs for one node: the status recompute always runs (it
-/// needs only Postgres), while the session and rate-limit purges run only
-/// when Postgres holds those stores — with Redis, native TTLs evict them
-/// instead. Every node ticks every job it registers; the advisory locks mean
-/// exactly one node does each job's work per tick (roadmap 2.8).
+/// The daily-snapshot job (roadmap 3.14): ensures every goal and milestone
+/// has one `daily` snapshot for the current UTC date, recomputing statuses
+/// first so a stale row is never recorded. It needs only Postgres, so it is
+/// registered on every node regardless of the session store (see
+/// `jobs_for`). Catch-up by design: an entity created mid-day, or a node
+/// that was down since yesterday, gets its row on the next tick — no
+/// midnight scheduler.
+pub fn record_daily_snapshots(snapshots: Arc<ProgressSnapshotService>) -> MaintenanceJob {
+    MaintenanceJob::new("record_daily_snapshots", SNAPSHOT_LOCK_KEY, move || {
+        let snapshots = snapshots.clone();
+        async move {
+            snapshots
+                .ensure_daily_snapshots()
+                .await
+                .map(|inserted| inserted as u64)
+                .map_err(|err| match err {
+                    ProgressSnapshotError::Repository(err) => err,
+                })
+        }
+    })
+}
+
+/// The maintenance jobs for one node: the status recompute and the daily
+/// snapshot sweep always run (they need only Postgres), while the session
+/// and rate-limit purges run only when Postgres holds those stores — with
+/// Redis, native TTLs evict them instead. Every node ticks every job it
+/// registers; the advisory locks mean exactly one node does each job's work
+/// per tick (roadmap 2.8).
 pub fn jobs_for(
     computation: Arc<StatusComputationService>,
+    snapshots: Arc<ProgressSnapshotService>,
     postgres_stores: Option<(Arc<dyn SessionRepository>, Arc<dyn RateLimiter>)>,
 ) -> Vec<MaintenanceJob> {
-    let mut jobs = vec![recompute_statuses(computation)];
+    let mut jobs = vec![
+        recompute_statuses(computation),
+        record_daily_snapshots(snapshots),
+    ];
     if let Some((sessions, limiter)) = postgres_stores {
         jobs.push(purge_expired_sessions(sessions));
         jobs.push(purge_rate_limit_counters(limiter));
@@ -179,13 +211,20 @@ pub fn start(pool: PgPool, jobs: Vec<MaintenanceJob>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use application::ports::{Clock, MilestoneRepository};
-    use chrono::NaiveDate;
-    use domain::{Milestone, MilestoneId, Status};
+    use application::ports::{
+        Clock, GoalRepository, MilestoneRepository, ProgressSnapshotRepository,
+    };
+    use application::status_computation::StatusRecomputation;
+    use chrono::{DateTime, NaiveDate};
+    use domain::{
+        Goal, GoalId, Milestone, MilestoneId, ProgressSnapshot, SnapshotReason, Status,
+        StatusSource,
+    };
     use infrastructure::migrations::run_migrations;
     use infrastructure::repositories::{
         PostgresGoalMilestoneRepository, PostgresGoalRepository, PostgresMilestoneRepository,
-        PostgresRateLimiter, PostgresSessionRepository, PostgresTaskRepository,
+        PostgresProgressSnapshotRepository, PostgresRateLimiter, PostgresSessionRepository,
+        PostgresTaskRepository,
     };
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -282,12 +321,14 @@ mod tests {
     }
 
     /// A clock pinned to one date, so the recompute test can advance "today"
-    /// past a milestone's target date without waiting for it.
+    /// past a milestone's target date without waiting for it. The instant
+    /// sits at 09:00 of that date, far enough from midnight that `today()`
+    /// stays on it.
     struct FixedClock(NaiveDate);
 
     impl Clock for FixedClock {
-        fn today(&self) -> NaiveDate {
-            self.0
+        fn now(&self) -> DateTime<Utc> {
+            self.0.and_hms_opt(9, 0, 0).unwrap().and_utc()
         }
     }
 
@@ -323,6 +364,58 @@ mod tests {
             created_at: created,
             updated_at: created,
         }
+    }
+
+    /// A goal with no override and no milestones — its effective status is
+    /// the stored automatic one (On Track), which the sweep should record as
+    /// `automatic`.
+    fn snapshot_test_goal() -> Goal {
+        let created = NaiveDate::from_ymd_opt(2026, 1, 1)
+            .expect("valid date")
+            .and_hms_opt(9, 0, 0)
+            .expect("valid time")
+            .and_utc();
+        Goal {
+            id: GoalId::new(),
+            title: "Maintenance snapshot goal".into(),
+            description: None,
+            status: Status::OnTrack,
+            status_override: None,
+            target_date: None,
+            owner_id: None,
+            created_at: created,
+            updated_at: created,
+        }
+    }
+
+    /// A full daily-snapshot service over the real Postgres tables, with the
+    /// clock pinned to `today`. The recompute port is the real service so
+    /// the sweep's freshness pass runs for real.
+    fn daily_snapshot_service(pool: &PgPool, today: NaiveDate) -> Arc<ProgressSnapshotService> {
+        let computation: Arc<dyn StatusRecomputation> = Arc::new(StatusComputationService::new(
+            Arc::new(PostgresGoalRepository::new(pool.clone())),
+            Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresGoalMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            Arc::new(FixedClock(today)),
+        ));
+        Arc::new(ProgressSnapshotService::new(
+            Arc::new(PostgresGoalRepository::new(pool.clone())),
+            Arc::new(PostgresMilestoneRepository::new(pool.clone())),
+            Arc::new(PostgresTaskRepository::new(pool.clone())),
+            Arc::new(PostgresProgressSnapshotRepository::new(pool.clone())),
+            computation,
+            Arc::new(FixedClock(today)),
+        ))
+    }
+
+    /// The rows dated `today` only: a running dev server's own sweep writes
+    /// rows for its real today, never the pinned test date, so scoping to it
+    /// keeps these assertions immune to that traffic.
+    fn rows_on(rows: Vec<ProgressSnapshot>, today: NaiveDate) -> Vec<ProgressSnapshot> {
+        rows.into_iter()
+            .filter(|row| row.snapshot_date == today)
+            .collect()
     }
 
     #[tokio::test]
@@ -376,22 +469,22 @@ mod tests {
     #[test]
     fn jobs_register_for_the_session_store_in_use() {
         let Some(pool) = pool() else { return };
-        let computation = recompute_service(
-            &pool,
-            NaiveDate::from_ymd_opt(2026, 2, 15).expect("valid date"),
-        );
+        let today = NaiveDate::from_ymd_opt(2026, 2, 15).expect("valid date");
+        let computation = recompute_service(&pool, today);
+        let snapshots = daily_snapshot_service(&pool, today);
 
-        // Redis-backed sessions: only the recompute job — native TTLs evict
-        // expired sessions and stale counters.
-        let redis_node = jobs_for(computation.clone(), None);
+        // Redis-backed sessions: the two always-on Postgres jobs — native
+        // TTLs evict expired sessions and stale counters.
+        let redis_node = jobs_for(computation.clone(), snapshots.clone(), None);
         assert_eq!(
             redis_node.iter().map(|job| job.name).collect::<Vec<_>>(),
-            vec!["recompute_statuses"]
+            vec!["recompute_statuses", "record_daily_snapshots"]
         );
 
-        // Postgres-backed: the purges join it, each under its own key.
+        // Postgres-backed: the purges join them, each under its own key.
         let postgres_node = jobs_for(
             computation,
+            snapshots,
             Some((
                 Arc::new(PostgresSessionRepository::new(pool.clone())),
                 Arc::new(PostgresRateLimiter::new(pool.clone())),
@@ -401,6 +494,7 @@ mod tests {
             postgres_node.iter().map(|job| job.name).collect::<Vec<_>>(),
             vec![
                 "recompute_statuses",
+                "record_daily_snapshots",
                 "purge_expired_sessions",
                 "purge_rate_limit_counters"
             ]
@@ -409,6 +503,170 @@ mod tests {
             .iter()
             .map(|job| job.lock_key)
             .collect::<HashSet<_>>();
-        assert_eq!(keys.len(), 3, "each job needs its own lock key");
+        assert_eq!(keys.len(), 4, "each job needs its own lock key");
+    }
+
+    #[tokio::test]
+    async fn a_daily_snapshot_tick_records_one_row_per_entity_and_the_second_inserts_nothing() {
+        let Some(pool) = pool() else { return };
+        run_migrations(&pool).expect("apply migrations");
+        let today = NaiveDate::from_ymd_opt(2026, 2, 15).expect("valid date");
+        let service = daily_snapshot_service(&pool, today);
+        let snapshots = PostgresProgressSnapshotRepository::new(pool.clone());
+        let goals = PostgresGoalRepository::new(pool.clone());
+        let milestones = PostgresMilestoneRepository::new(pool.clone());
+        let job = record_daily_snapshots(service);
+
+        // Phase 1: the tick takes the lock itself and runs. A running dev
+        // server's sweep could hold the key for a moment; if it does, bail
+        // rather than assert against its in-flight work. The pinned date is
+        // far from "real" today, so the dev server never writes rows for it.
+        let goal = snapshot_test_goal();
+        let milestone = past_due_milestone();
+        goals.create(goal.clone()).await.expect("seed");
+        milestones.create(milestone.clone()).await.expect("seed");
+        if try_acquire_advisory_lock(&pool, job.lock_key)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            goals.delete(goal.id).await.ok();
+            milestones.delete(milestone.id).await.ok();
+            return;
+        }
+        // A parallel test suite can delete an entity mid-recompute (the id
+        // list and the status write race), which aborts the tick with
+        // NotFound before it writes anything — so retry like the hourly
+        // schedule would: a failed tick changes nothing, the next retries.
+        for _ in 0..5 {
+            run_tick(&pool, &job).await;
+            let goal_has =
+                !rows_on(snapshots.list_for_goal(goal.id).await.unwrap(), today).is_empty();
+            let milestone_has = !rows_on(
+                snapshots.list_for_milestone(milestone.id).await.unwrap(),
+                today,
+            )
+            .is_empty();
+            if goal_has && milestone_has {
+                break;
+            }
+        }
+        let goal_rows = rows_on(snapshots.list_for_goal(goal.id).await.unwrap(), today);
+        assert_eq!(goal_rows.len(), 1, "one daily row for the goal");
+        assert_eq!(goal_rows[0].status, Status::OnTrack);
+        assert_eq!(goal_rows[0].source, StatusSource::Computed);
+        assert_eq!(goal_rows[0].reason, SnapshotReason::Daily);
+        let milestone_rows = rows_on(
+            snapshots.list_for_milestone(milestone.id).await.unwrap(),
+            today,
+        );
+        assert_eq!(milestone_rows.len(), 1, "one daily row for the milestone");
+        // The recompute ran before the recording, so the past target date is
+        // in the row, not the stale stored status.
+        assert_eq!(milestone_rows[0].status, Status::OffTrack);
+        assert_eq!(milestone_rows[0].source, StatusSource::Computed);
+        assert_eq!(milestone_rows[0].reason, SnapshotReason::Daily);
+
+        // Phase 2: a second tick the same day inserts nothing — the anti-join
+        // finds no missing ids and returns before writing.
+        run_tick(&pool, &job).await;
+        assert_eq!(
+            rows_on(snapshots.list_for_goal(goal.id).await.unwrap(), today).len(),
+            1
+        );
+        assert_eq!(
+            rows_on(
+                snapshots.list_for_milestone(milestone.id).await.unwrap(),
+                today,
+            )
+            .len(),
+            1
+        );
+
+        // Phase 3: with the lock held by this "node", the tick skips silently
+        // and a freshly seeded entity gets no row. Seeded under the lock so
+        // no concurrent sweep can touch it.
+        let Some(held) = try_acquire_advisory_lock(&pool, job.lock_key)
+            .await
+            .unwrap()
+        else {
+            goals.delete(goal.id).await.ok();
+            milestones.delete(milestone.id).await.ok();
+            return;
+        };
+        let late_goal = snapshot_test_goal();
+        let late_milestone = past_due_milestone();
+        goals.create(late_goal.clone()).await.expect("seed");
+        milestones
+            .create(late_milestone.clone())
+            .await
+            .expect("seed");
+        run_tick(&pool, &job).await;
+        drop(held);
+        assert!(rows_on(snapshots.list_for_goal(late_goal.id).await.unwrap(), today).is_empty());
+        assert!(
+            rows_on(
+                snapshots
+                    .list_for_milestone(late_milestone.id)
+                    .await
+                    .unwrap(),
+                today,
+            )
+            .is_empty()
+        );
+
+        // Deleting the entities cascades their snapshot rows away.
+        goals.delete(goal.id).await.ok();
+        goals.delete(late_goal.id).await.ok();
+        milestones.delete(milestone.id).await.ok();
+        milestones.delete(late_milestone.id).await.ok();
+    }
+
+    #[tokio::test]
+    async fn concurrent_daily_sweeps_insert_each_entity_once() {
+        let Some(pool) = pool() else { return };
+        run_migrations(&pool).expect("apply migrations");
+        let today = NaiveDate::from_ymd_opt(2026, 3, 10).expect("valid date");
+        let service = daily_snapshot_service(&pool, today);
+        let snapshots = PostgresProgressSnapshotRepository::new(pool.clone());
+        let goals = PostgresGoalRepository::new(pool.clone());
+        let milestones = PostgresMilestoneRepository::new(pool.clone());
+
+        let goal = snapshot_test_goal();
+        let milestone = past_due_milestone();
+        goals.create(goal.clone()).await.expect("seed");
+        milestones.create(milestone.clone()).await.expect("seed");
+
+        // Two "nodes" sweep at once: each (entity, date) pair lands exactly
+        // once — the partial unique index plus ON CONFLICT DO NOTHING makes
+        // the losing insert a no-op. A parallel test suite can delete an
+        // entity mid-recompute and abort one call before it writes anything,
+        // so retry like the hourly schedule would until both complete; the
+        // rows for other entities in the shared database are legitimate
+        // sweep work, not duplicates, so only our own two are counted.
+        for _ in 0..5 {
+            let (first, second) = tokio::join!(
+                service.ensure_daily_snapshots(),
+                service.ensure_daily_snapshots()
+            );
+            if first.is_ok() && second.is_ok() {
+                break;
+            }
+        }
+        assert_eq!(
+            rows_on(snapshots.list_for_goal(goal.id).await.unwrap(), today).len(),
+            1
+        );
+        assert_eq!(
+            rows_on(
+                snapshots.list_for_milestone(milestone.id).await.unwrap(),
+                today,
+            )
+            .len(),
+            1
+        );
+
+        goals.delete(goal.id).await.ok();
+        milestones.delete(milestone.id).await.ok();
     }
 }

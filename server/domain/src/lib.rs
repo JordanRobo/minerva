@@ -28,8 +28,9 @@ pub use goal::{Goal, GoalId};
 pub use goal_milestone::GoalMilestone;
 pub use milestone::{Milestone, MilestoneId};
 pub use progress::{
-    MilestoneProgress, ProgressError, ProgressSnapshot, ProgressSnapshotId, ProgressTarget,
-    SCHEDULE_GAP_AT_RISK, SCHEDULE_GAP_OFF_TRACK, compute_milestone_status, percent_complete,
+    MilestoneProgress, NewSnapshot, ProgressError, ProgressSnapshot, ProgressSnapshotId,
+    ProgressTarget, SCHEDULE_GAP_AT_RISK, SCHEDULE_GAP_OFF_TRACK, SnapshotReason,
+    compute_milestone_status, percent_complete,
 };
 pub use role::{DEFAULT_NEW_USER_ROLE, Permission, Role, SSO_FALLBACK_ROLE};
 pub use session::{Session, SessionId};

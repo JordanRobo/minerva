@@ -58,10 +58,12 @@ diesel::table! {
         id -> Uuid,
         goal_id -> Nullable<Uuid>,
         milestone_id -> Nullable<Uuid>,
-        recorded_at -> Timestamptz,
+        taken_at -> Timestamptz,
+        snapshot_date -> Date,
         status -> Text,
-        percent_complete -> Int2,
-        note -> Nullable<Text>,
+        status_source -> Text,
+        reason -> Text,
+        percent_complete -> Nullable<Int2>,
     }
 }
 

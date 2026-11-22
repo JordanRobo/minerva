@@ -1,7 +1,7 @@
 //! OpenAPI document for the Minerva API, assembled from the
-//! `#[utoipa::path]` annotations on the handlers in `auth`, `goal_milestones`,
-//! `goals`, `milestones`, `people`, `redirect`, `sso_rules`, `task_comments`,
-//! `task_relations`, `tasks`, and `users`. Served as JSON at
+//! `#[utoipa::path]` annotations on the handlers in `auth`, `dashboard`,
+//! `goal_milestones`, `goals`, `milestones`, `people`, `redirect`,
+//! `sso_rules`, `task_comments`, `task_relations`, `tasks`, and `users`. Served as JSON at
 //! `/api-docs/openapi.json` and
 //! rendered by Swagger UI at `/api-docs/swagger-ui/` (wired up in `main.rs`).
 //!
@@ -103,6 +103,7 @@ pub enum StatusSourceDoc {
     modifiers(&SessionCookieSecurity),
     tags(
         (name = "auth", description = "Authentication: login, logout, the current user, and account links (invites, password resets)."),
+        (name = "dashboard", description = "Dashboard: read-only status summaries, trends, and the timeline of goals and milestones. Any signed-in role may read."),
         (name = "goal-milestone-links", description = "Goal–milestone links: relate a milestone to a goal and list each side of the relation. Linking and unlinking are safe to repeat."),
         (name = "goals", description = "Goals: the top-level outcomes a school works toward."),
         (name = "invites", description = "Invites: one-time links that create new accounts. Admin only."),
@@ -124,6 +125,9 @@ pub enum StatusSourceDoc {
         crate::account_links::reset_password,
         crate::redirect::redirect_login,
         crate::redirect::redirect_callback,
+        crate::dashboard::summary,
+        crate::dashboard::trends,
+        crate::dashboard::timeline,
         crate::goals::create_goal,
         crate::goals::list_goals,
         crate::goals::get_goal,
@@ -221,6 +225,18 @@ pub enum StatusSourceDoc {
         crate::account_links::LinkInfoResponse,
         crate::account_links::AcceptInviteRequest,
         crate::account_links::ResetPasswordRequest,
+        crate::dashboard::DashboardSummaryResponse,
+        crate::dashboard::KindSummary,
+        crate::dashboard::ByStatus,
+        crate::dashboard::StatusCountResponse,
+        crate::dashboard::ManuallySetItemResponse,
+        crate::dashboard::DashboardKindDoc,
+        crate::dashboard::TrendsResponse,
+        crate::dashboard::TrendPointResponse,
+        crate::dashboard::TrendCounts,
+        crate::dashboard::TimelineResponse,
+        crate::dashboard::TimelineGoalResponse,
+        crate::dashboard::TimelineMilestoneResponse,
         InviteStatusDoc,
         LinkPurposeDoc,
         RoleDoc,

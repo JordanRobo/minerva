@@ -19,6 +19,7 @@ use application::assignment::AssignmentService;
 use application::auth::SessionService;
 use application::auth::password::PasswordAuthProvider;
 use application::auth::provider::AuthProviders;
+use application::dashboard::DashboardService;
 use application::goal_list::GoalListService;
 use application::goal_milestone_links::GoalMilestoneLinkService;
 use application::goal_service::GoalService;
@@ -44,10 +45,10 @@ use diesel::prelude::*;
 use domain::{GoalId, MilestoneId, Permission, Role, SsoGroupRuleId, TaskId, User, UserId};
 use infrastructure::db::PgPool;
 use infrastructure::repositories::{
-    PostgresAccountTokenRepository, PostgresGoalMilestoneRepository, PostgresGoalRepository,
-    PostgresMilestoneRepository, PostgresProgressSnapshotRepository, PostgresSessionRepository,
-    PostgresSsoGroupRuleRepository, PostgresTaskCommentRepository, PostgresTaskRelationRepository,
-    PostgresTaskRepository, PostgresUserRepository,
+    PostgresAccountTokenRepository, PostgresDashboardRepository, PostgresGoalMilestoneRepository,
+    PostgresGoalRepository, PostgresMilestoneRepository, PostgresProgressSnapshotRepository,
+    PostgresSessionRepository, PostgresSsoGroupRuleRepository, PostgresTaskCommentRepository,
+    PostgresTaskRelationRepository, PostgresTaskRepository, PostgresUserRepository,
 };
 use infrastructure::{Argon2PasswordHasher, NoEmailSender, Sha256SessionTokens};
 use std::sync::Arc;
@@ -216,7 +217,7 @@ macro_rules! test_app {
                     Arc::new(PostgresTaskRepository::new(pool.clone())),
                     Arc::new(PostgresGoalRepository::new(pool.clone())),
                     Arc::new(PostgresMilestoneRepository::new(pool.clone())),
-                    users,
+                    users.clone(),
                 )))
                 .app_data(web::Data::new(TaskListService::new(Arc::new(
                     PostgresTaskRepository::new(pool.clone()),
@@ -227,6 +228,16 @@ macro_rules! test_app {
                 .app_data(web::Data::new(MilestoneListService::new(Arc::new(
                     PostgresMilestoneRepository::new(pool.clone()),
                 ))))
+                // Dashboard (roadmap 3.15, D22): the summary, trends and
+                // timeline routes read through the service over its own
+                // repository instances; the timeline resolves owners and
+                // percents through the user and task ports.
+                .app_data(web::Data::new(DashboardService::new(
+                    Arc::new(PostgresDashboardRepository::new(pool.clone())),
+                    users,
+                    Arc::new(PostgresTaskRepository::new(pool.clone())),
+                    Arc::new(SystemClock),
+                )))
                 .app_data(providers)
                 .app_data(web::Data::new(CookieSettings { secure: false }))
                 // Rate limiting is disabled in these tests (they assert the
@@ -605,6 +616,26 @@ fn protected_routes() -> Vec<(Method, String, Permission, Option<serde_json::Val
         (
             Method::GET,
             "/api/people".into(),
+            Permission::ViewContent,
+            None,
+        ),
+        // The dashboard summary, trends and timeline (roadmap 3.15, D22): any
+        // signed-in role may read them.
+        (
+            Method::GET,
+            "/api/dashboard/summary".into(),
+            Permission::ViewContent,
+            None,
+        ),
+        (
+            Method::GET,
+            "/api/dashboard/trends".into(),
+            Permission::ViewContent,
+            None,
+        ),
+        (
+            Method::GET,
+            "/api/dashboard/timeline".into(),
             Permission::ViewContent,
             None,
         ),
