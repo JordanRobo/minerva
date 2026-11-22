@@ -3,6 +3,7 @@
 	import Button from '$lib/components/ui/Button.svelte';
 	import Banner from '$lib/components/ui/Banner.svelte';
 	import Field from '$lib/components/ui/Field.svelte';
+	import FormAlert from '$lib/components/ui/FormAlert.svelte';
 	import Select from '$lib/components/ui/Select.svelte';
 	import PageHeader from '$lib/components/ui/PageHeader.svelte';
 	import PageSkeleton from '$lib/components/ui/PageSkeleton.svelte';
@@ -121,6 +122,14 @@
 	<h2>Banner</h2>
 	<Banner>Something worth knowing, in one plain sentence.</Banner>
 	<Banner dismissible>This notice can be dismissed — with the button or the keyboard.</Banner>
+</section>
+
+<section class="section">
+	<h2>FormAlert</h2>
+	<p class="demo-note">
+		Form-level error message: role="alert" and tabindex="-1" let a failed submit move focus here; the copy carries the semantic error colour, with the icon and the accent left border keeping the signal from ever resting on colour alone.
+	</p>
+	<FormAlert>That email is already taken. Try signing in instead.</FormAlert>
 </section>
 
 <section class="section">
