@@ -5,7 +5,7 @@ Everything below is *derived* — no token here was hand-authored.
 
 - **slug:** `minerva`
 - **source:** designmd://minerva-is-open-source
-- **primary seed color:** `#c4502b`
+- **primary seed color:** `#101114`
 - **derived tokens per theme:** 218
 - **themes:** default · dark · compact (same seed, different algorithm)
 

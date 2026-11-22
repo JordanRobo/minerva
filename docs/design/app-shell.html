@@ -14,26 +14,40 @@
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap" rel="stylesheet" />
   <style>
     /* ─── tokens (Minerva design system) ─────────────────────────────
-       Light palette is the registered brand palette. Dark values come
-       from the Minerva posture (dark mode) and extend the palette for
-       dark surfaces only. No raw hex outside this block. */
+       The Gate Board palette: cool neutral ground, ink rules. Dark mode
+       flips ground and panel; the rail is ink in both modes. No raw hex
+       outside this block. */
     :root {
-      --bg: #fbf6ee;          /* cream — page canvas */
-      --surface: #ffffff;     /* white — cards, panels */
-      --fg: #1e2233;          /* ink — text, dark surfaces */
-      --muted: #5b6078;       /* slate — secondary text */
-      --border: #dfdbd7;      /* ink line — 1px rules */
-      --accent: #c4502b;      /* terracotta — light backgrounds only */
-      --accent-2: #e9805f;    /* ember — dark backgrounds only */
-      --bg-dark: #171a28;     /* posture: dark canvas */
-      --surface-dark: #1e2233;/* posture: dark cards */
-      --fg-dark: #f3ece1;     /* posture: dark text */
+      --ink: #101114;          /* constant — text & primary action (light) */
+      --paper: #f2f3f4;        /* constant — labels on ink, text (dark) */
 
-      --font-display: 'Fraunces', Georgia, serif;
+      --bg: var(--paper);      /* ground — page canvas */
+      --surface: #ffffff;      /* panel — cards, banners */
+      --fg: var(--ink);        /* ink — text */
+      --muted: #5a5f69;        /* slate — secondary text */
+      --border: #e2e2e3;       /* 1px rules (12% ink) */
+      --accent: var(--ink);    /* primary action, focus ring (light) */
+      --dot: #c4502b;          /* terracotta — wordmark artwork only */
+
+      --bg-dark: #131417;      /* dark ground */
+      --surface-dark: #1b1d21; /* dark panel */
+      --fg-dark: var(--paper); /* dark text (paper) */
+      --muted-dark: #9ca1ab;   /* dark slate */
+      --border-dark: #393a3e;  /* dark rules (15% paper) */
+
+      /* the rail is ink in both modes */
+      --rail-bg: var(--ink);
+      --rail-fg: var(--paper);
+      --rail-muted: #a7a9ae;
+      --rail-line: rgba(242, 243, 244, 0.15);
+      --rail-bg-dark: #0c0d0f;
+      --rail-muted-dark: #9ca1ab;
+
+      --font-display: 'Fraunces', Georgia, serif; /* wordmark artwork only */
       --font-body: system-ui, -apple-system, 'Segoe UI', sans-serif;
-      --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+      --font-mono: 'Spline Sans Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
-      --radius: 12px;
+      --radius: 6px;
 
       /* shell-only tokens (new — listed in Handoff) */
       --shell-sidebar-w: 264px;
@@ -60,7 +74,7 @@
     a { color: inherit; text-decoration: none; }
     button { font: inherit; color: inherit; cursor: pointer; background: none; border: 0; padding: 0; }
     p { text-wrap: pretty; margin: 0; }
-    h1, h2, h3, h4 { text-wrap: balance; margin: 0; font-family: var(--font-display); font-weight: 500; }
+    h1, h2, h3, h4 { text-wrap: balance; margin: 0; font-family: var(--font-body); font-weight: 600; letter-spacing: -0.01em; }
     :focus-visible { outline: 2px solid var(--sh-accent, var(--accent)); outline-offset: 2px; }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -70,7 +84,7 @@
     .lead { font-size: 17px; line-height: 1.55; color: var(--muted); max-width: 62ch; }
     .eyebrow {
       font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em;
-      text-transform: uppercase; color: var(--accent); margin: 0 0 var(--gap-md);
+      text-transform: uppercase; color: var(--muted); margin: 0 0 var(--gap-md);
     }
     .meta { font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
     .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
@@ -88,7 +102,7 @@
     .log-row h3 { font-family: var(--font-body); font-size: 15px; font-weight: 600; }
     .log-row p { font-size: 14px; color: var(--muted); margin-top: 2px; }
     .log-row .pull { text-align: right; }
-    .tag { display: inline-flex; align-items: center; padding: 3px 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; font-size: 12px; white-space: nowrap; }
+    .tag { display: inline-flex; align-items: center; padding: 3px 10px; color: var(--muted); border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; white-space: nowrap; }
 
     .field { display: flex; flex-direction: column; gap: 6px; }
     .field label { font-size: 13px; color: var(--muted); }
@@ -107,7 +121,7 @@
     .dot { position: relative; }
     .dot::after {
       content: ''; position: absolute; width: .28em; height: .28em; border-radius: 50%;
-      background: var(--sh-accent, var(--accent)); left: 50%; top: -0.32em; transform: translateX(-50%);
+      background: var(--dot); left: 50%; top: -0.32em; transform: translateX(-50%);
     }
     .frame { margin-top: var(--gap-xl); }
     .frame:first-of-type { margin-top: 0; }
@@ -132,14 +146,15 @@
     .shell {
       --sh-bg: var(--bg); --sh-surface: var(--surface); --sh-fg: var(--fg);
       --sh-muted: var(--muted); --sh-line: var(--border); --sh-accent: var(--accent);
+      --sh-rail: var(--rail-bg); --sh-rail-fg: var(--rail-fg);
+      --sh-rail-muted: var(--rail-muted); --sh-rail-line: var(--rail-line);
       background: var(--sh-bg); color: var(--sh-fg);
       font-family: var(--font-body); font-size: 16px; line-height: 1.65;
     }
     .shell.dark {
       --sh-bg: var(--bg-dark); --sh-surface: var(--surface-dark); --sh-fg: var(--fg-dark);
-      --sh-muted: color-mix(in oklch, var(--fg-dark) 62%, transparent);
-      --sh-line: color-mix(in oklch, var(--fg-dark) 15%, transparent);
-      --sh-accent: var(--accent-2);
+      --sh-muted: var(--muted-dark); --sh-line: var(--border-dark); --sh-accent: var(--fg-dark);
+      --sh-rail: var(--rail-bg-dark); --sh-rail-muted: var(--rail-muted-dark);
     }
 
     /* skip link (first tab stop in every shell) */
@@ -152,7 +167,8 @@
     .skip:focus { top: 12px; }
 
     /* ─── buttons (in-shell) ─────────────────────────────────────────
-       Primary labels sit on terracotta at 18px+ per posture. */
+       Primary: an 18px label on the ink block, inverting to a paper
+       block with an ink label in dark. */
     .shell .btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       border-radius: var(--radius); border: 1px solid transparent;
@@ -161,12 +177,11 @@
     }
     .shell .btn:active { transform: translateY(1px); }
     .shell .btn-primary {
-      background: var(--sh-accent); color: var(--surface);
+      background: var(--sh-accent); color: var(--paper);
       font-size: 18px; padding: 9px 20px; min-height: var(--touch-min);
     }
     .shell .btn-primary:hover { background: color-mix(in oklch, var(--sh-accent) 88%, black); }
-    .shell.dark .btn-primary { color: var(--fg); }
-    .shell.dark .btn-primary:hover { background: color-mix(in oklch, var(--sh-accent) 88%, black); }
+    .shell.dark .btn-primary { color: var(--ink); }
     .shell .btn-secondary {
       background: transparent; color: var(--sh-fg); border-color: var(--sh-line);
       font-size: 14.5px; padding: 8px 16px; min-height: 40px;
@@ -179,7 +194,7 @@
     .shell .btn-ghost:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); }
 
     /* ─── desktop shell: grid ──────────────────────────────────────── */
-    .tdot { color: var(--sh-accent, var(--accent)); }
+    .tdot { color: var(--dot); }
     .shell.desktop {
       position: relative;
       display: grid; grid-template-columns: var(--shell-sidebar-w) minmax(0, 1fr);
@@ -189,20 +204,20 @@
 
     /* sidebar */
     .sidebar {
-      background: var(--sh-surface); border-right: 1px solid var(--sh-line);
+      background: var(--sh-rail); border-right: 1px solid var(--sh-rail-line);
       display: flex; flex-direction: column; padding: 16px 12px 12px; min-height: 0;
     }
     .brand-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px 16px; }
     .brand {
       font-family: var(--font-display); font-weight: 600; font-size: 21px;
-      letter-spacing: -0.01em; color: var(--sh-fg);
+      letter-spacing: -0.01em; color: var(--sh-rail-fg);
     }
     .brand .sym { display: none; }
     .collapse-btn {
       width: 30px; height: 30px; display: grid; place-items: center;
-      border-radius: 8px; color: var(--sh-muted);
+      border-radius: 8px; color: var(--sh-rail-muted);
     }
-    .collapse-btn:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); color: var(--sh-fg); }
+    .collapse-btn:hover { background: color-mix(in oklch, var(--sh-rail-fg) 10%, transparent); color: var(--sh-rail-fg); }
     .collapse-btn .ic { width: 16px; height: 16px; transition: transform 0.2s ease; }
     .collapsed .collapse-btn .ic { transform: rotate(180deg); }
 
@@ -210,17 +225,17 @@
     .navlink {
       display: flex; align-items: center; gap: 10px;
       padding: 9px 12px; border-radius: 8px;
-      font-size: 14.5px; font-weight: 500; color: var(--sh-fg);
+      font-size: 14.5px; font-weight: 500; color: var(--sh-rail-fg);
       transition: background 0.15s ease;
     }
-    .navlink .ic { color: var(--sh-muted); }
-    .navlink:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); }
-    .navlink:hover .ic { color: var(--sh-fg); }
-    .navlink.active { background: color-mix(in oklch, var(--sh-accent) 12%, transparent); }
-    .navlink.active .ic { color: var(--sh-accent); }
+    .navlink .ic { color: var(--sh-rail-muted); }
+    .navlink:hover { background: color-mix(in oklch, var(--sh-rail-fg) 10%, transparent); }
+    .navlink:hover .ic { color: var(--sh-rail-fg); }
+    .navlink.active { background: color-mix(in oklch, var(--sh-rail-fg) 16%, transparent); }
+    .navlink.active .ic { color: var(--sh-rail-fg); }
     .nav-group-label {
       font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
-      color: var(--sh-muted); padding: 18px 12px 6px;
+      color: var(--sh-rail-muted); padding: 18px 12px 6px;
     }
     /* collapsed sidebar: icons only */
     .collapsed .navlink { justify-content: center; padding: 11px 0; }
@@ -237,16 +252,16 @@
       width: 100%; display: flex; align-items: center; gap: 10px;
       padding: 10px; border-radius: 10px; text-align: left;
     }
-    .userchip:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); }
+    .userchip:hover { background: color-mix(in oklch, var(--sh-rail-fg) 10%, transparent); }
     .avatar {
       width: 32px; height: 32px; flex: 0 0 auto; border-radius: 50%;
       display: grid; place-items: center;
-      border: 1px solid var(--sh-line); background: color-mix(in oklch, var(--sh-fg) 6%, transparent);
-      font-size: 12px; font-weight: 600; color: var(--sh-fg);
+      border: 1px solid var(--sh-rail-line); background: color-mix(in oklch, var(--sh-rail-fg) 10%, transparent);
+      font-size: 12px; font-weight: 600; color: var(--sh-rail-fg);
     }
     .uchip-text { min-width: 0; }
-    .uchip-name { display: block; font-size: 13.5px; font-weight: 500; color: var(--sh-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .uchip-role { display: block; font-size: 12px; color: var(--sh-muted); }
+    .uchip-name { display: block; font-size: 13.5px; font-weight: 500; color: var(--sh-rail-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .uchip-role { display: block; font-size: 12px; color: var(--sh-rail-muted); }
     .usermenu {
       position: absolute; bottom: calc(100% + 8px); left: 0; width: 240px; z-index: 40;
       background: var(--sh-surface); border: 1px solid var(--sh-line); border-radius: var(--radius);
@@ -341,11 +356,11 @@
     .m-topbar {
       flex: 0 0 auto; height: var(--shell-topbar-h); z-index: 5;
       display: flex; align-items: center; justify-content: space-between;
-      padding: 0 8px 0 16px; background: var(--sh-surface); border-bottom: 1px solid var(--sh-line);
+      padding: 0 8px 0 16px; background: var(--sh-rail); border-bottom: 1px solid var(--sh-rail-line);
     }
-    .m-brand { font-family: var(--font-display); font-weight: 600; font-size: 17px; letter-spacing: -0.01em; color: var(--sh-fg); }
+    .m-brand { font-family: var(--font-display); font-weight: 600; font-size: 17px; letter-spacing: -0.01em; color: var(--sh-rail-fg); }
     .m-avatar-btn { width: var(--touch-min); height: var(--touch-min); display: grid; place-items: center; border-radius: 50%; }
-    .m-avatar-btn:hover { background: color-mix(in oklch, var(--sh-fg) 6%, transparent); }
+    .m-avatar-btn:hover { background: color-mix(in oklch, var(--sh-rail-fg) 10%, transparent); }
     .m-avatar-btn .avatar { width: 34px; height: 34px; }
     .m-content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 16px; min-width: 0; }
     .m-banner { margin: 0 0 16px; }
@@ -359,19 +374,19 @@
     .shell[data-state='403'] .m-actions { display: none; }
 
     .tabbar {
-      flex: 0 0 auto; z-index: 5; background: var(--sh-surface); border-top: 1px solid var(--sh-line);
+      flex: 0 0 auto; z-index: 5; background: var(--sh-rail); border-top: 1px solid var(--sh-rail-line);
       display: grid; grid-template-columns: repeat(5, 1fr);
       padding-bottom: env(safe-area-inset-bottom); min-height: var(--shell-tabbar-h);
     }
     .tab {
       display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-      padding: 8px 2px; color: var(--sh-muted); font-size: 10.5px; font-weight: 400; min-height: var(--shell-tabbar-h);
+      padding: 8px 2px; color: var(--sh-rail-muted); font-size: 10.5px; font-weight: 400; min-height: var(--shell-tabbar-h);
       transition: color 0.15s ease;
     }
     .tab .ic { width: 20px; height: 20px; }
-    .tab:hover { color: var(--sh-fg); }
-    .tab.active { color: var(--sh-fg); font-weight: 500; }
-    .tab.active .ic { color: var(--sh-accent); }
+    .tab:hover { color: var(--sh-rail-fg); }
+    .tab.active { color: var(--sh-rail-fg); font-weight: 500; }
+    .tab.active .ic { color: var(--sh-rail-fg); }
 
     /* user sheet (mobile) — Admin group lives here */
     .scrim { position: absolute; inset: 0; background: color-mix(in oklch, var(--sh-fg) 40%, transparent); opacity: 0; pointer-events: none; transition: opacity 0.2s ease; z-index: 20; }
@@ -380,6 +395,7 @@
       position: absolute; left: 0; right: 0; bottom: 0; z-index: 30;
       background: var(--sh-surface); border-top: 1px solid var(--sh-line);
       border-radius: var(--radius) var(--radius) 0 0; padding: 8px 16px calc(16px + env(safe-area-inset-bottom));
+      box-shadow: 0 12px 32px color-mix(in oklch, var(--sh-fg) 14%, transparent);
       transform: translateY(102%); transition: transform 0.22s ease;
     }
     .sheet.open { transform: translateY(0); }
@@ -447,7 +463,7 @@
   <div class="container" id="content">
     <section class="section" data-od-id="intro">
       <p class="eyebrow">Minerva · App shell</p>
-      <h1 style="font-size: clamp(34px, 4.6vw, 48px); line-height: 1.06; letter-spacing: -0.02em; max-width: 22ch;">The frame every signed-in screen lives inside.</h1>
+      <h1 style="font-size: clamp(34px, 4.6vw, 48px); line-height: 1.06; letter-spacing: -0.01em; max-width: 22ch;">The frame every signed-in screen lives inside.</h1>
       <p class="lead" style="margin-top: 18px;">One shell for staff, administrators and read-only viewers — sidebar, page header, banner slot and content area. The controls under each frame switch variants in place; page content is placeholder only, so the shell can be judged on its own.</p>
     </section>
 
@@ -782,7 +798,7 @@
 
     <section class="section frame" data-od-id="frame-bare">
       <h2>Bare pre-sign-in layout</h2>
-      <p class="frame-note">The minimal frame for screens before sign-in: the wordmark centred on the cream canvas above a single card. Login and invite screens reuse it as-is — no shell chrome, no banner, no tab bar.</p>
+      <p class="frame-note">The minimal frame for screens before sign-in: the wordmark centred on the neutral ground above a single panel. Login and invite screens reuse it as-is — no shell chrome, no banner, no tab bar.</p>
       <div class="browser bare" style="margin-top: 16px;" data-od-id="bare-frame">
         <div class="auth shell" data-od-id="auth-layout">
           <span class="wordmark" style="font-size: 28px;">Minerv<span class="dot">ı</span>a</span>
@@ -807,7 +823,7 @@
     </section>
     <section class="section frame" data-od-id="spec-tokens">
       <h2>New tokens for the design system</h2>
-      <p class="frame-note">Everything else — colours, type, radius, the 4px spacing grid, 1px borders — is the existing Minerva system. The shell adds only these layout tokens, as CSS custom properties. No new colour tokens: light mode uses the registered palette; dark mode uses the posture values (canvas <span class="num">#171A28</span>, cards <span class="num">#1E2233</span>, text <span class="num">#F3ECE1</span>, ember accent).</p>
+      <p class="frame-note">Everything else — colours, type, radius, the 4px spacing grid, 1px borders — is the existing Minerva system. The shell adds only these layout tokens, as CSS custom properties. No new colour tokens: light mode uses the registered palette; dark mode flips ground to <span class="num">#131417</span>, panels to <span class="num">#1B1D21</span> and text to paper <span class="num">#F2F3F4</span>. The rail is ink in both modes (<span class="num">#101114</span> light, <span class="num">#0C0D0F</span> dark) with a paper wordmark and terracotta dot.</p>
       <table class="ds-table" style="margin-top: 20px;">
         <thead><tr><th>Token</th><th>Value</th><th>Purpose</th></tr></thead>
         <tbody>
@@ -820,7 +836,7 @@
           <tr><td class="num">--touch-min</td><td class="num">44px</td><td>Minimum tap target, mobile</td></tr>
         </tbody>
       </table>
-      <p class="frame-note" style="margin-top: 16px;">Focus ring: <span class="num">2px solid</span> accent, <span class="num">2px</span> offset — accent is terracotta on light, ember on dark. Primary button labels sit on the accent at <span class="num">18px</span> minimum, per posture.</p>
+      <p class="frame-note" style="margin-top: 16px;">Focus ring: <span class="num">2px solid</span> accent, <span class="num">2px</span> offset — accent is ink on light, paper on dark. Primary button labels sit on the accent at <span class="num">18px</span> minimum, per posture.</p>
     </section>
 
     <section class="section frame" data-od-id="spec-components">
@@ -829,19 +845,19 @@
       <div style="margin-top: 20px;">
         <article class="log-row"><span class="meta">Shell.svelte</span><div><h3>AppShell</h3><p>Desktop: 2-column grid, sidebar + main column, 100% viewport height. Only the main column scrolls; the frame never does.</p></div><span class="pull"><span class="tag">frame</span></span></article>
         <article class="log-row"><span class="meta">Sidebar.svelte</span><div><h3>Sidebar</h3><p>264px expanded, 72px collapsed. Wordmark swaps to the M<span class="tdot">.</span> symbol when collapsed; labels hide, icons stay.</p></div><span class="pull"><span class="tag">2 states</span></span></article>
-        <article class="log-row"><span class="meta">NavItem.svelte</span><div><h3>NavItem</h3><p>Default, hover (6% fg tint, text stays ink), focus (2px accent ring), active (12% accent tint, accent icon, 500 weight). Touch target ≥ 44px with padding.</p></div><span class="pull"><span class="tag">4 states</span></span></article>
+        <article class="log-row"><span class="meta">NavItem.svelte</span><div><h3>NavItem</h3><p>On the ink rail: default (paper text, muted icon), hover (10% paper tint), focus (2px ring), active (16% paper tint, full-paper icon, 500 weight). Touch target ≥ 44px with padding.</p></div><span class="pull"><span class="tag">4 states</span></span></article>
         <article class="log-row"><span class="meta">AdminGroup</span><div><h3>AdminGroup</h3><p>Group label + Users, Invites, Single sign-on. Rendered only for the admin role; absent otherwise, not hidden-with-styling leftovers.</p></div><span class="pull"><span class="tag">role-gated</span></span></article>
         <article class="log-row"><span class="meta">UserMenu.svelte</span><div><h3>UserMenu / UserSheet</h3><p>Name, email, role in plain language (Administrator / Staff / Read-only), Sign out. Desktop: dropdown from the user chip. Mobile: bottom sheet; the Admin group lives here.</p></div><span class="pull"><span class="tag">2 platforms</span></span></article>
-        <article class="log-row"><span class="meta">PageHeader.svelte</span><div><h3>PageHeader</h3><p>Title (Fraunces 27px / 21px mobile), optional one-line description, primary action slot, secondary slot. Primary hidden for Read-only users and while the content area shows a full-page state.</p></div><span class="pull"><span class="tag">3 variants</span></span></article>
-        <article class="log-row"><span class="meta">Banner.svelte</span><div><h3>BannerSlot</h3><p>System-notice slot above the page header: white card, 1px border, info icon, one line of text, dismiss. Optional per page.</p></div><span class="pull"><span class="tag">optional</span></span></article>
+        <article class="log-row"><span class="meta">PageHeader.svelte</span><div><h3>PageHeader</h3><p>Title (system sans 600, 27px / 21px mobile), optional one-line description, primary action slot, secondary slot. Primary hidden for Read-only users and while the content area shows a full-page state.</p></div><span class="pull"><span class="tag">3 variants</span></span></article>
+        <article class="log-row"><span class="meta">Banner.svelte</span><div><h3>BannerSlot</h3><p>System-notice slot above the page header: panel, 1px border, info icon, one line of text, dismiss. Optional per page.</p></div><span class="pull"><span class="tag">optional</span></span></article>
         <article class="log-row"><span class="meta">ContentFrame</span><div><h3>ContentFrame</h3><p>Conventions: 1200px max, 32/20px padding, vertical scroll inside the main column. Wide boards and timelines use an <span class="num">.h-scroll</span> wrapper so they scroll sideways without moving the page.</p></div><span class="pull"><span class="tag">convention</span></span></article>
         <article class="log-row"><span class="meta">Skeleton.svelte</span><div><h3>Skeleton</h3><p>Static-shape loading: bars at 9% fg, opacity pulse only (1.5s), disabled under reduced-motion. No shimmer gradients.</p></div><span class="pull"><span class="tag">state</span></span></article>
         <article class="log-row"><span class="meta">EmptyState.svelte</span><div><h3>EmptyState</h3><p>One icon, one short heading, one instructional line, one primary action. Friendly, never an apology.</p></div><span class="pull"><span class="tag">state</span></span></article>
         <article class="log-row"><span class="meta">ErrorState.svelte</span><div><h3>ErrorState</h3><p>"Something went wrong", one line of what to do, Try again. One primary action.</p></div><span class="pull"><span class="tag">state</span></span></article>
         <article class="log-row"><span class="meta">AccessDenied.svelte</span><div><h3>AccessDenied (403)</h3><p>"You don't have access to this", plain-language reason, no primary action — there is nothing to do on this page.</p></div><span class="pull"><span class="tag">state</span></span></article>
         <article class="log-row"><span class="meta">MobileTopBar</span><div><h3>MobileTopBar</h3><p>56px: wordmark left, 44px avatar button right (opens the UserSheet). Sticky above the scrolling content.</p></div><span class="pull"><span class="tag">mobile</span></span></article>
-        <article class="log-row"><span class="meta">MobileTabBar</span><div><h3>MobileTabBar</h3><p>Five destinations, 64px + safe area, 1px top border. Active: accent icon, ink label 500. All five fit at 380px; roomier at 768px.</p></div><span class="pull"><span class="tag">mobile</span></span></article>
-        <article class="log-row"><span class="meta">BareAuthLayout</span><div><h3>BareAuthLayout</h3><p>Pre-sign-in frame: wordmark centred on the cream canvas above a 380px card. Reused by login and invite screens.</p></div><span class="pull"><span class="tag">frame</span></span></article>
+        <article class="log-row"><span class="meta">MobileTabBar</span><div><h3>MobileTabBar</h3><p>Five destinations, 64px + safe area, on the ink rail with a 1px top border. Active: paper icon, paper label 500. All five fit at 380px; roomier at 768px.</p></div><span class="pull"><span class="tag">mobile</span></span></article>
+        <article class="log-row"><span class="meta">BareAuthLayout</span><div><h3>BareAuthLayout</h3><p>Pre-sign-in frame: wordmark centred on the neutral ground above a 380px panel. Reused by login and invite screens.</p></div><span class="pull"><span class="tag">frame</span></span></article>
       </div>
     </section>
 
@@ -851,8 +867,8 @@
         <article class="log-row"><span class="meta">(app)/+layout.svelte</span><div><h3>Shell route group</h3><p>One layout renders the frame: skip link first in DOM, then aside with two labelled navs, then the main column (banner slot, header, content). Pre-sign-in screens sit outside the group and use BareAuthLayout.</p></div><span class="pull"><span class="tag">layout</span></span></article>
         <article class="log-row"><span class="meta">data.user.role</span><div><h3>Role gating</h3><p>Same mapping as the <span class="num">data-role</span> attribute here: <span class="num">{#if role === 'admin'}</span> renders AdminGroup; <span class="num">{#if role !== 'readonly'}</span> renders the primary action. Role comes from the server session, never the client.</p></div><span class="pull"><span class="tag">roles</span></span></article>
         <article class="log-row"><span class="meta">+page.ts → error(403)</span><div><h3>403 flow</h3><p>Permission checks throw <span class="num">error(403)</span>; <span class="num">+error.svelte</span> renders AccessDenied inside the shell, so the frame stays put.</p></div><span class="pull"><span class="tag">error</span></span></article>
-        <article class="log-row"><span class="meta">tokens.css</span><div><h3>Tokens</h3><p>Append the seven shell tokens from above to the design system's <span class="num">tokens.css</span>; import once in <span class="num">app.html</span>. Dark mode: <span class="num">prefers-color-scheme</span> flips the same shell variables the <span class="num">.dark</span> class demonstrates here.</p></div><span class="pull"><span class="tag">tokens</span></span></article>
-        <article class="log-row"><span class="meta">a11y baseline</span><div><h3>Accessibility</h3><p>Skip link focuses <span class="num">main[tabindex="-1"]</span>; visible <span class="num">:focus-visible</span> ring on everything; landmarks: nav ×2 (aria-label), header, main. 44px targets on mobile. Contrast: ink on cream 14.7:1, slate on cream 5.8:1, white on terracotta 4.6:1, ink on ember 5.8:1 (dark).</p></div><span class="pull"><span class="tag">baseline</span></span></article>
+        <article class="log-row"><span class="meta">tokens.css</span><div><h3>Tokens</h3><p>The shell layout tokens ship in the design system's <span class="num">shell-tokens.css</span> as <span class="num">--minerva-shell-*</span>; import once in <span class="num">app.html</span>. Dark mode: <span class="num">prefers-color-scheme</span> flips the same shell variables the <span class="num">.dark</span> class demonstrates here.</p></div><span class="pull"><span class="tag">tokens</span></span></article>
+        <article class="log-row"><span class="meta">a11y baseline</span><div><h3>Accessibility</h3><p>Skip link focuses <span class="num">main[tabindex="-1"]</span>; visible <span class="num">:focus-visible</span> ring on everything; landmarks: nav ×2 (aria-label), header, main. 44px targets on mobile. Contrast: ink on ground 17:1, slate on ground 5.8:1, paper on the ink block 17:1, paper on dark ground 16.6:1 (dark).</p></div><span class="pull"><span class="tag">baseline</span></span></article>
         <article class="log-row"><span class="meta">localStorage</span><div><h3>State restoration</h3><p>Remember the last-visited destination the same way this prototype persists its demo controls — one key, a couple of fields. No session storage needed.</p></div><span class="pull"><span class="tag">state</span></span></article>
       </div>
     </section>
