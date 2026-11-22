@@ -58,8 +58,9 @@
 		<p class="hint" id="{id}-hint">{hint}</p>
 	{/if}
 	{#if error}
-		<!-- No error colour token exists: the message is fg text with an
-		     icon and an accent left border — never colour alone. -->
+		<!-- The message carries the semantic error colour; the icon and
+		     the left border keep the signal from ever resting on
+		     colour alone. -->
 		<p class="error" id="{id}-error">
 			<Icon name="alert" size={14} />
 			<span>{error}</span>
@@ -95,6 +96,6 @@
 		padding-left: 10px;
 		border-left: 3px solid var(--minerva-accent);
 		font-size: 13px;
-		color: var(--minerva-fg);
+		color: var(--minerva-error-text);
 	}
 </style>

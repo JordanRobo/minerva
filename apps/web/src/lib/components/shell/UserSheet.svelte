@@ -106,6 +106,7 @@
 		border-radius: var(--minerva-radius) var(--minerva-radius) 0 0;
 		background: var(--minerva-surface);
 		color: var(--minerva-fg);
+		box-shadow: 0 12px 32px color-mix(in oklch, var(--minerva-fg) 14%, transparent);
 		padding: var(--minerva-space-2) var(--minerva-space-4)
 			calc(var(--minerva-space-4) + env(safe-area-inset-bottom));
 	}
