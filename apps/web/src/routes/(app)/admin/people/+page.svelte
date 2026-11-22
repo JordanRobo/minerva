@@ -442,7 +442,7 @@
 		display: inline-flex;
 		align-items: center;
 		padding: 3px 10px;
-		border-radius: 999px;
+		border-radius: var(--minerva-radius);
 		border: var(--minerva-border-w) solid var(--minerva-border);
 		font-size: 12.5px;
 		font-weight: 500;

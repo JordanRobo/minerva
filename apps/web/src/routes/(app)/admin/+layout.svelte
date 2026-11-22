@@ -29,7 +29,7 @@
 
 	.tab {
 		padding: 8px 14px;
-		border-radius: 999px;
+		border-radius: 8px;
 		font-size: 14.5px;
 		font-weight: 500;
 		color: var(--minerva-fg-muted);

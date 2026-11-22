@@ -85,13 +85,6 @@
 		return 'Expired';
 	}
 
-	function statusLine(inv: Invite): string {
-		if (inv.status === 'pending') return `Expires on ${fmtDate(inv.expires_at)}.`;
-		if (inv.status === 'expired') return `Expired on ${fmtDate(inv.expires_at)}.`;
-		if (inv.status === 'accepted') return inv.consumed_at ? `Joined on ${fmtDate(inv.consumed_at)}.` : '';
-		return inv.revoked_at ? `Revoked on ${fmtDate(inv.revoked_at)}.` : '';
-	}
-
 	function replaceInvite(updated: Invite) {
 		if (!invites) return;
 		invites = invites.map((i) => (i.id === updated.id ? updated : i));
@@ -301,9 +294,17 @@
 							>
 								{statusLabel(inv.status)}
 							</span>
-							<p class="helper">{statusLine(inv)}</p>
+							{#if inv.status === 'pending'}
+								<p class="helper">Expires on <span class="fig">{fmtDate(inv.expires_at)}</span>.</p>
+							{:else if inv.status === 'expired'}
+								<p class="helper">Expired on <span class="fig">{fmtDate(inv.expires_at)}</span>.</p>
+							{:else if inv.status === 'accepted' && inv.consumed_at}
+								<p class="helper">Joined on <span class="fig">{fmtDate(inv.consumed_at)}</span>.</p>
+							{:else if inv.status === 'revoked' && inv.revoked_at}
+								<p class="helper">Revoked on <span class="fig">{fmtDate(inv.revoked_at)}</span>.</p>
+							{/if}
 						</td>
-						<td data-label="Sent" class="sent">{fmtDate(inv.created_at)}</td>
+						<td data-label="Sent" class="sent fig">{fmtDate(inv.created_at)}</td>
 						<td data-label="" class="actions-cell">
 							{#if inv.status === 'pending'}
 								<Button variant="ghost" disabled={anyBusy} onclick={() => reissue(inv)}>
@@ -481,7 +482,7 @@
 		display: inline-flex;
 		align-items: center;
 		padding: 3px 10px;
-		border-radius: 999px;
+		border-radius: var(--minerva-radius);
 		border: var(--minerva-border-w) solid var(--minerva-border);
 		font-size: 12.5px;
 		font-weight: 500;
