@@ -1,9 +1,16 @@
 /*
- * Self-hosted Fraunces (variable: wght 100-900, opsz 9-144) from
- * @fontsource-variable/fraunces — no CDN. Aliases the family name to
- * "Fraunces" so --minerva-font-display resolves without editing tokens.css.
- * ponytail: the package's "full" builds also carry the SOFT/WONK axes the
- * display cut is set in (SOFT 100, WONK 1); swap standard-* for full-* then.
+ * Self-hosted faces — no CDN.
+ *
+ * Fraunces (variable: wght 100-900, opsz 9-144) from
+ * @fontsource-variable/fraunces is kept for the wordmark's collapsed "M."
+ * symbol only, so the text mark matches the official SVG artwork. UI
+ * headings no longer use it (the Gate Board world has no serif display).
+ * ponytail: the package's "full" builds also carry the SOFT/WONK axes; swap
+ * standard-* for full-* then.
+ *
+ * Spline Sans Mono from @fontsource/spline-sans-mono carries every figure —
+ * counts, dates, stamps — via --minerva-font-figures. Only the weights the
+ * board sets in (400/500/600) are loaded.
  */
 
 @font-face {
@@ -37,6 +44,42 @@
 	font-weight: 100 900;
 	src: url("@fontsource-variable/fraunces/files/fraunces-latin-standard-normal.woff2")
 		format("woff2-variations");
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+		U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+		U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+	font-family: "Spline Sans Mono";
+	font-style: normal;
+	font-display: swap;
+	font-weight: 400;
+	src: url("@fontsource/spline-sans-mono/files/spline-sans-mono-latin-400-normal.woff2")
+		format("woff2");
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+		U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+		U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+	font-family: "Spline Sans Mono";
+	font-style: normal;
+	font-display: swap;
+	font-weight: 500;
+	src: url("@fontsource/spline-sans-mono/files/spline-sans-mono-latin-500-normal.woff2")
+		format("woff2");
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+		U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+		U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+	font-family: "Spline Sans Mono";
+	font-style: normal;
+	font-display: swap;
+	font-weight: 600;
+	src: url("@fontsource/spline-sans-mono/files/spline-sans-mono-latin-600-normal.woff2")
+		format("woff2");
 	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
 		U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
 		U+2212, U+2215, U+FEFF, U+FFFD;

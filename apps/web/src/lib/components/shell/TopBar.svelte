@@ -5,7 +5,7 @@
 </script>
 
 <header class="topbar">
-	<Wordmark small />
+	<Wordmark small ink />
 	<button class="avatar-btn" type="button" aria-label="Account menu" onclick={onOpenSheet}>
 		<span class="avatar" aria-hidden="true">{initials}</span>
 	</button>
@@ -19,8 +19,8 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 0 var(--minerva-space-2) 0 var(--minerva-space-4);
-		background: var(--minerva-surface);
-		border-bottom: var(--minerva-border-w) solid var(--minerva-border);
+		background: var(--minerva-rail-bg);
+		color: var(--minerva-rail-fg);
 	}
 
 	@media (min-width: 900px) {
@@ -38,7 +38,7 @@
 	}
 
 	.avatar-btn:hover {
-		background: color-mix(in oklch, var(--minerva-fg) 6%, transparent);
+		background: color-mix(in oklch, var(--minerva-rail-fg) 10%, transparent);
 	}
 
 	.avatar {
@@ -47,8 +47,8 @@
 		border-radius: 50%;
 		display: grid;
 		place-items: center;
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		background: color-mix(in oklch, var(--minerva-fg) 6%, transparent);
+		border: var(--minerva-border-w) solid var(--minerva-rail-border);
+		background: color-mix(in oklch, var(--minerva-rail-fg) 10%, transparent);
 		font-size: 12px;
 		font-weight: 600;
 	}

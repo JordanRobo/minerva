@@ -209,7 +209,7 @@
 
 	.um-error {
 		font-size: 13px;
-		color: var(--minerva-accent);
+		color: var(--minerva-error-text);
 		padding: 8px 12px 4px;
 		margin: 0;
 	}

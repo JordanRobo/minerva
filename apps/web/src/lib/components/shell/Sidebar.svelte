@@ -37,7 +37,7 @@
 
 <aside class="sidebar" class:collapsed={collapsed}>
 	<div class="brand-row">
-		<Wordmark collapsed={collapsed} />
+		<Wordmark collapsed={collapsed} ink />
 		<Tooltip.Root>
 			<Tooltip.Trigger>
 				{#snippet child({ props })}
@@ -123,9 +123,11 @@
 </aside>
 
 <style>
+	/* The ink rail: dark in both modes, so the page's light/dark state is a
+	   property of the content, never of the navigation. */
 	.sidebar {
-		background: var(--minerva-surface);
-		border-right: var(--minerva-border-w) solid var(--minerva-border);
+		background: var(--minerva-rail-bg);
+		color: var(--minerva-rail-fg);
 		display: flex;
 		flex-direction: column;
 		padding: 16px 12px 12px;
@@ -156,12 +158,12 @@
 		display: grid;
 		place-items: center;
 		border-radius: 8px;
-		color: var(--minerva-fg-muted);
+		color: var(--minerva-rail-fg-muted);
 	}
 
 	.collapse-btn:hover {
-		background: color-mix(in oklch, var(--minerva-fg) 6%, transparent);
-		color: var(--minerva-fg);
+		background: color-mix(in oklch, var(--minerva-rail-fg) 10%, transparent);
+		color: var(--minerva-rail-fg);
 	}
 
 	.collapse-btn :global(svg) {
@@ -185,7 +187,7 @@
 		font-weight: 600;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--minerva-fg-muted);
+		color: var(--minerva-rail-fg-muted);
 		padding: 18px 12px 6px;
 		margin: 0;
 	}
@@ -210,7 +212,7 @@
 	}
 
 	.userchip:hover {
-		background: color-mix(in oklch, var(--minerva-fg) 6%, transparent);
+		background: color-mix(in oklch, var(--minerva-rail-fg) 10%, transparent);
 	}
 
 	.avatar {
@@ -220,11 +222,11 @@
 		border-radius: 50%;
 		display: grid;
 		place-items: center;
-		border: var(--minerva-border-w) solid var(--minerva-border);
-		background: color-mix(in oklch, var(--minerva-fg) 6%, transparent);
+		border: var(--minerva-border-w) solid var(--minerva-rail-border);
+		background: color-mix(in oklch, var(--minerva-rail-fg) 10%, transparent);
 		font-size: 12px;
 		font-weight: 600;
-		color: var(--minerva-fg);
+		color: var(--minerva-rail-fg);
 	}
 
 	.uchip-text {
@@ -235,7 +237,7 @@
 		display: block;
 		font-size: 13.5px;
 		font-weight: 500;
-		color: var(--minerva-fg);
+		color: var(--minerva-rail-fg);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -244,7 +246,7 @@
 	.uchip-role {
 		display: block;
 		font-size: 12px;
-		color: var(--minerva-fg-muted);
+		color: var(--minerva-rail-fg-muted);
 	}
 
 	/* Placed by Bits UI floating-ui (side="top" align="start"); the wrapper
@@ -310,7 +312,7 @@
 
 	.um-error {
 		font-size: 13px;
-		color: var(--minerva-accent);
+		color: var(--minerva-error-text);
 		padding: 8px 12px 4px;
 		margin: 0;
 	}

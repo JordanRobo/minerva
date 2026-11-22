@@ -18,3 +18,5 @@ minerva.toml
 .env
 
 *.log
+
+.impeccable

@@ -4,22 +4,45 @@
  */
 
 :root {
-	/* Colour (DESIGN.md palette) */
-	--minerva-bg: #fbf6ee;
+	/* Colour (the Gate Board world): cool neutral ground under ink rules. */
+	--minerva-bg: #f2f3f4;
 	--minerva-surface: #ffffff;
-	--minerva-fg: #1e2233;
-	--minerva-fg-muted: #5b6078;
-	--minerva-border: #1e223320; /* ink at 12.5% on cream */
-	--minerva-accent: #c4502b;
+	--minerva-fg: #101114;
+	--minerva-fg-muted: #5a5f69;
+	--minerva-border: #1011141f; /* ink at 12% on the neutral ground */
+	/* Primary action is a solid ink block (paper label). */
+	--minerva-accent: #101114;
+	/* The wordmark's dot — brand commitment, unchanged by the world. */
+	--minerva-dot: #c4502b;
 
-	/* Typography */
-	--minerva-font-display: "Fraunces", Georgia, serif;
+	/* The board's signal colours. Status always renders as a solid square
+	   beside an ink label — never coloured text. Complete is ink itself:
+	   settled reads neutral-final, and the world has no blue. */
+	--minerva-status-on-track: #1f7a4d;
+	--minerva-status-at-risk: #d99a1b;
+	--minerva-status-off-track: #ce2d2d;
+	--minerva-status-complete: var(--minerva-fg);
+	/* Alert hold: reserved for rows a person set by hand. */
+	--minerva-alert: #ffb020;
+	/* Semantic error copy: the Off Track hue, lifted toward paper in dark
+	   mode so small text clears 4.5:1 — status squares keep the pure hue. */
+	--minerva-error-text: var(--minerva-status-off-track);
+
+	/* The ink rail (sidebar / mobile top bar) — dark in both modes. */
+	--minerva-rail-bg: #101114;
+	--minerva-rail-fg: #f2f3f4;
+	--minerva-rail-fg-muted: #a7a9ae;
+	--minerva-rail-border: #f2f3f426; /* paper at 15% on ink */
+
+	/* Typography: one workhorse sans; figures in tabular mono. */
+	--minerva-font-display: system-ui, -apple-system, "Segoe UI", sans-serif;
 	--minerva-font-body: system-ui, -apple-system, "Segoe UI", sans-serif;
+	--minerva-font-figures: "Spline Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 	--minerva-text-size: 16px;
 	--minerva-line-height: 1.65;
 
 	/* Layout */
-	--minerva-radius: 12px;
+	--minerva-radius: 6px;
 	--minerva-border-w: 1px;
 	--minerva-space-1: 4px;
 	--minerva-space-2: 8px;
@@ -40,10 +63,17 @@
 }
 
 .dark {
-	/* Dark mode (DESIGN.md posture rules): ink surfaces with ember accents. */
-	--minerva-bg: #171a28;
-	--minerva-surface: #1e2233;
-	--minerva-fg: #f3ece1;
-	--minerva-border: #f3ece125; /* cream at 15% on ink */
-	--minerva-accent: #e9805f;
+	/* Dark mode: the ground goes near-black so the ink rail stays darker
+	   than the page; primary action inverts to a paper block. */
+	--minerva-bg: #131417;
+	--minerva-surface: #1b1d21;
+	--minerva-fg: #f2f3f4;
+	--minerva-fg-muted: #9ca1ab;
+	--minerva-border: #f2f3f424; /* paper at 14% on ink */
+	--minerva-accent: #f2f3f4;
+
+	--minerva-rail-bg: #0c0d0f;
+	--minerva-rail-fg-muted: #9ca1ab;
+
+	--minerva-error-text: color-mix(in oklch, var(--minerva-status-off-track) 55%, var(--minerva-fg));
 }

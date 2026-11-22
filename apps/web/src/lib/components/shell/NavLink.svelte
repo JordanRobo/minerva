@@ -51,28 +51,28 @@
 		border-radius: 8px;
 		font-size: 14.5px;
 		font-weight: 500;
-		color: var(--minerva-fg);
+		color: var(--minerva-rail-fg);
 		transition: background var(--minerva-motion-fast) ease;
 	}
 
 	.navlink :global(svg) {
-		color: var(--minerva-fg-muted);
+		color: var(--minerva-rail-fg-muted);
 	}
 
 	.navlink:hover {
-		background: color-mix(in oklch, var(--minerva-fg) 6%, transparent);
+		background: color-mix(in oklch, var(--minerva-rail-fg) 10%, transparent);
 	}
 
 	.navlink:hover :global(svg) {
-		color: var(--minerva-fg);
+		color: var(--minerva-rail-fg);
 	}
 
 	.navlink.active {
-		background: color-mix(in oklch, var(--minerva-accent) 12%, transparent);
+		background: color-mix(in oklch, var(--minerva-rail-fg) 16%, transparent);
 	}
 
 	.navlink.active :global(svg) {
-		color: var(--minerva-accent);
+		color: var(--minerva-rail-fg);
 	}
 
 	.navlink.collapsed {

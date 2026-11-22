@@ -1,16 +1,16 @@
 {
   "name": "Minerva",
   "tagline": "Open source, goal/milestone-first project management for schools and non-profits.",
-  "description": "Open source, goal/milestone-first project management for schools and non-profits: teams start from what they are trying to achieve, break it into milestones, and track progress against those. SvelteKit frontend, Rust (Actix-web) backend, PostgreSQL. The identity should feel like a well-run staff room: warm, capable and unfussy.",
+  "description": "Open source, goal/milestone-first project management for schools and non-profits: teams start from what they are trying to achieve, break it into milestones, and track progress against those. SvelteKit frontend, Rust (Actix-web) backend, PostgreSQL. The interface is a status board: cool neutral ground, ink rules, four signal colours, tabular mono figures — the term's health readable at a glance.",
   "sourceUrl": "designmd://minerva-is-open-source",
   "seed": {
-    "colorPrimary": "#C4502B",
-    "colorLink": "#C4502B",
-    "colorTextBase": "#1E2233",
-    "colorBgBase": "#ffffff",
+    "colorPrimary": "#101114",
+    "colorLink": "#101114",
+    "colorTextBase": "#101114",
+    "colorBgBase": "#F2F3F4",
     "fontFamily": "system-ui, -apple-system, 'Segoe UI', sans-serif",
     "fontSize": 16,
-    "borderRadius": 12,
+    "borderRadius": 6,
     "controlHeight": 44
   },
   "logo": {
@@ -29,64 +29,102 @@
   "colors": [
     {
       "role": "background",
-      "hex": "#fbf6ee",
-      "oklch": "oklch(0.975 0.0119 80)",
-      "name": "Cream",
-      "usage": "page canvas; PWA background colour; reversed (cream) text on ink"
+      "hex": "#f2f3f4",
+      "name": "Ground",
+      "usage": "page canvas; cool neutral, not warm"
     },
     {
       "role": "surface",
       "hex": "#ffffff",
-      "oklch": "oklch(1 0 90)",
-      "name": "White",
-      "usage": "cards and panels"
+      "name": "Panel",
+      "usage": "boards, cards and panels"
     },
     {
       "role": "foreground",
-      "hex": "#1e2233",
-      "oklch": "oklch(0.256 0.0327 274)",
+      "hex": "#101114",
       "name": "Ink",
-      "usage": "body text, headings and wordmark; dark surfaces; PWA theme colour"
+      "usage": "body text, headings, rules; dark surfaces; the Complete status square (settled reads neutral-final)"
     },
     {
       "role": "muted",
-      "hex": "#5b6078",
-      "oklch": "oklch(0.494 0.0389 276)",
+      "hex": "#5a5f69",
       "name": "Slate",
-      "usage": "secondary text and metadata (5.8:1 on cream)"
+      "usage": "secondary text, column heads and metadata"
     },
     {
       "role": "border",
-      "hex": "#dfdbd7",
-      "oklch": "oklch(0.893 0.007 68)",
+      "hex": "#1011141f",
       "name": "Ink line",
-      "usage": "rules and dividers — 1 px; in source CSS it is ink at 12.5% alpha on cream (#1E223320), on dark backgrounds cream at 15% (#F3ECE125)"
+      "usage": "rules and dividers — 1 px; ink at 12% on light, paper at 14% on dark"
     },
     {
       "role": "accent",
-      "hex": "#c4502b",
-      "oklch": "oklch(0.578 0.1572 38)",
-      "name": "Terracotta",
-      "usage": "the dot; primary actions and large accents on light backgrounds only; carries white or cream labels at 18 px or larger, never body copy (4.3:1 on cream)"
+      "hex": "#101114",
+      "name": "Ink block",
+      "usage": "primary actions: a solid ink block with a paper label (inverts to a paper block with an ink label in dark mode)"
     },
     {
-      "role": "accent-secondary",
-      "hex": "#e9805f",
-      "oklch": "oklch(0.709 0.1378 38)",
-      "name": "Ember",
-      "usage": "the dot and accent on dark backgrounds only (5.8:1 on ink)"
+      "role": "dot",
+      "hex": "#c4502b",
+      "name": "Terracotta",
+      "usage": "the wordmark's dot only — brand commitment, unchanged by the board world"
+    },
+    {
+      "role": "status-on-track",
+      "hex": "#1f7a4d",
+      "name": "On Track",
+      "usage": "status square and tint; status always renders as a solid square beside an ink label, never coloured text"
+    },
+    {
+      "role": "status-at-risk",
+      "hex": "#d99a1b",
+      "name": "At Risk",
+      "usage": "status square and tint"
+    },
+    {
+      "role": "status-off-track",
+      "hex": "#ce2d2d",
+      "name": "Off Track",
+      "usage": "status square and tint"
+    },
+    {
+      "role": "error-text",
+      "hex": "#ce2d2d",
+      "name": "Error text",
+      "usage": "semantic error copy; the Off Track hue, lifted toward paper in dark mode (55% red / 45% foreground) so small text clears 4.5:1 — status squares keep the pure hue"
+    },
+    {
+      "role": "status-complete",
+      "hex": "#101114",
+      "name": "Complete",
+      "usage": "set in ink itself — settled reads neutral-final; the world has no blue. In dark mode it is paper"
+    },
+    {
+      "role": "alert",
+      "hex": "#ffb020",
+      "name": "Alert amber",
+      "usage": "reserved for rows a person set by hand (manual status overrides) — the alert hold; never for decoration"
+    },
+    {
+      "role": "rail",
+      "hex": "#101114",
+      "name": "Ink rail",
+      "usage": "the sidebar and mobile top bar: #101114 with paper text (#f2f3f4, muted #a7a9ae) in light mode; #0c0d0f in dark mode so it stays darker than the page"
     }
   ],
   "typography": {
     "display": {
-      "family": "Fraunces",
+      "family": "system-ui",
       "fallbacks": [
-        "Georgia",
-        "serif"
+        "-apple-system",
+        "Segoe UI",
+        "sans-serif"
       ],
       "weights": [
-        500
-      ]
+        600,
+        700
+      ],
+      "notes": "No serif display: headings are the workhorse sans at weight 600 with -0.01em tracking. The Fraunces wordmark is official artwork (SVG), and its collapsed 'M.' text symbol stays set in Fraunces to match it."
     },
     "body": {
       "family": "system-ui",
@@ -97,8 +135,24 @@
       ],
       "weights": [
         400,
-        500
+        500,
+        600
       ]
+    },
+    "figures": {
+      "family": "Spline Sans Mono",
+      "fallbacks": [
+        "ui-monospace",
+        "SFMono-Regular",
+        "Menlo",
+        "monospace"
+      ],
+      "weights": [
+        400,
+        500,
+        600
+      ],
+      "notes": "Self-hosted via @fontsource/spline-sans-mono; tabular-nums. Carries every count, date and stamp — the board's figures. Never used as a costume for prose."
     }
   },
   "voice": {
@@ -131,13 +185,13 @@
     }
   },
   "imagery": {
-    "style": "Warm, editorial and human — a cream canvas, white cards and a single terracotta accent, the dot of the wordmark",
+    "style": "Cool and institutional: a neutral grey canvas, white panels, ink rules, four status signal colours and one reserved alert amber",
     "subjects": [
       "school staff, volunteers and boards",
       "term and milestone planning",
       "small, real workspaces"
     ],
-    "treatment": "Real photography on cream or white with 1 px ink-tinted borders; terracotta is the only saturated colour in the interface; no shadows, gradients or effects on brand marks",
+    "treatment": "Real photography on the neutral ground or white panels with 1 px ink-tinted borders; status hues are reserved for status, alert amber for manual overrides only; no gradients, glass or effects on brand marks",
     "avoid": [
       "shadows, gradients or effects on the logo",
       "recoloured dots or letters outside the palette",
@@ -146,15 +200,17 @@
     ]
   },
   "layout": {
-    "radius": "12px",
+    "radius": "6px",
     "borderWeight": "1px",
-    "spacing": "4px base grid; 880px content column; 56-80px section rhythm; body 16px/1.65",
+    "spacing": "4px base grid; 1200px content column; 56-80px section rhythm; body 16px/1.65",
     "postureRules": [
       "Component kit should cover: Button, Card, Form, Navigation.",
-      "Cream canvas, white cards, 1px ink-tinted borders (12.5% ink on light; 15% cream on dark).",
-      "Terracotta is the only saturated colour: primary buttons, the dot, large accents — white or cream labels at 18px+ only.",
-      "Headlines set in Fraunces 500 (SOFT 100, WONK 1); body and interface in the system sans at 16px/1.65, weight 500 for emphasis.",
-      "Dark mode: ink surfaces (#171A28 canvas, #1E2233 cards, #F3ECE1 text) with ember accents — terracotta is reserved for light backgrounds."
+      "Neutral ground (#F2F3F4), white panels, 1 px ink-tinted borders (12% ink on light; 14% paper on dark).",
+      "The navigation is an ink rail in both modes: sidebar on desktop, top bar plus tab bar below 900px — the page's light/dark state is a property of the content, never of the navigation.",
+      "Status always renders as a solid colour square beside an ink small-caps label — On Track #1F7A4D, At Risk #D99A1B, Off Track #CE2D2D, Complete in ink. Alert amber #FFB020 is reserved for manually-set rows (the alert hold).",
+      "Every count, date and stamp is set in Spline Sans Mono with tabular figures; headings are the system sans at weight 600.",
+      "Primary actions are solid ink blocks with paper labels (paper blocks with ink labels in dark mode).",
+      "Dark mode: near-black ground (#131417 canvas, #1B1D21 panels, #F2F3F4 text) with a darker rail (#0C0D0F); the primary action inverts to paper."
     ]
   }
 }
