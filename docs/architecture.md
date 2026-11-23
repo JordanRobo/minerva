@@ -212,9 +212,11 @@ failure or a non-JSON body becomes `code: "network"` and it never throws.
   picker in the app; the primitive owns open state, keyboard handling and
   ARIA, and the trigger keeps focus the whole time) and `ui/FormAlert.svelte`
   (`role="alert"`, `tabindex="-1"` so a failed submit can move focus
-  there). There is no error colour token, so an error is signalled by the
-  alert icon plus a 3 px accent left border and the field's accent outline —
-  never colour alone. The same rule as the rest of the app (6.6): Bits UI
+  there). Error copy carries the semantic error colour
+  (`--minerva-error-text` — the Off Track hue, lifted toward paper in dark
+  mode so small text clears 4.5:1); the alert icon plus the 3 px accent left
+  border and the field's accent outline keep the signal from ever resting on
+  colour alone. The same rule as the rest of the app (6.6): Bits UI
   is the headless layer for every interactive primitive, styled with CSS on
   the `--minerva-*` tokens; custom components remain only where no
   primitive exists.
