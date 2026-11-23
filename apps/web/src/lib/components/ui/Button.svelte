@@ -69,8 +69,10 @@
 		transform: translateY(1px);
 	}
 
-	/* DESIGN.md posture: primary labels are 18px+ — the accent only carries
-	   white (light) or cream (dark) labels at that size or larger. */
+	/* DESIGN.md posture: primary labels are 18px+ — the accent only carries a
+	   paper (light) or ink (dark) label at that size or larger. The label is
+	   --minerva-surface, which flips with the block: white on the ink block in
+	   light mode, near-black on the paper block in dark mode. */
 	:global(.primary) {
 		background: var(--minerva-accent);
 		color: var(--minerva-surface);
@@ -80,10 +82,6 @@
 
 	:global(.primary:hover) {
 		background: color-mix(in oklch, var(--minerva-accent) 88%, black);
-	}
-
-	:global(html.dark .primary) {
-		color: var(--minerva-fg);
 	}
 
 	:global(.secondary) {
